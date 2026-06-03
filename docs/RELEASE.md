@@ -33,6 +33,14 @@ npm run tauri:build:app
 npm run tauri:build:dmg
 ```
 
+For unsigned local macOS app bundles, apply an ad-hoc signature before testing
+or uploading the `.app` directory:
+
+```bash
+codesign --force --deep --sign - src-tauri/target/release/bundle/macos/AutoMD.app
+codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/AutoMD.app
+```
+
 The bundle configuration lives in `src-tauri/tauri.conf.json`:
 
 - Product name: `AutoMD`.
