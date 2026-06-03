@@ -796,7 +796,9 @@ mod tests {
         .expect("mock process spec");
 
         let expected = scripts.join("automd_mock_engine.py").display().to_string();
-        assert_eq!(spec.args[0], expected);
-        assert!(spec.display.contains(&expected));
+        let normalize = |value: &str| value.replace('\\', "/");
+        let expected = normalize(&expected);
+        assert_eq!(normalize(&spec.args[0]), expected);
+        assert!(normalize(&spec.display).contains(&expected));
     }
 }
