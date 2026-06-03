@@ -776,4 +776,27 @@ mod tests {
             .is_some_and(|resume_plan| !resume_plan.checkpoints.is_empty()));
         assert!(final_snapshot.log_tail.iter().any(|line| line.contains("Performance:")));
     }
+
+    #[test]
+    fn mock_process_uses_configured_resource_root() {
+        let root = std::env::temp_dir().join(format!("automd-resource-root-{}", Uuid::new_v4()));
+        let scripts = root.join("scripts");
+        fs::create_dir_all(&scripts).expect("scripts dir");
+        fs::write(scripts.join("automd_mock_engine.py"), "# mock\n").expect("mock script");
+
+        let plan = plan();
+        let project_root = std::env::temp_dir().join(format!("automd-project-{}", Uuid::new_v4()));
+        let spec = process_spec_for(
+            &LocalRunMode::Mock,
+            &plan,
+            &project_root,
+            "runs/mock",
+            &root,
+        )
+        .expect("mock process spec");
+
+        let expected = scripts.join("automd_mock_engine.py").display().to_string();
+        assert_eq!(spec.args[0], expected);
+        assert!(spec.display.contains(&expected));
+    }
 }

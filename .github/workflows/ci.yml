@@ -59,8 +59,8 @@ jobs:
       - name: Run checks
         run: npm run check
 
-  desktop-binary:
-    name: Desktop binary (${{ matrix.name }})
+  desktop-installers:
+    name: Desktop installers (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     needs: check
     strategy:
@@ -69,13 +69,23 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-22.04
-            artifact_path: src-tauri/target/release/automd
+            bundles: deb,appimage
+            artifact_name: AutoMD-installers-linux-x86_64
+            artifact_path: |
+              src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/appimage/*.AppImage
           - name: windows-x86_64
             os: windows-latest
-            artifact_path: src-tauri/target/release/automd.exe
+            bundles: nsis,msi
+            artifact_name: AutoMD-installers-windows-x86_64
+            artifact_path: |
+              src-tauri/target/release/bundle/nsis/*-setup.exe
+              src-tauri/target/release/bundle/msi/*.msi
           - name: macos-arm64
             os: macos-14
-            artifact_path: src-tauri/target/release/automd
+            bundles: dmg
+            artifact_name: AutoMD-installer-macos-arm64
+            artifact_path: src-tauri/target/release/bundle/dmg/*.dmg
 
     steps:
       - name: Checkout
@@ -107,51 +117,20 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build desktop binary without installer bundle
-        run: npm run tauri -- build --no-bundle --ci
-
-      - name: Upload desktop binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: automd-${{ matrix.name }}
-          path: ${{ matrix.artifact_path }}
-          if-no-files-found: error
-
-  macos-app:
-    name: macOS arm64 app bundle
-    runs-on: macos-14
-    needs: check
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Build macOS app bundle
-        run: npm run tauri:build:app
-
-      - name: Ad-hoc sign macOS app bundle
-        run: codesign --force --deep --sign - src-tauri/target/release/bundle/macos/AutoMD.app
+      - name: Build desktop installers
+        run: npm run tauri -- build --bundles ${{ matrix.bundles }} --ci
 
       - name: Verify macOS app bundle signature
+        if: runner.os == 'macOS'
         run: codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/AutoMD.app
 
-      - name: Upload macOS app bundle
+      - name: List generated bundles
+        shell: bash
+        run: find src-tauri/target/release/bundle -maxdepth 3 -type f -print
+
+      - name: Upload desktop installers
         uses: actions/upload-artifact@v4
         with:
-          name: AutoMD-macos-arm64-app
-          path: src-tauri/target/release/bundle/macos/AutoMD.app
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error

@@ -18,26 +18,34 @@ Regenerate desktop icons after changing `scripts/generate_icons.mjs` or the icon
 npm run icons
 ```
 
-## Desktop Bundles
+## Desktop Installers
 
-Build the Tauri desktop package on each target operating system:
+Build the Tauri desktop installer package on each target operating system:
 
 ```bash
-npm run tauri:build
+npm run tauri:build:installers
 ```
 
-On macOS, the app bundle and DMG target can also be built separately:
+Platform-specific installer commands:
+
+```bash
+npm run tauri:build:windows  # Windows: NSIS .exe and MSI .msi
+npm run tauri:build:macos    # macOS: DMG .dmg
+npm run tauri:build:linux    # Linux: Debian .deb and AppImage
+```
+
+On macOS, the raw app bundle can still be built separately for local GUI smoke
+testing, but it is not the primary CI release artifact:
 
 ```bash
 npm run tauri:build:app
-npm run tauri:build:dmg
 ```
 
-For unsigned local macOS app bundles, apply an ad-hoc signature before testing
-or uploading the `.app` directory:
+macOS CI uses Tauri's bundler signing hook with an ad-hoc identity
+(`signingIdentity: "-"`) so the `.app` inside the generated DMG is signed
+before the DMG is assembled. Local raw `.app` builds can be checked with:
 
 ```bash
-codesign --force --deep --sign - src-tauri/target/release/bundle/macos/AutoMD.app
 codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/AutoMD.app
 ```
 
@@ -46,10 +54,17 @@ The bundle configuration lives in `src-tauri/tauri.conf.json`:
 - Product name: `AutoMD`.
 - Application id: `com.noir.automd`.
 - Bundle targets: `all`.
+- macOS signing: ad-hoc signing for non-notarized CI preview builds.
 - Icons: `src-tauri/icons/32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, and `icon.ico`.
 - Frontend output: `dist/`.
 
-Build artifacts are produced under `src-tauri/target/release/bundle/`. On this macOS workspace, `npm run tauri:build:app` produces `bundle/macos/AutoMD.app`, and `npm run tauri:build:dmg` produces `bundle/dmg/AutoMD_0.1.0_aarch64.dmg`. Build on the same OS family as the artifact you want to distribute unless a dedicated cross-compilation pipeline is added.
+Build artifacts are produced under `src-tauri/target/release/bundle/`:
+
+- Windows: `bundle/nsis/*-setup.exe` and `bundle/msi/*.msi`.
+- macOS: `bundle/dmg/*.dmg`.
+- Linux: `bundle/deb/*.deb` and `bundle/appimage/*.AppImage`.
+
+Build on the same OS family as the artifact you want to distribute unless a dedicated cross-compilation pipeline is added. The GitHub Actions workflow does this with one native runner per OS and uploads installer artifacts named `AutoMD-installers-*`.
 
 ## Platform Notes
 
@@ -76,7 +91,7 @@ This keeps the desktop app small and avoids shipping compiled scientific stacks 
 ## Release Checklist
 
 - Run `npm run check`.
-- Build platform bundle with `npm run tauri:build`.
+- Build platform installer with the appropriate `npm run tauri:build:*` command.
 - Launch the packaged app and verify project creation, engine capability display, Workflow parameter mapping, dry-run package generation, mock local run, remote package preview, build recipe export, and report export.
 - Confirm restricted/commercial engines show user-license/install guidance and are not bundled.
 - Include `README.md`, `docs/ENGINE_ADAPTERS.md`, `docs/PROJECT_FORMAT.md`, `docs/SCIENCE_SIDECAR.md`, `docs/PLUGIN_MANIFESTS.md`, and this release guide with the source distribution.

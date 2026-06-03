@@ -411,11 +411,16 @@ pub fn run() {
             std::fs::create_dir_all(&plugin_root)?;
             let db = ProjectDatabase::open(app_dir.join("automd.sqlite"))
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
+            let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let resource_dir = app.path().resource_dir().ok();
+            let task_resource_root = resource_dir
+                .filter(|path| path.join("scripts").join("automd_mock_engine.py").exists())
+                .unwrap_or(current_dir);
             app.manage(AppState {
                 db: Mutex::new(db),
                 project_root,
                 plugin_root,
-                task_manager: TaskManager::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+                task_manager: TaskManager::new(task_resource_root),
             });
             Ok(())
         })

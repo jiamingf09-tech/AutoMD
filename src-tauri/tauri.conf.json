@@ -26,6 +26,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../scripts/automd_mock_engine.py": "scripts/automd_mock_engine.py"
+    },
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

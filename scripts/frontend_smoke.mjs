@@ -81,13 +81,22 @@ const requiredCiText = [
   "windows-latest",
   "macos-14",
   "npm run check",
-  "tauri -- build --no-bundle --ci",
-  "tauri:build:app",
+  "Desktop installers",
+  "deb,appimage",
+  "nsis,msi",
+  "dmg",
+  "bundle/deb/*.deb",
+  "bundle/appimage/*.AppImage",
+  "bundle/nsis/*-setup.exe",
+  "bundle/msi/*.msi",
+  "bundle/dmg/*.dmg",
+  "codesign --verify",
   "actions/upload-artifact@v4",
 ];
 for (const text of requiredCiText) {
   check(ci.includes(text), `CI workflow is missing required text: ${text}`);
 }
+check(!ci.includes("--no-bundle --ci"), "CI workflow should upload installer bundles, not plain binaries");
 
 if (failures.length > 0) {
   console.error("AutoMD frontend smoke failed:");
