@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+.automd/
+.pytest_cache/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
