@@ -316,12 +316,12 @@ fn read_bounded_text(path: &Path) -> Result<String, BuildRunnerError> {
     ))
 }
 
-fn mark_executable_if_needed(path: &Path) -> Result<(), BuildRunnerError> {
+fn mark_executable_if_needed(_path: &Path) -> Result<(), BuildRunnerError> {
     #[cfg(unix)]
-    if path.exists() {
-        let mut permissions = fs::metadata(path)?.permissions();
+    if _path.exists() {
+        let mut permissions = fs::metadata(_path)?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)?;
+        fs::set_permissions(_path, permissions)?;
     }
     Ok(())
 }

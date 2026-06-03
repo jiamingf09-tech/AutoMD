@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="Run a mock AutoMD simulation.")
     parser.add_argument("--plan", required=True, help="Path to automd-plan.json")
     parser.add_argument("--out", default="mock-run", help="Output directory")
@@ -27,7 +32,7 @@ def main() -> int:
     for directory in (analysis_dir, reports_dir, trajectories_dir, checkpoints_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    plan = json.loads(plan_path.read_text())
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     stages = [stage for stage in plan.get("stages", []) if stage.get("enabled", True)]
     log_path = out_dir / "automd-mock.log"
     metrics_path = out_dir / "metrics.jsonl"
