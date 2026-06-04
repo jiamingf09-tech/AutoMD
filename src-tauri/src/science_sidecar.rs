@@ -315,7 +315,7 @@ fn executable(command: &str, label: &str, preferred_bin_dir: Option<&Path>) -> S
             version: None,
             detail: path.display().to_string(),
         },
-        Err(_) => ScienceToolDiagnostic {
+        None => ScienceToolDiagnostic {
             id: command.to_string(),
             label: label.to_string(),
             import_name: None,

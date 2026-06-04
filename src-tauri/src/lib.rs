@@ -343,7 +343,7 @@ fn inspect_science_tool(request: ScienceToolInspectRequest) -> Result<ScienceToo
     if !path.is_file() {
         return Err(format!("路径不存在或不是可执行文件：{}", path.display()));
     }
-    if let Some(import_name) = request.import_name.as_deref() {
+    if let Some(import_name) = request.import_name.clone() {
         let script = format!(
             r#"import importlib.util
 import importlib.metadata as metadata
@@ -372,7 +372,7 @@ except Exception:
                     .ok()
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
-                detail: format!("{} can import {import_name}", path.display()),
+                detail: format!("{} can import {}", path.display(), import_name),
             });
         }
         return Ok(ScienceToolDiagnostic {
@@ -382,7 +382,7 @@ except Exception:
             command: request.command,
             status: DetectionStatus::MissingInstall,
             version: None,
-            detail: format!("{} cannot import {import_name}", path.display()),
+            detail: format!("{} cannot import {}", path.display(), import_name),
         });
     }
 

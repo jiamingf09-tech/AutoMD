@@ -23,7 +23,6 @@ import type {
   GpuBackend,
   LocalRunMode,
   LocalTaskSnapshot,
-  OutputSpec,
   ParameterMappingReport,
   ParameterMappingStatus,
   ProjectDomain,
@@ -358,16 +357,6 @@ const analysisText: Record<AnalysisKind, string> = {
   dihedrals: "二面角",
   contacts: "接触图",
   energyTerms: "能量项"
-};
-
-const outputSpecText: Record<keyof OutputSpec, string> = {
-  generatedInputs: "生成输入",
-  runLogs: "运行日志",
-  checkpoints: "Checkpoint",
-  trajectories: "轨迹",
-  energy: "能量/状态",
-  analysisTables: "分析表",
-  reports: "报告"
 };
 
 const parameterMappingStatusText: Record<ParameterMappingStatus, string> = {
@@ -1129,6 +1118,81 @@ function App() {
       title: "提醒",
       message: `${tool.label} 需由系统、GPU 驱动或集群环境提供，无法一键安装。已打开使用指引。`
     });
+  }
+
+  function patchScienceTool(toolId: string, patch: Partial<ScienceToolDiagnostic>) {
+    setScienceDiagnostics((current) => current
+      ? {
+          ...current,
+          tools: current.tools.map((tool) => tool.id === toolId ? { ...tool, ...patch } : tool)
+        }
+      : current
+    );
+  }
+
+  async function autoFindScienceTool(tool: ScienceToolDiagnostic) {
+    const taskId = startBackgroundTask(`自动查找 ${tool.label}`, "search", "刷新 AutoMD 科学环境和系统 Python 检测");
+    try {
+      updateBackgroundTask(taskId, { progress: 45, detail: "检查内置 automd-science、系统 python3 和 AmberTools 命令" });
+      const diagnostics = await api.scienceSidecarDiagnostics();
+      setScienceDiagnostics(diagnostics);
+      const refreshed = diagnostics.tools.find((item) => item.id === tool.id);
+      finishBackgroundTask(
+        taskId,
+        refreshed?.status === "ready" ? `${tool.label} 已可用` : `${tool.label} 仍未找到`,
+        refreshed?.status === "ready" ? "completed" : "failed"
+      );
+    } catch (caught) {
+      finishBackgroundTask(taskId, "自动查找失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function manualFindScienceTool(tool: ScienceToolDiagnostic) {
+    const isPythonModule = Boolean(tool.importName);
+    const title = isPythonModule
+      ? `选择可导入 ${tool.label} 的 Python 可执行文件`
+      : `选择 ${tool.label} 可执行文件`;
+    const taskId = startBackgroundTask(`手动选择 ${tool.label}`, "search", title);
+    try {
+      const selectedPath = await api.pickFile({ title, extensions: [] });
+      if (!selectedPath) {
+        finishBackgroundTask(taskId, "已取消手动选择");
+        return;
+      }
+      updateBackgroundTask(taskId, { progress: 65, detail: isPythonModule ? "正在测试 Python import" : "正在检查可执行文件" });
+      const inspected = await api.inspectScienceTool({
+        id: tool.id,
+        label: tool.label,
+        importName: tool.importName ?? null,
+        command: tool.command ?? null,
+        executablePath: selectedPath
+      });
+      patchScienceTool(tool.id, inspected);
+      finishBackgroundTask(
+        taskId,
+        inspected.status === "ready" ? `${tool.label} 已可用` : `${tool.label} 仍不可用`,
+        inspected.status === "ready" ? "completed" : "failed"
+      );
+    } catch (caught) {
+      finishBackgroundTask(taskId, "手动选择失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function autoInstallScienceSidecar() {
+    const taskId = startBackgroundTask("安装 Python 科学侧车", "install", "准备 conda-forge automd-science 环境");
+    try {
+      updateBackgroundTask(taskId, { progress: 25, detail: "检查 Conda/Mamba；缺失时自动安装 Miniforge" });
+      const diagnostics = await api.installScienceSidecar();
+      setScienceDiagnostics(diagnostics);
+      const readyCount = diagnostics.tools.filter((tool) => tool.status === "ready").length;
+      finishBackgroundTask(taskId, `科学侧车安装完成：${readyCount}/${diagnostics.tools.length} 项可用`);
+      notifySuccess("AutoMD 科学侧车已通过 conda-forge 安装完成。", "已安装");
+    } catch (caught) {
+      finishBackgroundTask(taskId, "科学侧车安装失败", "failed");
+      reportError(caught);
+    }
   }
 
   async function autoFindEngine(engine: EngineCapability) {
@@ -2238,6 +2302,9 @@ function App() {
             updateStageParameter={updateStageParameter}
             toggleStage={toggleStage}
             generatePreparationPackage={generatePreparationPackage}
+            autoFindScienceTool={autoFindScienceTool}
+            manualFindScienceTool={manualFindScienceTool}
+            autoInstallScienceSidecar={autoInstallScienceSidecar}
           />
         )}
 
@@ -2860,11 +2927,12 @@ function GuidePanel({
           <div><dt>Mock runner</dt><dd>内置模拟器，用于测试 GUI、日志刷新、checkpoint、artifact 和报告闭环。</dd></div>
           <div><dt>真实执行</dt><dd>调用用户配置的本地引擎。执行前确认路径、许可证、GPU/MPI、项目目录、输出频率和 checkpoint 间隔。</dd></div>
           <div><dt>Checkpoint</dt><dd>中断后优先找 checkpoint resume。不要直接删除 run directory，否则会丢失恢复依据。</dd></div>
-          <div><dt>轨迹</dt><dd>先索引，再分块加载。大轨迹不要一次性加载；先抽样预览，再交给 MDAnalysis 生成分析包。</dd></div>
-          <div><dt>分析</dt><dd>RMSD 看整体稳定性，RMSF 看残基波动，Rg 看紧密程度，氢键/距离/角度/二面角看局部事件，能量/温度/压力看运行质量。</dd></div>
-          <div><dt>报告</dt><dd>报告应包含环境、参数、命令、日志、分析图表、artifact、checkpoint 和可复现记录。</dd></div>
-        </dl>
-      </section>
+            <div><dt>轨迹</dt><dd>先索引，再分块加载。大轨迹不要一次性加载；先抽样预览，再交给 MDAnalysis 生成分析包。</dd></div>
+            <div><dt>分析</dt><dd>RMSD 看整体稳定性，RMSF 看残基波动，Rg 看紧密程度，氢键/距离/角度/二面角看局部事件，能量/温度/压力看运行质量。</dd></div>
+            <div><dt>预期输出</dt><dd>这是 AutoMD 用来识别文件的路径约定，例如 generated 输入、runs 日志、checkpoints、trajectories、analysis 和 reports。普通用户只需要在运行完成后看 artifact 列表，不需要在流程页手动改这些路径。</dd></div>
+            <div><dt>报告</dt><dd>报告应包含环境、参数、命令、日志、分析图表、artifact、checkpoint 和可复现记录。</dd></div>
+          </dl>
+        </section>
 
       <section className="panel span-3">
         <div className="panel-title-row">
@@ -3569,6 +3637,67 @@ function EnginesPanel({
   );
 }
 
+type ScienceToolUsage = {
+  role: "required" | "optional" | "notApplicable";
+  label: string;
+  detail: string;
+};
+
+function scienceToolUsage(plan: SimulationPlan, toolId: string): ScienceToolUsage {
+  const engineId = plan.engineId;
+  const hasLigand = plan.system.hasLigand;
+  const notApplicable = (detail: string): ScienceToolUsage => ({ role: "notApplicable", label: "本引擎不需要", detail });
+  const required = (detail: string): ScienceToolUsage => ({ role: "required", label: "当前引擎需要", detail });
+  const ligandOnly = (detail: string): ScienceToolUsage =>
+    hasLigand ? required(detail) : notApplicable("当前体系没有配体，暂不需要配体参数化工具。");
+  const analysis = (detail: string): ScienceToolUsage => ({ role: "optional", label: "分析/预处理可用", detail });
+
+  if (engineId === "openmm") {
+    if (["openmm", "pdbfixer", "mdanalysis", "mdtraj"].includes(toolId)) {
+      return required("OpenMM 流程、结构修复或轨迹分析会用到。");
+    }
+    if (["rdkit", "openbabel"].includes(toolId)) {
+      return ligandOnly("配体体系会用它处理小分子格式和参数化前准备。");
+    }
+    return notApplicable("OpenMM 路线不需要 AmberTools 命令行工具。");
+  }
+
+  if (engineId === "ambertools" || engineId === "amber_pmemd") {
+    if (["tleap", "antechamber", "parmchk2", "cpptraj"].includes(toolId)) {
+      return required("Amber/AmberTools 输入生成和分析需要这些命令。");
+    }
+    if (["rdkit", "openbabel"].includes(toolId)) {
+      return ligandOnly("配体体系会用它做小分子格式转换或参数检查。");
+    }
+    if (["mdanalysis", "mdtraj"].includes(toolId)) {
+      return analysis("可用于独立轨迹分析；AmberTools 自带 cpptraj 也可完成一部分分析。");
+    }
+    return notApplicable("AmberTools 路线不需要 OpenMM/PDBFixer 作为必需依赖。");
+  }
+
+  if (["gromacs", "namd", "charmm"].includes(engineId)) {
+    if (["pdbfixer", "mdanalysis", "mdtraj"].includes(toolId)) {
+      return required("结构准备、轨迹索引或分析会用到。");
+    }
+    if (["rdkit", "openbabel", "antechamber", "parmchk2", "tleap"].includes(toolId)) {
+      return ligandOnly("配体体系需要额外的小分子处理或拓扑准备工具。");
+    }
+    if (toolId === "cpptraj") {
+      return analysis("可用于部分轨迹/能量后处理，但不是当前引擎启动的必需项。");
+    }
+    return notApplicable("当前引擎不需要这个 Python/AmberTools 组件作为必需依赖。");
+  }
+
+  if (["lammps", "cp2k", "genesis", "hoomd", "dl_poly", "tinker"].includes(engineId)) {
+    if (["mdanalysis", "mdtraj"].includes(toolId)) {
+      return analysis("可用于部分通用轨迹分析；材料/QM/MM 模板通常还需要引擎自己的分析工具。");
+    }
+    return notApplicable("当前材料/QM/MM 路线不依赖这个生物分子科学侧车组件。");
+  }
+
+  return analysis("可用于结构准备或分析，但当前引擎模板不强制要求。");
+}
+
 function WorkflowPanel({
   plan,
   validation,
@@ -3578,7 +3707,10 @@ function WorkflowPanel({
   updatePlan,
   updateStageParameter,
   toggleStage,
-  generatePreparationPackage
+  generatePreparationPackage,
+  autoFindScienceTool,
+  manualFindScienceTool,
+  autoInstallScienceSidecar
 }: {
   plan: SimulationPlan;
   validation: ValidationReport | null;
@@ -3589,11 +3721,29 @@ function WorkflowPanel({
   updateStageParameter: (stageId: string, key: string, value: string) => void;
   toggleStage: (stageId: string) => void;
   generatePreparationPackage: () => void;
+  autoFindScienceTool: (tool: ScienceToolDiagnostic) => void;
+  manualFindScienceTool: (tool: ScienceToolDiagnostic) => void;
+  autoInstallScienceSidecar: () => void;
 }) {
+  const productionStage = plan.stages.find((stage) => stage.id === "production");
+  const productionDurationNs = productionStage?.parameters.durationNs ?? "";
+  const scienceTools = scienceDiagnostics?.tools.map((tool) => ({
+    tool,
+    usage: scienceToolUsage(plan, tool.id),
+    status: scienceToolUsage(plan, tool.id).role === "notApplicable" ? "notApplicable" as DetectionStatus : tool.status
+  })) ?? [];
+  const neededScienceTools = scienceTools.filter((entry) => entry.usage.role !== "notApplicable");
+  const readyScienceCount = neededScienceTools.filter((entry) => entry.status === "ready").length;
+
   return (
     <div className="content-grid">
       <section className="panel span-2">
-        <h3>SimulationPlan</h3>
+        <div className="panel-title-row">
+          <div>
+            <h3>模拟参数</h3>
+            <p className="muted">这里填写和科学体系直接相关的参数；集群 walltime 属于远程/资源设置，不等于模拟长度。</p>
+          </div>
+        </div>
         <div className="form-grid three">
           <label>
             体系名
@@ -3672,18 +3822,13 @@ function WorkflowPanel({
             />
           </label>
           <label>
-            生产时长 (h)
+            生产模拟长度 (ns)
             <input
               type="number"
-              min="1"
+              min="0.001"
               step="1"
-              value={plan.resources.walltimeHours}
-              onChange={(event) =>
-                updatePlan((current) => ({
-                  ...current,
-                  resources: { ...current.resources, walltimeHours: Number(event.target.value) }
-                }))
-              }
+              value={productionDurationNs}
+              onChange={(event) => updateStageParameter("production", "durationNs", event.target.value)}
             />
           </label>
         </div>
@@ -3710,44 +3855,54 @@ function WorkflowPanel({
           ))}
         </div>
       </section>
-      <section className="panel span-3">
-        <h3>预期输出</h3>
-        <div className="output-spec-grid">
-          {(Object.entries(plan.outputs) as Array<[keyof OutputSpec, string[]]>).map(([key, paths]) => (
-            <div className="output-spec-group" key={key}>
-              <strong>{outputSpecText[key]}</strong>
-              <div className="chip-row outputs">
-                {paths.map((path) => (
-                  <span className="mono" key={path}>{path}</span>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </section>
-      <section className="panel span-3">
-        <h3>多引擎参数映射</h3>
+      <details className="panel span-3 advanced-panel">
+        <summary>高级：当前引擎原生参数预览</summary>
+        <p className="muted">
+          这不是另一套需要你重新填写的参数，而是把上面的 GUI 参数翻译成 {engineLabel[plan.engineId] ?? plan.engineId}
+          会写入的原生字段。需复核表示模板能给出建议，但正式生产前应打开生成文件确认。
+        </p>
         <ParameterMappingList report={parameterMappingReport} />
-      </section>
+      </details>
       <section className="panel span-3">
         <div className="panel-title-row">
-          <h3>Python 科学侧车</h3>
+          <div>
+            <h3>结构准备与分析环境</h3>
+            <p className="muted">
+              用于修复结构、加氢、配体处理、OpenMM 快速验证和轨迹分析。当前引擎不需要的项目会显示“不适用”。
+            </p>
+          </div>
           <button type="button" className="primary" onClick={generatePreparationPackage}>
-            生成结构准备包
+            生成结构准备文件
           </button>
         </div>
         <div className="sidecar-grid">
           <div>
-            <h4>依赖诊断</h4>
+            <h4>环境检查</h4>
             {scienceDiagnostics ? (
               <div className="tool-list compact-tools">
-                {scienceDiagnostics.tools.map((tool) => (
-                  <div className="tool-row" key={tool.id}>
+                <div className="sidecar-summary">
+                  <strong>{readyScienceCount}/{neededScienceTools.length} 项可用</strong>
+                  <small>Python: {scienceDiagnostics.pythonExecutable ?? "未找到"}</small>
+                  <button type="button" className="primary" onClick={autoInstallScienceSidecar}>
+                    一键安装/修复科学环境
+                  </button>
+                </div>
+                {scienceTools.map(({ tool, usage, status }) => (
+                  <div className={`tool-row ${status !== "ready" && status !== "notApplicable" ? "needs-action" : ""}`} key={tool.id}>
                     <div>
                       <strong>{tool.label}</strong>
-                      <small>{tool.importName ?? tool.command ?? tool.id}</small>
+                      <small>{usage.label} · {tool.importName ?? tool.command ?? tool.id}</small>
                     </div>
-                    <StatusPill status={tool.status} />
+                    <StatusPill status={status} />
+                    {status !== "ready" && status !== "notApplicable" ? (
+                      <div className="tool-action-row">
+                        <button type="button" onClick={() => autoFindScienceTool(tool)}>自动查找</button>
+                        <button type="button" onClick={() => manualFindScienceTool(tool)}>手动查找</button>
+                        <button type="button" className="primary" onClick={autoInstallScienceSidecar}>一键安装</button>
+                      </div>
+                    ) : (
+                      <small className="mono">{status === "notApplicable" ? usage.detail : tool.detail}</small>
+                    )}
                   </div>
                 ))}
               </div>
@@ -3756,11 +3911,18 @@ function WorkflowPanel({
             )}
           </div>
           <div>
-            <h4>推荐环境</h4>
-            <CodeBlock value={scienceDiagnostics?.environmentRecipe ?? "等待侧车诊断。"} />
+            <h4>一键环境</h4>
+            <div className="sidecar-explain">
+              <p>推荐环境就是 AutoMD 管理的 Python 环境，默认名为 automd-science。它会安装结构准备和分析常用包，不写入系统 Python。</p>
+              <p>一般用户只需要点“一键安装/修复科学环境”；YAML 仅用于高级复现、HPC 或手动 Conda/Mamba 配置。</p>
+              <details>
+                <summary>查看 environment.yml 预览</summary>
+                <CodeBlock value={scienceDiagnostics?.environmentRecipe ?? "等待侧车诊断。"} />
+              </details>
+            </div>
           </div>
           <div>
-            <h4>准备包</h4>
+            <h4>结构准备文件</h4>
             {preparationPackage ? (
               <div className="run-package">
                 <dl className="definition-list">
@@ -3784,7 +3946,7 @@ function WorkflowPanel({
                 </div>
               </div>
             ) : (
-              <EmptyState title="尚未生成准备包" text="准备包会写入 PDBFixer/OpenMM 脚本、environment.yml 和配体参数化指引。" />
+              <EmptyState title="尚未生成" text="点击后会写入结构修复/加氢脚本、环境文件和配体处理说明；这是运行前输入准备，不是模拟结果。" />
             )}
           </div>
         </div>
@@ -3803,7 +3965,7 @@ function WorkflowPanel({
         </div>
       </section>
       <section className="panel span-3">
-        <h3>校验结果</h3>
+        <h3>参数检查</h3>
         <ValidationList validation={validation} />
       </section>
     </div>
@@ -3831,11 +3993,6 @@ function StageEditor({
             {key}
             <input value={value} onChange={(event) => updateStageParameter(stage.id, key, event.target.value)} />
           </label>
-        ))}
-      </div>
-      <div className="chip-row outputs">
-        {stage.expectedOutputs.map((output) => (
-          <span key={output}>{output}</span>
         ))}
       </div>
     </div>
@@ -5603,7 +5760,6 @@ function ParameterMappingList({ report }: { report: ParameterMappingReport | nul
       <div className="parameter-mapping-summary">
         <strong>{engineLabel[report.engineId] ?? report.engineId}</strong>
         <span>{report.items.length} 条参数映射</span>
-        <small>{new Date(report.generatedAt).toLocaleString()}</small>
       </div>
       {report.warnings.length ? (
         <div className="warning-stack">
@@ -5653,13 +5809,28 @@ function MappingStatusPill({ status }: { status: ParameterMappingStatus }) {
 
 function ValidationList({ validation }: { validation: ValidationReport | null }) {
   if (!validation) {
-    return <EmptyState title="等待校验" text="生成或修改 SimulationPlan 后自动刷新。" />;
+    return <EmptyState title="等待检查" text="创建项目或修改参数后，AutoMD 会自动检查是否缺少必须处理的问题。" />;
   }
+  const summaryText: Record<ValidationReport["status"], { title: string; text: string }> = {
+    valid: {
+      title: "参数检查通过",
+      text: "暂未发现必须处理的问题，可以继续生成结构准备文件或运行包。"
+    },
+    validWithWarnings: {
+      title: "有提示需要阅读",
+      text: "可以继续，但建议先看下面的 warning，确认它们符合你的体系和引擎选择。"
+    },
+    invalid: {
+      title: "需要先修正参数",
+      text: "存在 error 时不要运行；先按下面的字段和说明修改参数或结构输入。"
+    }
+  };
+  const summary = summaryText[validation.status];
   return (
     <div className="validation-list">
       <div className={`validation-summary ${validation.status}`}>
-        <strong>{validation.status}</strong>
-        <span>{validation.items.length} 条消息</span>
+        <strong>{summary.title}</strong>
+        <span>{validation.items.length ? `${validation.items.length} 条提示` : summary.text}</span>
       </div>
       {validation.items.map((item, index) => (
         <div className={`validation-item ${item.severity}`} key={`${item.field}-${index}`}>
