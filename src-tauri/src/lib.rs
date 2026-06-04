@@ -16,6 +16,7 @@ mod remote_runner;
 mod runtime;
 mod science_sidecar;
 mod structure_import;
+mod sysenv;
 mod task_runner;
 mod trajectory;
 
@@ -196,12 +197,9 @@ fn install_engine(
     let package = engine_conda_package(&engine_id).ok_or_else(|| {
         format!("{engine_id} 暂不支持一键安装（通常需要许可或手动编译），请在指引页查看安装方式。")
     })?;
-    let manager = ["micromamba", "mamba", "conda"]
-        .iter()
-        .find_map(|candidate| which::which(candidate).ok())
-        .ok_or_else(|| {
-            "未检测到 conda / mamba / micromamba。请先安装 Miniforge（https://conda-forge.org/download/）后重试，或在指引页查看说明。".to_string()
-        })?;
+    let manager = sysenv::resolve_conda_manager().ok_or_else(|| {
+        "未检测到 conda / mamba / micromamba。请先安装 Miniforge（https://conda-forge.org/download/）后重试，或在指引页查看说明。".to_string()
+    })?;
 
     std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
     let prefix = state.engines_root.join(&engine_id);
@@ -249,6 +247,67 @@ fn install_engine(
     Ok(record)
 }
 
+/// (conda-forge package, primary executable) for runtime tools that can be
+/// installed with one click. GPU drivers, schedulers and system tools are
+/// intentionally absent — they need the OS/vendor/cluster, not conda.
+fn tool_conda_spec(tool_id: &str) -> Option<(&'static str, &'static str)> {
+    match tool_id {
+        "mpirun" => Some(("openmpi", "mpirun")),
+        "plumed" => Some(("plumed", "plumed")),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn list_installable_tools() -> Vec<String> {
+    ["mpirun", "plumed"].iter().map(|id| id.to_string()).collect()
+}
+
+/// One-click install for a runtime tool via conda-forge. Returns the absolute
+/// path of the installed binary (the UI marks the tool ready with it).
+#[tauri::command]
+fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let (package, exe) = tool_conda_spec(&tool_id).ok_or_else(|| {
+        format!("{tool_id} 暂不支持一键安装（通常由系统、GPU 驱动或集群提供），请在指引页查看说明。")
+    })?;
+    let manager = sysenv::resolve_conda_manager()
+        .ok_or_else(|| "未检测到 conda / mamba / micromamba，无法一键安装该工具。".to_string())?;
+
+    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+    let prefix = state.engines_root.join("_tools").join(&tool_id);
+
+    let output = Command::new(&manager)
+        .arg("create")
+        .arg("-y")
+        .arg("-p")
+        .arg(&prefix)
+        .arg("-c")
+        .arg("conda-forge")
+        .arg(package)
+        .output()
+        .map_err(|error| format!("启动安装器失败：{error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("{tool_id} 安装失败：\n{}", tail.trim()));
+    }
+
+    let binary = prefix.join("bin").join(exe);
+    if !binary.is_file() {
+        return Err(format!("{tool_id} 安装完成，但未找到 {}。", binary.display()));
+    }
+    Ok(binary.display().to_string())
+}
+
 #[tauri::command]
 fn list_plugin_manifests(state: tauri::State<'_, AppState>) -> Result<PluginRegistrySnapshot, String> {
     plugins::registry_snapshot(&state.plugin_root).map_err(|error| error.to_string())
@@ -280,7 +339,9 @@ fn pick_file_in_system(request: FilePickRequest) -> Result<Option<String>, Strin
 #[tauri::command]
 fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchResult, String> {
     let mut checked_locations = Vec::new();
-    let mut dirs = common_executable_dirs();
+    // search_dirs() recovers the login-shell PATH + conda install dirs/envs so a
+    // GUI launch (minimal PATH) still finds conda-installed tools.
+    let mut dirs = sysenv::search_dirs();
     dirs.extend(request.extra_dirs.into_iter().map(PathBuf::from));
 
     for command in request.commands.iter().filter(|command| !command.trim().is_empty()) {
@@ -295,7 +356,7 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
         }
 
         let command_path = PathBuf::from(command);
-        if command_path.components().count() > 1 && is_existing_file(&command_path) {
+        if command_path.components().count() > 1 && command_path.is_file() {
             return Ok(ExecutableSearchResult {
                 found: true,
                 command: Some(command.clone()),
@@ -306,16 +367,16 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
         }
 
         for dir in &dirs {
-            for candidate in executable_candidates(command) {
+            for candidate in sysenv::executable_candidates(command) {
                 let path = dir.join(&candidate);
                 checked_locations.push(path.display().to_string());
-                if is_existing_file(&path) {
+                if path.is_file() {
                     return Ok(ExecutableSearchResult {
                         found: true,
                         command: Some(command.clone()),
                         path: Some(path.display().to_string()),
                         checked_locations,
-                        message: format!("已在常见安装目录中找到 {command}。"),
+                        message: format!("已在 {} 找到 {command}。", dir.display()),
                     });
                 }
             }
@@ -327,7 +388,7 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
         command: None,
         path: None,
         checked_locations,
-        message: "自动查找未发现可执行文件。可以手动选择，或进入自动安装/编译向导。".to_string(),
+        message: "自动查找未发现可执行文件（已扫描 PATH、shell 环境与 conda 安装目录）。可手动选择，或使用一键安装。".to_string(),
     })
 }
 
@@ -420,46 +481,6 @@ fn pick_file_linux(title: &str) -> Result<Option<String>, String> {
         }
     }
     Err("当前 Linux 环境未检测到 zenity/kdialog，无法打开图形文件选择器。".to_string())
-}
-
-fn common_executable_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-        PathBuf::from("/opt/local/bin"),
-        PathBuf::from("/opt/conda/bin"),
-        PathBuf::from("/opt/gromacs/bin"),
-        PathBuf::from("/usr/local/gromacs/bin"),
-        PathBuf::from("/Applications/Docker.app/Contents/Resources/bin"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        for suffix in [
-            "miniconda3/bin",
-            "miniforge3/bin",
-            "mambaforge/bin",
-            "micromamba/bin",
-            "anaconda3/bin",
-            ".local/bin",
-            "gromacs/bin",
-        ] {
-            dirs.push(PathBuf::from(&home).join(suffix));
-        }
-    }
-    dirs
-}
-
-fn executable_candidates(command: &str) -> Vec<String> {
-    if cfg!(target_os = "windows") && !command.to_ascii_lowercase().ends_with(".exe") {
-        vec![command.to_string(), format!("{command}.exe")]
-    } else {
-        vec![command.to_string()]
-    }
-}
-
-fn is_existing_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 fn escape_applescript(value: &str) -> String {
@@ -774,6 +795,8 @@ pub fn run() {
             delete_engine_installation,
             list_installable_engines,
             install_engine,
+            list_installable_tools,
+            install_tool,
             list_plugin_manifests,
             open_plugin_folder,
             open_path_in_system,

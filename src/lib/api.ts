@@ -139,6 +139,10 @@ export const api = {
       authorizationStatus: "ready",
       checkedAt: new Date().toISOString()
     })),
+  listInstallableTools: () =>
+    call<string[]>("list_installable_tools", undefined, () => ["mpirun", "plumed"]),
+  installTool: (toolId: string) =>
+    call<string>("install_tool", { toolId }, () => `/mock/tools/${toolId}/bin/${toolId}`),
   runtimeDiagnostics: () =>
     call<RuntimeDiagnostics>("get_runtime_diagnostics", undefined, () => mockDiagnostics),
   scienceSidecarDiagnostics: () =>

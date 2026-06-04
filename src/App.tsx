@@ -446,6 +446,7 @@ function App() {
   const [engines, setEngines] = useState<EngineCapability[]>([]);
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallationRecord[]>([]);
   const [installableEngines, setInstallableEngines] = useState<string[]>(["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]);
+  const [installableTools, setInstallableTools] = useState<string[]>(["mpirun", "plumed"]);
   const [engineInstallationDraft, setEngineInstallationDraft] = useState<EngineInstallationRecord>({
     engineId: "gromacs",
     location: "",
@@ -665,6 +666,7 @@ function App() {
       setEngines(capabilities);
       setEngineInstallations(installations);
       void api.listInstallableEngines().then(setInstallableEngines).catch(() => undefined);
+      void api.listInstallableTools().then(setInstallableTools).catch(() => undefined);
       if (capabilities[0]) {
         setEngineInstallationDraft((current) => ({ ...current, engineId: capabilities[0].id }));
       }
@@ -949,20 +951,28 @@ function App() {
   }
 
   async function autoInstallTool(tool: ToolDiagnostic) {
-    const taskId = startBackgroundTask(`自动安装 ${tool.label}`, "install", "准备安装/编译入口");
-    try {
-      updateBackgroundTask(taskId, { progress: 35, detail: "判断是否可由当前引擎编译向导处理" });
-      if (["mpirun", "plumed", "nvidia-smi", "rocminfo"].includes(tool.id)) {
-        await generateRecipes(selectedEngineId);
-        finishBackgroundTask(taskId, "已打开编译页，可生成含 MPI/PLUMED/GPU 选项的一站式脚本。");
-        return;
+    // Conda-installable tools (MPI, PLUMED) install for real, no compilation.
+    if (installableTools.includes(tool.id)) {
+      const taskId = startBackgroundTask(`安装 ${tool.label}`, "install", "通过 conda-forge 下载并安装（可能需要几分钟）");
+      try {
+        updateBackgroundTask(taskId, { progress: 40, detail: "创建隔离环境并解析依赖…" });
+        const path = await api.installTool(tool.id);
+        patchRuntimeTool(tool.id, { status: "ready", detail: path });
+        finishBackgroundTask(taskId, `${tool.label} 已安装：${fileNameFromPath(path)}`);
+        notifySuccess(`${tool.label} 已通过 conda-forge 安装完成，可直接使用。`, "已安装");
+      } catch (caught) {
+        finishBackgroundTask(taskId, `${tool.label} 安装失败`, "failed");
+        reportError(caught);
       }
-      setActiveTab("guide");
-      finishBackgroundTask(taskId, "该工具通常需要外部安装器或系统包管理器，已打开使用指引。");
-    } catch (caught) {
-      finishBackgroundTask(taskId, "自动安装入口准备失败", "failed");
-      reportError(caught);
+      return;
     }
+    // GPU drivers / Docker / cluster schedulers can't be installed by conda — guide.
+    setActiveTab("guide");
+    pushNotification({
+      severity: "info",
+      title: "提醒",
+      message: `${tool.label} 需由系统、GPU 驱动或集群环境提供，无法一键安装。已打开使用指引。`
+    });
   }
 
   async function autoFindEngine(engine: EngineCapability) {
@@ -2104,6 +2114,7 @@ function App() {
             autoFindTool={autoFindTool}
             manualFindTool={manualFindTool}
             autoInstallTool={autoInstallTool}
+            installableTools={installableTools}
           />
         )}
 
@@ -4118,7 +4129,8 @@ function RemotePanel({
   generateRemotePackage,
   autoFindTool,
   manualFindTool,
-  autoInstallTool
+  autoInstallTool,
+  installableTools
 }: {
   diagnostics: RuntimeDiagnostics | null;
   plan: SimulationPlan | null;
@@ -4151,6 +4163,7 @@ function RemotePanel({
   autoFindTool: (tool: ToolDiagnostic) => void;
   manualFindTool: (tool: ToolDiagnostic) => void;
   autoInstallTool: (tool: ToolDiagnostic) => void;
+  installableTools: string[];
 }) {
   const selectedProfile = remoteProfiles.find((profile) => profile.id === selectedRemoteProfileId) ?? remoteProfiles[0];
   const selectedIsTemplate = selectedProfile?.id.endsWith("-template") ?? true;
@@ -4176,7 +4189,9 @@ function RemotePanel({
                   <div className="tool-action-row">
                     <button type="button" onClick={() => autoFindTool(tool)}>自动查找</button>
                     <button type="button" onClick={() => manualFindTool(tool)}>手动查找</button>
-                    <button type="button" className="primary" onClick={() => autoInstallTool(tool)}>自动安装</button>
+                    <button type="button" className="primary" onClick={() => autoInstallTool(tool)}>
+                      {installableTools.includes(tool.id) ? "一键安装" : "自动安装"}
+                    </button>
                   </div>
                 ) : (
                   <small className="mono">{tool.detail}</small>

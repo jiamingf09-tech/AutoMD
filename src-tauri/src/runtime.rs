@@ -81,20 +81,20 @@ fn diagnostic(id: &str, label: &str, command: &str, gpu_info: &LocalGpuInfo) -> 
         return gpu_tool_diagnostic(id, label, command, gpu_info, LocalGpuKind::Amd);
     }
 
-    match which::which(command) {
-        Ok(path) => ToolDiagnostic {
+    match crate::sysenv::resolve_command(command) {
+        Some(path) => ToolDiagnostic {
             id: id.to_string(),
             label: label.to_string(),
             command: command.to_string(),
             status: DetectionStatus::Ready,
             detail: path.display().to_string(),
         },
-        Err(_) => ToolDiagnostic {
+        None => ToolDiagnostic {
             id: id.to_string(),
             label: label.to_string(),
             command: command.to_string(),
             status: DetectionStatus::MissingInstall,
-            detail: "可自动查找、手动选择或打开自动安装向导。".to_string(),
+            detail: "可自动查找、手动选择或一键安装。".to_string(),
         },
     }
 }
@@ -106,7 +106,7 @@ fn gpu_tool_diagnostic(
     gpu_info: &LocalGpuInfo,
     target_gpu: LocalGpuKind,
 ) -> ToolDiagnostic {
-    if let Ok(path) = which::which(command) {
+    if let Some(path) = crate::sysenv::resolve_command(command) {
         return ToolDiagnostic {
             id: id.to_string(),
             label: label.to_string(),
