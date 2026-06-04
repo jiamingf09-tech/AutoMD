@@ -800,6 +800,7 @@ fn detection_status_to_str(value: &DetectionStatus) -> &'static str {
         DetectionStatus::MissingLicense => "missingLicense",
         DetectionStatus::PlatformUnsupported => "platformUnsupported",
         DetectionStatus::RemoteRecommended => "remoteRecommended",
+        DetectionStatus::NotApplicable => "notApplicable",
     }
 }
 
@@ -810,6 +811,7 @@ fn detection_status_from_str(value: &str) -> Result<DetectionStatus, StoreError>
         "missingLicense" => Ok(DetectionStatus::MissingLicense),
         "platformUnsupported" => Ok(DetectionStatus::PlatformUnsupported),
         "remoteRecommended" => Ok(DetectionStatus::RemoteRecommended),
+        "notApplicable" => Ok(DetectionStatus::NotApplicable),
         other => Err(StoreError::InvalidEnumValue(other.to_string())),
     }
 }

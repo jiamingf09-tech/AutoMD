@@ -28,8 +28,13 @@ const requiredUiText = [
   "快速切换项目",
   "打开文件夹",
   "创建项目",
+  "浏览",
   "导入到 inputs/",
   "等待结构导入",
+  "自动查找",
+  "手动查找",
+  "自动安装",
+  "不适用",
   "生成结构准备包",
   "多引擎参数映射",
   "生成 batch package",
@@ -44,6 +49,7 @@ const requiredUiText = [
   "导出 PDF",
   "打开插件目录",
   "插件目录由当前系统的应用数据目录动态生成",
+  "后台任务",
   "GPU 状态检测中",
 ];
 for (const text of requiredUiText) {

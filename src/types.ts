@@ -11,7 +11,8 @@ export type DetectionStatus =
   | "missingInstall"
   | "missingLicense"
   | "platformUnsupported"
-  | "remoteRecommended";
+  | "remoteRecommended"
+  | "notApplicable";
 export type ExecutionMode =
   | "localProcess"
   | "condaEnvironment"
@@ -420,6 +421,24 @@ export interface ToolDiagnostic {
   command: string;
   status: DetectionStatus;
   detail: string;
+}
+
+export interface FilePickRequest {
+  title?: string | null;
+  extensions: string[];
+}
+
+export interface ExecutableSearchRequest {
+  commands: string[];
+  extraDirs: string[];
+}
+
+export interface ExecutableSearchResult {
+  found: boolean;
+  command?: string | null;
+  path?: string | null;
+  checkedLocations: string[];
+  message: string;
 }
 
 export interface RuntimeDiagnostics {

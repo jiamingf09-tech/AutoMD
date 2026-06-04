@@ -240,7 +240,9 @@ export const mockDiagnostics: RuntimeDiagnostics = {
     { id: "conda", label: "Conda", command: "conda", status: "missingInstall", detail: "Web 预览模式" },
     { id: "docker", label: "Docker", command: "docker", status: "missingInstall", detail: "Web 预览模式" },
     { id: "ssh", label: "SSH", command: "ssh", status: "missingInstall", detail: "Web 预览模式" },
-    { id: "sbatch", label: "SLURM sbatch", command: "sbatch", status: "missingInstall", detail: "Web 预览模式" }
+    { id: "sbatch", label: "SLURM sbatch", command: "sbatch", status: "missingInstall", detail: "Web 预览模式" },
+    { id: "nvidia-smi", label: "CUDA / NVIDIA", command: "nvidia-smi", status: "notApplicable", detail: "Web 预览模式无法确认 NVIDIA GPU，桌面应用会按本机显卡判断。" },
+    { id: "rocminfo", label: "ROCm", command: "rocminfo", status: "notApplicable", detail: "Web 预览模式无法确认 AMD GPU，桌面应用会按本机显卡判断。" }
   ]
 };
 

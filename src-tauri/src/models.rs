@@ -99,6 +99,7 @@ pub enum DetectionStatus {
     MissingLicense,
     PlatformUnsupported,
     RemoteRecommended,
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -623,6 +624,30 @@ pub struct ToolDiagnostic {
     pub command: String,
     pub status: DetectionStatus,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePickRequest {
+    pub title: Option<String>,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutableSearchRequest {
+    pub commands: Vec<String>,
+    pub extra_dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutableSearchResult {
+    pub found: bool,
+    pub command: Option<String>,
+    pub path: Option<String>,
+    pub checked_locations: Vec<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

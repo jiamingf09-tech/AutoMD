@@ -532,6 +532,18 @@ ul {
   max-width: 220px;
 }
 
+.input-with-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.input-with-button button {
+  min-width: 72px;
+  padding-inline: 12px;
+}
+
 /* ============================================================
    Window-too-small notice (fixed, non-blocking)
    ============================================================ */
@@ -698,7 +710,10 @@ ul {
 }
 
 .project-index-row > button:last-child {
-  align-self: center;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 92px;
   min-height: 38px;
   border-color: var(--border-strong);
@@ -715,6 +730,148 @@ ul {
   border-color: var(--brand);
   background: var(--brand-soft);
   box-shadow: inset 3px 0 0 var(--brand);
+}
+
+/* ── Brand logo image ─────────────────────────────────── */
+.brand-mark-img {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-1);
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+/* ── Project index: rename inline input ───────────────── */
+.index-rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--brand);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+
+/* ── Project index: action buttons group ─────────────── */
+.index-action-group {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.index-rename-btn {
+  display: grid;
+  place-items: center;
+  padding: 0 10px;
+  min-height: 38px;
+  font-size: 15px;
+  border-color: var(--border);
+  color: var(--text-3);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.index-rename-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.index-delete-btn {
+  display: grid;
+  place-items: center;
+  padding: 0 10px;
+  min-height: 38px;
+  font-size: 13px;
+  border-color: var(--border-strong);
+  color: var(--bad-fg);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.index-delete-btn:hover {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+}
+
+/* ── Structure index ──────────────────────────────────── */
+.structure-index-divider {
+  margin: 16px 0 12px;
+  border-top: 1px solid var(--border);
+}
+
+.structure-index-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.structure-index-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.structure-index-btn {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border-color: var(--border);
+  background: var(--surface-2);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.structure-index-btn strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.structure-index-btn small {
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.structure-index-row.active .structure-index-btn {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.structure-kind-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  width: fit-content;
+}
+
+/* ── Current structure badge in banner ───────────────── */
+.current-project-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.current-structure-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--brand);
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -1168,11 +1325,17 @@ ul {
   display: grid;
   gap: 12px;
   min-height: 238px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
   padding: 14px;
   text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
 }
 
 .engine-card:hover {
+  border-color: var(--brand);
   box-shadow: var(--shadow-2);
 }
 
@@ -1191,6 +1354,20 @@ ul {
   color: var(--text-3);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.engine-card-actions,
+.tool-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.engine-card-actions button,
+.tool-action-row button {
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .engine-install-form {
@@ -1263,6 +1440,7 @@ ul {
 .status-pill.missingLicense { background: var(--bad-bg); color: var(--bad-fg); }
 .status-pill.platformUnsupported { background: var(--violet-bg); color: var(--violet-fg); }
 .status-pill.remoteRecommended { background: var(--info-bg); color: var(--info-fg); }
+.status-pill.notApplicable { background: var(--surface-muted); color: var(--text-muted); }
 
 .mapping-pill {
   display: inline-flex;
@@ -2228,12 +2406,22 @@ ul {
 
 .tool-row {
   display: grid;
-  grid-template-columns: minmax(100px, 120px) minmax(80px, 100px) minmax(0, 1fr);
+  grid-template-columns: minmax(120px, 0.8fr) minmax(80px, 110px) minmax(0, 1.5fr);
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 9px;
+}
+
+.tool-row.needs-action {
+  background: var(--surface-2);
+}
+
+.tool-row > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
 }
 
 .recipe-buttons {
@@ -2269,6 +2457,47 @@ ul {
   padding: 0 12px;
   font-size: 11px;
   box-shadow: var(--shadow-1);
+}
+
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 14px;
+}
+
+.background-task-status {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-3);
+  cursor: help;
+}
+
+.background-task-status span:not(.task-spinner) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-task-status small {
+  color: var(--brand-strong);
+  font-weight: 900;
+}
+
+.task-spinner {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--brand);
+  border-radius: var(--r-pill);
+  animation: task-spin 0.9s linear infinite;
+}
+
+@keyframes task-spin {
+  to { transform: rotate(360deg); }
 }
 
 .gpu-status {
@@ -2458,6 +2687,14 @@ ul {
 
   .current-project-actions select {
     max-width: 100%;
+  }
+
+  .input-with-button {
+    grid-template-columns: 1fr;
+  }
+
+  .statusbar-right {
+    gap: 8px;
   }
 
   .engine-reminder {

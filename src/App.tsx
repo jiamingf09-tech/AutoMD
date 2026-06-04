@@ -1,3 +1,4 @@
+import appIconUrl from './assets/icon.png';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
@@ -52,6 +53,7 @@ import type {
   TrajectoryIndex,
   StructureImportResult,
   StructureSourceKind,
+  ToolDiagnostic,
   ValidationReport,
   ValidationSeverity
 } from "./types";
@@ -59,6 +61,20 @@ import type {
 type TabId = "overview" | "workflow" | "run" | "remote" | "report" | "engines" | "build" | "plugins" | "guide";
 
 type ThemeMode = "light" | "dark";
+
+type BackgroundTaskKind = "search" | "download" | "install" | "build" | "compile";
+type BackgroundTaskStatus = "running" | "completed" | "failed";
+
+interface BackgroundTask {
+  id: string;
+  label: string;
+  kind: BackgroundTaskKind;
+  status: BackgroundTaskStatus;
+  progress: number;
+  detail: string;
+  startedAt: string;
+  updatedAt: string;
+}
 
 /** Viewport width below which the layout starts to feel cramped. */
 const MIN_COMFORTABLE_WIDTH = 1024;
@@ -95,90 +111,27 @@ function WindowSizeNotice() {
   );
 }
 
-/**
- * Destructive, two-stage project-deletion dialog. Renders a full-viewport
- * blurred red scrim over the whole app. The Cancel button is auto-focused so
- * the Enter key always defaults to the safe action; deleting requires an
- * explicit second confirmation.
- */
-function DeleteProjectModal({
-  project,
-  stage,
-  deleting,
-  onCancel,
-  onConfirm
-}: {
-  project: ProjectSummary;
-  stage: "warn" | "confirm";
-  deleting: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
+function DeleteModal({ titleText, bodyText, pathText, twoStage, stage, deleting, onCancel, onConfirm }: { titleText: string; bodyText: string; pathText?: string; twoStage: boolean; stage: 'warn' | 'confirm'; deleting: boolean; onCancel: () => void; onConfirm: () => void; }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
-
-  // Keep focus on the safe (Cancel) action — also re-focus when the stage
-  // advances to the second confirmation, so Enter never deletes by accident.
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, [stage]);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel]);
-
+  useEffect(() => { cancelRef.current?.focus(); }, [stage]);
+  useEffect(() => { function h(e: KeyboardEvent) { if (e.key === 'Escape') { e.preventDefault(); onCancel(); } } window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, [onCancel]);
+  const isSecond = twoStage && stage === 'confirm';
   return (
     <div className="modal-overlay" role="presentation" onMouseDown={onCancel}>
-      <div
-        className="modal-dialog modal-danger"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="delete-project-title"
-        aria-describedby="delete-project-body"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+      <div className="modal-dialog modal-danger" role="alertdialog" aria-modal="true" aria-labelledby="del-title" aria-describedby="del-body" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-icon" aria-hidden="true">⚠</div>
-        {stage === "warn" ? (
-          <>
-            <h3 id="delete-project-title">永久删除项目？</h3>
-            <div id="delete-project-body" className="modal-body">
-              <p>
-                即将删除「<strong>{project.name}</strong>」。此操作<strong>不可撤销</strong>。
-              </p>
-              <p>
-                项目目录将被整体永久删除，包括原始数据、中间数据和最终数据（inputs、generated、runs、trajectories、analysis、reports
-                等全部内容）。
-              </p>
-              <p className="modal-path mono">{project.path}</p>
-            </div>
-          </>
-        ) : (
-          <>
-            <h3 id="delete-project-title">二次确认</h3>
-            <div id="delete-project-body" className="modal-body">
-              <p>
-                请再次确认：确定要<strong>永久删除</strong>「<strong>{project.name}</strong>」吗？删除后<strong>无法恢复</strong>。
-              </p>
-            </div>
-          </>
-        )}
+        {isSecond ? (<><h3 id="del-title">二次确认</h3><div id="del-body" className="modal-body"><p>请再次确认：确定要<strong>永久删除</strong>「<strong>{titleText}</strong>」吗？删除后<strong>无法恢复</strong>。</p></div></>) : (<><h3 id="del-title">{twoStage ? '永久删除项目？' : '删除结构？'}</h3><div id="del-body" className="modal-body"><p>{bodyText}</p>{pathText ? <p className="modal-path mono">{pathText}</p> : null}</div></>)}
         <div className="modal-actions">
-          <button type="button" className="modal-cancel" ref={cancelRef} onClick={onCancel} disabled={deleting}>
-            取消
-          </button>
-          <button type="button" className="modal-delete" onClick={onConfirm} disabled={deleting}>
-            {stage === "warn" ? "删除" : deleting ? "删除中…" : "确认删除"}
-          </button>
+          <button type="button" className="modal-cancel" ref={cancelRef} onClick={onCancel} disabled={deleting}>取消</button>
+          <button type="button" className="modal-delete" onClick={onConfirm} disabled={deleting}>{isSecond ? (deleting ? '删除中…' : '确认删除') : (twoStage ? '删除' : (deleting ? '删除中…' : '确认删除'))}</button>
         </div>
       </div>
     </div>
   );
+}
+
+function DeleteProjectModal({ project, stage, deleting, onCancel, onConfirm }: { project: ProjectSummary; stage: 'warn' | 'confirm'; deleting: boolean; onCancel: () => void; onConfirm: () => void; }) {
+  return <DeleteModal titleText={project.name} bodyText={`即将删除「${project.name}」。此操作不可撤销。项目目录将被整体永久删除，包括所有数据（inputs、generated、runs、trajectories、analysis、reports 等）。`} pathText={project.path} twoStage={true} stage={stage} deleting={deleting} onCancel={onCancel} onConfirm={onConfirm} />;
 }
 
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
@@ -321,7 +274,8 @@ const statusText: Record<DetectionStatus, string> = {
   missingInstall: "需安装",
   missingLicense: "需许可",
   platformUnsupported: "平台不支持",
-  remoteRecommended: "建议远程"
+  remoteRecommended: "建议远程",
+  notApplicable: "不适用"
 };
 
 const severityText: Record<ValidationSeverity, string> = {
@@ -436,6 +390,15 @@ function isNativeEditablePath(path: string) {
     && /\.(mdp|mdin|conf|cfg|inp|in|key|txt|json|ya?ml|py|sh|slurm|pbs|lsf|md)$/i.test(path);
 }
 
+interface StructureEntry {
+  id: string;
+  name: string;
+  sourcePath: string;
+  importedPath: string;
+  sourceKind: string;
+  importedAt: string;
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const workspaceRef = useRef<HTMLElement | null>(null);
@@ -464,6 +427,7 @@ function App() {
     checkedAt: new Date().toISOString()
   });
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([]);
   const [scienceDiagnostics, setScienceDiagnostics] = useState<ScienceSidecarDiagnostics | null>(null);
   const [preparationPackage, setPreparationPackage] = useState<StructurePreparationPackage | null>(null);
   const [pluginRegistry, setPluginRegistry] = useState<PluginRegistrySnapshot | null>(null);
@@ -533,6 +497,14 @@ function App() {
   const [importSmiles, setImportSmiles] = useState("");
   const [importDisplayName, setImportDisplayName] = useState("");
   const [structureImportResult, setStructureImportResult] = useState<StructureImportResult | null>(null);
+  const [structures, setStructures] = useState<StructureEntry[]>([]);
+  const [activeStructureId, setActiveStructureId] = useState<string | null>(null);
+  const [renamingStructureId, setRenamingStructureId] = useState<string | null>(null);
+  const [renamingStructureDraft, setRenamingStructureDraft] = useState('');
+  const [deleteStructureTarget, setDeleteStructureTarget] = useState<StructureEntry | null>(null);
+  const [deletingStructure, setDeletingStructure] = useState(false);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [renamingProjectDraft, setRenamingProjectDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -584,7 +556,70 @@ function App() {
     ? guideTab
     : tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
   const activeProject = currentProject ?? projects[0] ?? null;
+  const activeStructure = structures.find((s) => s.id === activeStructureId) ?? null;
   const showProjectBanner = !["engines", "build", "plugins", "guide"].includes(activeTab);
+
+  function startBackgroundTask(label: string, kind: BackgroundTaskKind, detail = "准备中") {
+    const now = new Date().toISOString();
+    const id = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setBackgroundTasks((items) => [
+      { id, label, kind, status: "running", progress: 5, detail, startedAt: now, updatedAt: now },
+      ...items.slice(0, 7)
+    ]);
+    return id;
+  }
+
+  function updateBackgroundTask(id: string, patch: Partial<Pick<BackgroundTask, "status" | "progress" | "detail">>) {
+    setBackgroundTasks((items) =>
+      items.map((task) =>
+        task.id === id
+          ? { ...task, ...patch, updatedAt: new Date().toISOString() }
+          : task
+      )
+    );
+  }
+
+  function finishBackgroundTask(id: string, detail: string, status: BackgroundTaskStatus = "completed") {
+    updateBackgroundTask(id, { status, progress: status === "completed" ? 100 : 0, detail });
+    window.setTimeout(() => {
+      setBackgroundTasks((items) => items.filter((task) => task.id !== id));
+    }, 12000);
+  }
+
+  function patchRuntimeTool(toolId: string, patch: Partial<ToolDiagnostic>) {
+    setDiagnostics((current) => current
+      ? {
+          ...current,
+          tools: current.tools.map((tool) => tool.id === toolId ? { ...tool, ...patch } : tool)
+        }
+      : current
+    );
+  }
+
+  function structureExtensions(kind: StructureSourceKind) {
+    switch (kind) {
+      case "pdb":
+        return ["pdb", "ent"];
+      case "mmcif":
+        return ["cif", "mmcif"];
+      case "sdf":
+        return ["sdf"];
+      case "mol2":
+        return ["mol2"];
+      case "engineProject":
+        return ["gro", "top", "tpr", "inp", "in", "conf", "prmtop", "rst7", "pdb", "cif"];
+      case "smiles":
+        return ["smi", "smiles", "txt"];
+      default:
+        return [];
+    }
+  }
+
+  function fileNameFromPath(path: string) {
+    return path.split(/[\\/]/).pop() ?? path;
+  }
 
   async function bootstrap() {
     try {
@@ -662,6 +697,7 @@ function App() {
       setExportedReport(null);
       setManualResumePlan(null);
       setStructureImportResult(null);
+      setStructures([]); setActiveStructureId(null);
       setActiveTab("workflow");
     } catch (caught) {
       reportError(caught);
@@ -736,6 +772,7 @@ function App() {
         setArtifactRecords([]);
         setAnalysisCacheRecords([]);
         setStructureImportResult(null);
+        setStructures([]); setActiveStructureId(null);
       }
       setDeleteTarget(null);
       setDeleteStage("warn");
@@ -748,6 +785,28 @@ function App() {
 
   function openPluginFolder() {
     void api.openPluginFolder().catch(reportError);
+  }
+
+  async function browseStructureFile() {
+    const taskId = startBackgroundTask("选择结构文件", "search", "打开系统文件选择器");
+    try {
+      const selectedPath = await api.pickFile({
+        title: "选择要导入的结构文件",
+        extensions: structureExtensions(importSourceKind)
+      });
+      if (!selectedPath) {
+        finishBackgroundTask(taskId, "已取消文件选择", "completed");
+        return;
+      }
+      setImportSourcePath(selectedPath);
+      if (!importDisplayName.trim()) {
+        setImportDisplayName(fileNameFromPath(selectedPath).replace(/\.[^.]+$/, ""));
+      }
+      finishBackgroundTask(taskId, `已选择 ${fileNameFromPath(selectedPath)}`);
+    } catch (caught) {
+      finishBackgroundTask(taskId, "文件选择失败", "failed");
+      reportError(caught);
+    }
   }
 
   async function importStructure() {
@@ -767,6 +826,16 @@ function App() {
       });
       setStructureImportResult(result);
       setPlan((current) => current ? { ...current, system: result.system } : current);
+      const newEntry: StructureEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: result.system.name,
+        sourcePath: importSourcePath || importSmiles || '',
+        importedPath: result.importedPath,
+        sourceKind: importSourceKind,
+        importedAt: result.importedAt
+      };
+      setStructures((prev) => { const f = prev.filter((s) => s.importedPath !== newEntry.importedPath); return [newEntry, ...f]; });
+      setActiveStructureId(newEntry.id);
       const index = await api.collectArtifactIndex({
         projectPath: activeProject.path,
         runDirectory: null
@@ -775,6 +844,181 @@ function App() {
       await refreshAnalysis(index);
       setActiveTab("overview");
     } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  function selectStructure(entry: StructureEntry) {
+    setActiveStructureId(entry.id);
+    setPlan((c) => c ? { ...c, system: { ...c.system, name: entry.name, sourcePath: entry.importedPath } } : c);
+  }
+  function requestDeleteStructure(entry: StructureEntry) { setDeleteStructureTarget(entry); }
+  function cancelDeleteStructure() { if (deletingStructure) return; setDeleteStructureTarget(null); }
+  async function confirmDeleteStructure() {
+    if (!deleteStructureTarget || deletingStructure) return;
+    const target = deleteStructureTarget;
+    setDeletingStructure(true);
+    try { setStructures((p) => p.filter((s) => s.id !== target.id)); if (activeStructureId === target.id) setActiveStructureId(null); setDeleteStructureTarget(null); }
+    finally { setDeletingStructure(false); }
+  }
+  function startRenameStructure(entry: StructureEntry) { setRenamingStructureId(entry.id); setRenamingStructureDraft(entry.name); }
+  function commitRenameStructure(id: string) {
+    const t = renamingStructureDraft.trim();
+    if (t) { setStructures((p) => p.map((s) => s.id === id ? { ...s, name: t } : s)); if (id === activeStructureId) setPlan((c) => c ? { ...c, system: { ...c.system, name: t } } : c); }
+    setRenamingStructureId(null); setRenamingStructureDraft('');
+  }
+  function startRenameProject(proj: ProjectSummary) { setRenamingProjectId(proj.id); setRenamingProjectDraft(proj.name); }
+  function commitRenameProject(id: string) {
+    const t = renamingProjectDraft.trim();
+    if (t) { setProjects((p) => p.map((x) => x.id === id ? { ...x, name: t } : x)); if (currentProject?.id === id) setCurrentProject((p) => p ? { ...p, name: t } : p); }
+    setRenamingProjectId(null); setRenamingProjectDraft('');
+  }
+
+  async function autoFindTool(tool: ToolDiagnostic) {
+    const taskId = startBackgroundTask(`自动查找 ${tool.label}`, "search", `正在查找 ${tool.command}`);
+    try {
+      updateBackgroundTask(taskId, { progress: 35, detail: "扫描 PATH 和常见安装目录" });
+      const result = await api.findExecutable({ commands: [tool.command], extraDirs: [] });
+      if (result.found && result.path) {
+        patchRuntimeTool(tool.id, {
+          status: "ready",
+          detail: result.path
+        });
+        finishBackgroundTask(taskId, result.message);
+      } else {
+        finishBackgroundTask(taskId, result.message, "failed");
+      }
+    } catch (caught) {
+      finishBackgroundTask(taskId, "自动查找失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function manualFindTool(tool: ToolDiagnostic) {
+    const taskId = startBackgroundTask(`手动选择 ${tool.label}`, "search", "等待用户选择可执行文件");
+    try {
+      const selectedPath = await api.pickFile({
+        title: `选择 ${tool.label} 可执行文件`,
+        extensions: []
+      });
+      if (!selectedPath) {
+        finishBackgroundTask(taskId, "已取消手动选择");
+        return;
+      }
+      patchRuntimeTool(tool.id, {
+        status: "ready",
+        detail: selectedPath
+      });
+      finishBackgroundTask(taskId, `已选择 ${fileNameFromPath(selectedPath)}`);
+    } catch (caught) {
+      finishBackgroundTask(taskId, "手动选择失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function autoInstallTool(tool: ToolDiagnostic) {
+    const taskId = startBackgroundTask(`自动安装 ${tool.label}`, "install", "准备安装/编译入口");
+    try {
+      updateBackgroundTask(taskId, { progress: 35, detail: "判断是否可由当前引擎编译向导处理" });
+      if (["mpirun", "plumed", "nvidia-smi", "rocminfo"].includes(tool.id)) {
+        await generateRecipes(selectedEngineId);
+        finishBackgroundTask(taskId, "已打开编译页，可生成含 MPI/PLUMED/GPU 选项的一站式脚本。");
+        return;
+      }
+      setActiveTab("guide");
+      finishBackgroundTask(taskId, "该工具通常需要外部安装器或系统包管理器，已打开使用指引。");
+    } catch (caught) {
+      finishBackgroundTask(taskId, "自动安装入口准备失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function autoFindEngine(engine: EngineCapability) {
+    const taskId = startBackgroundTask(`自动查找 ${engine.name}`, "search", "扫描 PATH 和常见引擎目录");
+    try {
+      setSelectedEngineId(engine.id);
+      updateBackgroundTask(taskId, { progress: 40, detail: engine.executableNames.join(", ") });
+      const result = await api.findExecutable({ commands: engine.executableNames, extraDirs: [] });
+      if (!result.found || !result.path) {
+        finishBackgroundTask(taskId, result.message, "failed");
+        return;
+      }
+      await saveEngineInstallation({
+        engineId: engine.id,
+        location: result.path,
+        version: null,
+        authorizationStatus: engine.license.requiresUserLicense ? "missingLicense" : "ready",
+        checkedAt: new Date().toISOString()
+      });
+      finishBackgroundTask(taskId, `已找到 ${fileNameFromPath(result.path)}`);
+    } catch (caught) {
+      finishBackgroundTask(taskId, "引擎自动查找失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function manualFindEngine(engine: EngineCapability) {
+    const taskId = startBackgroundTask(`手动选择 ${engine.name}`, "search", "等待用户选择引擎可执行文件");
+    try {
+      setSelectedEngineId(engine.id);
+      const selectedPath = await api.pickFile({
+        title: `选择 ${engine.name} 可执行文件`,
+        extensions: []
+      });
+      if (!selectedPath) {
+        finishBackgroundTask(taskId, "已取消手动选择");
+        return;
+      }
+      await saveEngineInstallation({
+        engineId: engine.id,
+        location: selectedPath,
+        version: null,
+        authorizationStatus: engine.license.requiresUserLicense ? "missingLicense" : "ready",
+        checkedAt: new Date().toISOString()
+      });
+      finishBackgroundTask(taskId, `已选择 ${fileNameFromPath(selectedPath)}`);
+    } catch (caught) {
+      finishBackgroundTask(taskId, "手动选择引擎失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function autoInstallEngine(engine: EngineCapability) {
+    const taskId = startBackgroundTask(`自动安装 ${engine.name}`, "build", "准备源码拉取和一站式编译脚本");
+    const activeProject = currentProject ?? projects[0] ?? null;
+    try {
+      setSelectedEngineId(engine.id);
+      setBuildWorkflowMode("writeFiles");
+      updateBackgroundTask(taskId, { progress: 30, detail: "生成容器 recipe 和源码编译 recipe" });
+      const options = defaultBuildRecipeOptions(engine.id);
+      const [container, build] = await Promise.all([
+        api.containerRecipe(engine.id),
+        api.buildRecipe(options)
+      ]);
+      setContainerRecipe(container);
+      setBuildRecipe(build);
+      setRecipeExportResult(null);
+
+      if (activeProject) {
+        updateBackgroundTask(taskId, { progress: 65, detail: "写入 build-recipes/ 一站式脚本" });
+        const result = await api.runBuildWorkflow({
+          projectPath: activeProject.path,
+          buildOptions: options,
+          includeContainer: true,
+          includeBuildScript: true,
+          mode: "writeFiles",
+          timeoutSeconds: buildWorkflowTimeout
+        });
+        setBuildWorkflowResult(result);
+        await refreshArtifacts();
+        finishBackgroundTask(taskId, "已生成源码拉取、容器 recipe 和编译脚本；进入编译页可执行。");
+      } else {
+        setBuildWorkflowResult(null);
+        finishBackgroundTask(taskId, "已生成编译 recipe；创建项目后可写入脚本或执行构建。");
+      }
+      setActiveTab("build");
+    } catch (caught) {
+      finishBackgroundTask(taskId, "自动安装/编译入口失败", "failed");
       reportError(caught);
     }
   }
@@ -1218,8 +1462,10 @@ function App() {
       setError("需要先创建项目，才能运行构建向导。");
       return;
     }
+    const taskId = startBackgroundTask(`构建向导 ${engineLabel[engineId] ?? engineId}`, "build", "准备构建 recipe");
     try {
       const options = defaultBuildRecipeOptions(engineId);
+      updateBackgroundTask(taskId, { progress: 35, detail: "生成容器 recipe 和源码脚本" });
       const [container, build, result] = await Promise.all([
         api.containerRecipe(engineId),
         api.buildRecipe(options),
@@ -1235,11 +1481,14 @@ function App() {
       setContainerRecipe(container);
       setBuildRecipe(build);
       setBuildWorkflowResult(result);
+      updateBackgroundTask(taskId, { progress: 85, detail: buildWorkflowModeText[result.mode] });
       if (result.filesWritten.length || result.logPath) {
         await refreshArtifacts();
       }
+      finishBackgroundTask(taskId, result.status === "failed" ? "构建向导失败，查看编译页日志" : "构建向导完成");
       setActiveTab("build");
     } catch (caught) {
+      finishBackgroundTask(taskId, "构建向导失败", "failed");
       reportError(caught);
     }
   }
@@ -1436,7 +1685,7 @@ function App() {
       <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">A</div>
+          <img src={appIconUrl} className="brand-mark-img" alt="AutoMD logo" />
           <div>
             <h1>AutoMD</h1>
             <p>MD workflow studio</p>
@@ -1531,6 +1780,7 @@ function App() {
         {showProjectBanner ? (
           <CurrentProjectBanner
             project={activeProject}
+            activeStructure={activeStructure}
             openProjectFolder={openProjectFolder}
           />
         ) : null}
@@ -1556,10 +1806,25 @@ function App() {
             structureImportResult={structureImportResult}
             plan={plan}
             createProject={createProject}
+            browseStructureFile={browseStructureFile}
             importStructure={importStructure}
             selectProject={selectProject}
             requestDeleteProject={requestDeleteProject}
             openProjectFolder={openProjectFolder}
+            structures={structures}
+            activeStructureId={activeStructureId}
+            selectStructure={selectStructure}
+            requestDeleteStructure={requestDeleteStructure}
+            renamingStructureId={renamingStructureId}
+            renamingStructureDraft={renamingStructureDraft}
+            setRenamingStructureDraft={setRenamingStructureDraft}
+            startRenameStructure={startRenameStructure}
+            commitRenameStructure={commitRenameStructure}
+            renamingProjectId={renamingProjectId}
+            renamingProjectDraft={renamingProjectDraft}
+            setRenamingProjectDraft={setRenamingProjectDraft}
+            startRenameProject={startRenameProject}
+            commitRenameProject={commitRenameProject}
           />
         )}
 
@@ -1574,6 +1839,9 @@ function App() {
             saveEngineInstallation={saveEngineInstallation}
             deleteEngineInstallation={deleteEngineInstallation}
             generateRecipes={generateRecipes}
+            autoFindEngine={autoFindEngine}
+            manualFindEngine={manualFindEngine}
+            autoInstallEngine={autoInstallEngine}
           />
         )}
 
@@ -1668,6 +1936,9 @@ function App() {
             runRemoteStep={runRemoteStep}
             updatePlan={updatePlan}
             generateRemotePackage={generateRemotePackage}
+            autoFindTool={autoFindTool}
+            manualFindTool={manualFindTool}
+            autoInstallTool={autoInstallTool}
           />
         )}
 
@@ -1718,7 +1989,7 @@ function App() {
         )}
       </section>
       </main>
-      <AppStatusBar diagnostics={diagnostics} />
+      <AppStatusBar diagnostics={diagnostics} backgroundTasks={backgroundTasks} />
       {deleteTarget ? (
         <DeleteProjectModal
           project={deleteTarget}
@@ -1746,7 +2017,7 @@ function GuidePanel({
     {
       step: "1. 创建示例项目",
       action: "进入“项目”页，创建项目，例如 Protein_Water_Demo。",
-      details: "选择生物分子项目类型，项目目录建议放在空间充足的位置。导入本地 PDB/mmCIF 文件；如果还没有真实结构，可以先用已有小蛋白或短肽文件练习完整流程。",
+      details: "选择生物分子项目类型，项目目录建议放在空间充足的位置。导入本地 PDB/mmCIF 文件时可直接点“浏览”打开系统文件管理器；如果还没有真实结构，可以先用已有小蛋白或短肽文件练习完整流程。",
       done: "项目列表出现新项目，结构摘要能显示原子数、残基数、链信息或导入文件路径。"
     },
     {
@@ -1758,7 +2029,7 @@ function GuidePanel({
     {
       step: "3. 配置 GROMACS 或 OpenMM",
       action: "进入“引擎”页，选择要跑的引擎并保存路径。",
-      details: "GROMACS 填 gmx 或 gmx_mpi；OpenMM 填 Python/Conda 环境。状态为 ready 才适合真实运行；缺失时先到“编译”页生成安装脚本，或先用 Mock runner 验证软件流程。",
+      details: "状态不是 ready 时，优先点“自动查找”；找不到再点“手动查找”选择可执行文件；需要安装时点“自动安装”，软件会进入编译页生成源码拉取、容器 recipe 和一站式编译脚本。商业/受限引擎仍需要你已有授权。",
       done: "引擎卡片显示可用版本、平台、GPU/MPI/PLUMED 能力和授权状态。"
     },
     {
@@ -1805,7 +2076,7 @@ function GuidePanel({
       title: "项目",
       target: "overview",
       use: "创建项目、快速切换项目、打开项目文件夹、导入结构，并查看结构与轨迹视图。",
-      fill: "填写项目名、领域、首选引擎；导入 PDB/mmCIF/SDF/MOL2/SMILES 或已有工程目录。项目索引里可以一键打开项目所在文件夹。",
+      fill: "填写项目名、领域、首选引擎；导入 PDB/mmCIF/SDF/MOL2/SMILES 或已有工程目录。文件路径可以手输，也可以点“浏览”打开系统文件管理器。",
       check: "当前项目固定条显示正确项目；结构导入后能看到 importedPath、原子/残基/链摘要，结构视图从空状态变为 Mol* 加载状态。",
       next: "导入后进入“流程”设置力场、溶剂、离子和阶段参数；还没配置引擎时先去“引擎”。"
     },
@@ -1813,8 +2084,8 @@ function GuidePanel({
       title: "引擎",
       target: "engines",
       use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
-      fill: "填写可执行文件路径、版本、授权状态和检测记录。商业/受限引擎只登记用户已有路径，不在软件里下载。",
-      check: "ready 表示可直接调用；需要安装表示先去 Build；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
+      fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；需要安装时点“自动安装”进入编译页生成源码拉取和一站式编译脚本。",
+      check: "ready 表示可直接调用；需要安装表示先用自动安装或去“编译”；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
       next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
     },
     {
@@ -1944,7 +2215,8 @@ function GuidePanel({
         </div>
         <dl className="definition-list">
           <div><dt>当前项目</dt><dd>在项目、流程、运行、远程和报告页顶部固定显示。滚动页面时仍能看到项目名、状态、目录，并可以快速切换项目或打开项目文件夹。</dd></div>
-          <div><dt>GPU 状态</dt><dd>软件启动时自动检测 CUDA、ROCm 或 macOS Metal 能力，并在窗口底部右侧显示红/绿指示灯。绿色表示可用；红色表示当前按 CPU fallback 使用。</dd></div>
+          <div><dt>GPU 状态</dt><dd>软件启动时会先识别本机显卡类型，再判断 CUDA、ROCm 或 macOS Metal 是否相关。只有 NVIDIA 才提示 CUDA/NVIDIA 需安装，只有支持 ROCm 的 AMD/Linux 环境才提示 ROCm 需安装；其他显卡会显示“不适用”。</dd></div>
+          <div><dt>后台任务</dt><dd>自动查找、手动选择、自动安装、写脚本和编译时，底部 GPU 状态左侧会显示“后台任务 X 个”和平均进度。悬停可查看每个任务的名称、状态、百分比和当前步骤。</dd></div>
           <div><dt>悬停提示</dt><dd>鼠标放到底部 GPU 状态上，会显示不可用原因，例如未检测到 GPU 工具、平台/引擎不支持，或预览环境无法访问硬件。</dd></div>
           <div><dt>结构视图</dt><dd>新项目默认为空，导入结构后才会加载 Mol*。如果结构路径无效或格式不支持，视图会保留错误提示而不是显示假的分子图。</dd></div>
         </dl>
@@ -1993,8 +2265,8 @@ function GuidePanel({
         <div className="guide-section">
           <h4>推荐操作顺序</h4>
           <ol className="guide-steps compact">
-            <li>在“引擎”页先检测 PATH、Conda/Mamba、Docker/Podman、CUDA/ROCm/OpenCL、MPI 和 PLUMED。</li>
-            <li>如果引擎缺失，在“编译”页选择引擎，生成容器 recipe、源码脚本和 build manifest。</li>
+            <li>在“远程/本机运行环境”和“引擎”页，真正需要安装的项目会显示“自动查找 / 手动查找 / 自动安装”三个按钮；与当前显卡无关的 CUDA/ROCm 会显示“不适用”。</li>
+            <li>如果引擎缺失，先自动查找常见路径；仍找不到时手动选择可执行文件；需要安装时由“自动安装”进入编译页生成容器 recipe、源码脚本和 build manifest。</li>
             <li>先 Dry run，确认命令、下载源、写入目录、权限、prefix、GPU/MPI/PLUMED 选项。</li>
             <li>选择“只写脚本”时，脚本会落盘；你可以拿到 WSL2、Linux 服务器或 HPC 登录节点上再运行。</li>
             <li>只有在本机环境明确可控时才选择“执行构建”。执行后看日志路径、失败分类和生成的可执行文件。</li>
@@ -2002,7 +2274,7 @@ function GuidePanel({
           <h4>常见构建选项</h4>
           <dl className="definition-list">
             <div><dt>MPI</dt><dd>多节点或多进程任务启用。桌面单机测试可先关闭，HPC 建议启用。</dd></div>
-            <div><dt>GPU</dt><dd>CUDA、ROCm、OpenCL、Metal、SYCL 能力按引擎和平台判断，不能简单等价。</dd></div>
+            <div><dt>GPU</dt><dd>CUDA、ROCm、OpenCL、Metal、SYCL 能力按显卡、引擎和平台共同判断。Apple/Intel/无独显机器不需要安装 CUDA 或 ROCm；NVIDIA 机器关注 CUDA，AMD Linux 机器关注 ROCm。</dd></div>
             <div><dt>PLUMED</dt><dd>增强采样常见于 GROMACS/LAMMPS/CP2K 等，必须匹配引擎版本重新编译或动态链接。</dd></div>
             <div><dt>Prefix</dt><dd>优先使用用户目录、Conda 环境或容器路径。系统目录需要管理员权限，不建议默认写入。</dd></div>
             <div><dt>容器</dt><dd>开源引擎可生成 Docker/Podman recipe；商业/受限引擎只能在用户已有授权环境中配置路径。</dd></div>
@@ -2157,7 +2429,7 @@ function GuidePanel({
           <li>引擎显示缺失：回到引擎页保存可执行文件路径，或在“编译”页生成安装脚本。</li>
           <li>许可证缺失：只在用户已有授权环境中配置，不在软件内下载商业引擎。</li>
           <li>拓扑/力场失败：回到流程页检查非标准残基、配体参数、力场和水模型。</li>
-          <li>GPU 不可用：确认驱动、CUDA/ROCm/OpenCL、容器 runtime、HPC 分区和引擎编译选项。</li>
+          <li>GPU 不可用：先看底部状态栏和本机运行环境中 CUDA/ROCm 是否“需安装”或“不适用”，再检查驱动、容器 runtime、HPC 分区和引擎编译选项。</li>
           <li>远程失败：先检查 ssh、workdir、module load、队列名和调度器输出。</li>
           <li>数值发散：降低 timestep、加强最小化、检查约束、温压耦合和初始结构冲突。</li>
         </ol>
@@ -2168,9 +2440,11 @@ function GuidePanel({
 
 function CurrentProjectBanner({
   project,
+  activeStructure,
   openProjectFolder
 }: {
   project: ProjectSummary | null;
+  activeStructure: StructureEntry | null;
   openProjectFolder: (path?: string | null) => void;
 }) {
   return (
@@ -2179,7 +2453,14 @@ function CurrentProjectBanner({
         <span className="status-dot ready" />
         <div>
           <small>当前项目</small>
-          <strong>{project?.name ?? "尚未选择项目"}</strong>
+          <div className="current-project-name-row">
+            <strong>{project?.name ?? "尚未选择项目"}</strong>
+            {activeStructure ? (
+              <span className="current-structure-badge">
+                当前结构：{activeStructure.name}
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
       <div className="current-project-actions">
@@ -2191,8 +2472,23 @@ function CurrentProjectBanner({
   );
 }
 
-function AppStatusBar({ diagnostics }: { diagnostics: RuntimeDiagnostics | null }) {
+function AppStatusBar({
+  diagnostics,
+  backgroundTasks
+}: {
+  diagnostics: RuntimeDiagnostics | null;
+  backgroundTasks: BackgroundTask[];
+}) {
   const gpu = diagnostics?.gpu;
+  const runningTasks = backgroundTasks.filter((task) => task.status === "running");
+  const taskProgress = runningTasks.length
+    ? Math.round(runningTasks.reduce((sum, task) => sum + task.progress, 0) / runningTasks.length)
+    : 0;
+  const taskTitle = backgroundTasks.length
+    ? backgroundTasks
+        .map((task) => `${task.label}：${task.status}，${Math.round(task.progress)}%｜${task.detail}`)
+        .join("\n")
+    : "当前没有后台任务";
   const title = gpu
     ? `${gpu.reason}\n${gpu.detail}\n检查时间：${new Date(gpu.checkedAt).toLocaleString()}`
     : "正在检测 GPU 状态";
@@ -2200,10 +2496,19 @@ function AppStatusBar({ diagnostics }: { diagnostics: RuntimeDiagnostics | null 
   return (
     <footer className="app-statusbar">
       <span>AutoMD</span>
-      <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
-        <span className="gpu-status-dot" />
-        <span>{gpu?.label ?? "GPU 状态检测中"}</span>
-        {gpu ? <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small> : null}
+      <div className="statusbar-right">
+        {runningTasks.length ? (
+          <div className="background-task-status" title={taskTitle}>
+            <span className="task-spinner" />
+            <span>后台任务 {runningTasks.length} 个</span>
+            <small>{taskProgress}%</small>
+          </div>
+        ) : null}
+        <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
+          <span className="gpu-status-dot" />
+          <span>{gpu?.label ?? "GPU 状态检测中"}</span>
+          {gpu ? <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small> : null}
+        </div>
       </div>
     </footer>
   );
@@ -2229,10 +2534,25 @@ function ProjectPanel({
   structureImportResult,
   plan,
   createProject,
+  browseStructureFile,
   importStructure,
   selectProject,
   requestDeleteProject,
-  openProjectFolder
+  openProjectFolder,
+  structures,
+  activeStructureId,
+  selectStructure,
+  requestDeleteStructure,
+  renamingStructureId,
+  renamingStructureDraft,
+  setRenamingStructureDraft,
+  startRenameStructure,
+  commitRenameStructure,
+  renamingProjectId,
+  renamingProjectDraft,
+  setRenamingProjectDraft,
+  startRenameProject,
+  commitRenameProject
 }: {
   projects: ProjectSummary[];
   projectName: string;
@@ -2253,10 +2573,25 @@ function ProjectPanel({
   structureImportResult: StructureImportResult | null;
   plan: SimulationPlan | null;
   createProject: () => void;
+  browseStructureFile: () => void;
   importStructure: () => void;
   selectProject: (project: ProjectSummary) => void;
   requestDeleteProject: (project: ProjectSummary) => void;
   openProjectFolder: (path?: string | null) => void;
+  structures: StructureEntry[];
+  activeStructureId: string | null;
+  selectStructure: (entry: StructureEntry) => void;
+  requestDeleteStructure: (entry: StructureEntry) => void;
+  renamingStructureId: string | null;
+  renamingStructureDraft: string;
+  setRenamingStructureDraft: (v: string) => void;
+  startRenameStructure: (entry: StructureEntry) => void;
+  commitRenameStructure: (id: string) => void;
+  renamingProjectId: string | null;
+  renamingProjectDraft: string;
+  setRenamingProjectDraft: (v: string) => void;
+  startRenameProject: (project: ProjectSummary) => void;
+  commitRenameProject: (id: string) => void;
 }) {
   return (
     <div className="content-grid project-grid">
@@ -2294,14 +2629,42 @@ function ProjectPanel({
           <div className="project-index-list">
             {projects.map((item) => (
               <div className={`project-index-row ${project?.id === item.id ? "active" : ""}`} key={item.id}>
-                <button type="button" onClick={() => selectProject(item)}>
-                  <strong>{item.name}</strong>
-                  <small>{item.domain} / {item.status}</small>
-                  <span className="mono truncate">{item.path}</span>
-                </button>
-                <button type="button" className="project-delete" onClick={() => requestDeleteProject(item)}>
-                  删除项目
-                </button>
+                {renamingProjectId === item.id ? (
+                  <input
+                    className="index-rename-input"
+                    value={renamingProjectDraft}
+                    autoFocus
+                    onChange={(e) => setRenamingProjectDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRenameProject(item.id);
+                      if (e.key === "Escape") commitRenameProject(item.id);
+                    }}
+                    onBlur={() => commitRenameProject(item.id)}
+                  />
+                ) : (
+                  <button type="button" onClick={() => selectProject(item)}>
+                    <strong>{item.name}</strong>
+                    <small>{item.domain} / {item.status}</small>
+                    <span className="mono truncate">{item.path}</span>
+                  </button>
+                )}
+                <div className="index-action-group">
+                  <button
+                    type="button"
+                    className="index-rename-btn"
+                    title="重命名"
+                    onClick={() => startRenameProject(item)}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="project-delete index-delete-btn"
+                    onClick={() => requestDeleteProject(item)}
+                  >
+                    删除项目
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -2332,11 +2695,16 @@ function ProjectPanel({
         ) : (
           <label>
             文件路径
-            <input
-              value={importSourcePath}
-              placeholder="/path/to/system.pdb"
-              onChange={(event) => setImportSourcePath(event.target.value)}
-            />
+            <div className="input-with-button">
+              <input
+                value={importSourcePath}
+                placeholder="/path/to/system.pdb"
+                onChange={(event) => setImportSourcePath(event.target.value)}
+              />
+              <button type="button" onClick={browseStructureFile}>
+                浏览
+              </button>
+            </div>
           </label>
         )}
         <label>
@@ -2365,6 +2733,64 @@ function ProjectPanel({
             ) : null}
           </div>
         ) : null}
+
+        {/* ── Structure Index ──────────────────────────────── */}
+        <div className="structure-index-divider" />
+        <h3 className="structure-index-title" style={{ marginTop: '12px' }}>结构索引</h3>
+        {structures.length === 0 ? (
+          <EmptyState title="暂无结构" text="导入结构后将在此显示，可在不同结构间切换视图和动力学参数。" />
+        ) : (
+          <div className="structure-index-list">
+            {structures.map((entry) => (
+              <div
+                className={`structure-index-row ${entry.id === activeStructureId ? "active" : ""}`}
+                key={entry.id}
+              >
+                {renamingStructureId === entry.id ? (
+                  <input
+                    className="index-rename-input"
+                    value={renamingStructureDraft}
+                    autoFocus
+                    onChange={(e) => setRenamingStructureDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRenameStructure(entry.id);
+                      if (e.key === "Escape") commitRenameStructure(entry.id);
+                    }}
+                    onBlur={() => commitRenameStructure(entry.id)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="structure-index-btn"
+                    onClick={() => selectStructure(entry)}
+                  >
+                    <span className="structure-kind-badge">{entry.sourceKind.toUpperCase()}</span>
+                    <strong>{entry.name}</strong>
+                    <small className="mono truncate">{entry.importedPath}</small>
+                  </button>
+                )}
+                <div className="index-action-group">
+                  <button
+                    type="button"
+                    className="index-rename-btn"
+                    title="重命名"
+                    onClick={() => startRenameStructure(entry)}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="index-delete-btn"
+                    title="删除结构"
+                    onClick={() => requestDeleteStructure(entry)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
       <section className="panel span-2">
         <MoleculeViewport plan={plan} project={project} />
@@ -2382,7 +2808,10 @@ function EnginesPanel({
   setEngineInstallationDraft,
   saveEngineInstallation,
   deleteEngineInstallation,
-  generateRecipes
+  generateRecipes,
+  autoFindEngine,
+  manualFindEngine,
+  autoInstallEngine
 }: {
   engines: EngineCapability[];
   selectedEngineId: string;
@@ -2393,6 +2822,9 @@ function EnginesPanel({
   saveEngineInstallation: (record: EngineInstallationRecord) => void;
   deleteEngineInstallation: (record: EngineInstallationRecord) => void;
   generateRecipes: (engineId?: string) => void;
+  autoFindEngine: (engine: EngineCapability) => void;
+  manualFindEngine: (engine: EngineCapability) => void;
+  autoInstallEngine: (engine: EngineCapability) => void;
 }) {
   const selectedEngine = engines.find((engine) => engine.id === selectedEngineId) ?? engines[0];
   const selectedRecords = engineInstallations.filter((record) => record.engineId === selectedEngineId);
@@ -2406,9 +2838,10 @@ function EnginesPanel({
           </button>
         </div>
         <div className="engine-grid">
-          {engines.map((engine) => (
-            <button
-              type="button"
+          {engines.map((engine) => {
+            const needsAction = engine.detection.status !== "ready";
+            return (
+            <article
               key={engine.id}
               className={`engine-card ${selectedEngineId === engine.id ? "selected" : ""}`}
               onClick={() => {
@@ -2432,8 +2865,15 @@ function EnginesPanel({
                 <div><dt>平台</dt><dd>{engine.platformSupport.native.join(", ")}</dd></div>
                 <div><dt>路径</dt><dd className="mono">{engine.detection.path ?? "未配置"}</dd></div>
               </dl>
-            </button>
-          ))}
+              {needsAction ? (
+                <div className="engine-card-actions" onClick={(event) => event.stopPropagation()}>
+                  <button type="button" onClick={() => autoFindEngine(engine)}>自动查找</button>
+                  <button type="button" onClick={() => manualFindEngine(engine)}>手动查找</button>
+                  <button type="button" className="primary" onClick={() => autoInstallEngine(engine)}>自动安装</button>
+                </div>
+              ) : null}
+            </article>
+          );})}
         </div>
       </section>
       <section className="panel">
@@ -3335,7 +3775,10 @@ function RemotePanel({
   parseRemoteStatus,
   runRemoteStep,
   updatePlan,
-  generateRemotePackage
+  generateRemotePackage,
+  autoFindTool,
+  manualFindTool,
+  autoInstallTool
 }: {
   diagnostics: RuntimeDiagnostics | null;
   plan: SimulationPlan | null;
@@ -3365,6 +3808,9 @@ function RemotePanel({
   runRemoteStep: (stepId: string) => void;
   updatePlan: (updater: (current: SimulationPlan) => SimulationPlan) => void;
   generateRemotePackage: (profileId?: string | null) => void;
+  autoFindTool: (tool: ToolDiagnostic) => void;
+  manualFindTool: (tool: ToolDiagnostic) => void;
+  autoInstallTool: (tool: ToolDiagnostic) => void;
 }) {
   const selectedProfile = remoteProfiles.find((profile) => profile.id === selectedRemoteProfileId) ?? remoteProfiles[0];
   const selectedIsTemplate = selectedProfile?.id.endsWith("-template") ?? true;
@@ -3377,13 +3823,27 @@ function RemotePanel({
           <div><dt>Arch</dt><dd>{diagnostics?.arch ?? "unknown"}</dd></div>
         </dl>
         <div className="tool-list">
-          {diagnostics?.tools.map((tool) => (
-            <div className="tool-row" key={tool.id}>
-              <span>{tool.label}</span>
-              <StatusPill status={tool.status} />
-              <small className="mono">{tool.detail}</small>
-            </div>
-          ))}
+          {diagnostics?.tools.map((tool) => {
+            const showActions = tool.status === "missingInstall" || tool.status === "missingLicense";
+            return (
+              <div className={`tool-row ${showActions ? "needs-action" : ""}`} key={tool.id}>
+                <div>
+                  <strong>{tool.label}</strong>
+                  <small>{tool.command}</small>
+                </div>
+                <StatusPill status={tool.status} />
+                {showActions ? (
+                  <div className="tool-action-row">
+                    <button type="button" onClick={() => autoFindTool(tool)}>自动查找</button>
+                    <button type="button" onClick={() => manualFindTool(tool)}>手动查找</button>
+                    <button type="button" className="primary" onClick={() => autoInstallTool(tool)}>自动安装</button>
+                  </div>
+                ) : (
+                  <small className="mono">{tool.detail}</small>
+                )}
+              </div>
+            );
+          })}
         </div>
       </section>
       <section className="panel">

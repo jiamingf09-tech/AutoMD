@@ -106,7 +106,7 @@ fn detect_executable(names: &[&str], license: &LicensePolicy) -> DetectionState 
         status: DetectionStatus::MissingInstall,
         path: None,
         version: None,
-        message: format!("未在 PATH 中找到：{}", names.join(", ")),
+        message: format!("可自动查找、手动选择或进入自动安装/编译向导。候选入口：{}", names.join(", ")),
     }
 }
 

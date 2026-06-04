@@ -17,8 +17,11 @@ import type {
   EngineLogReport,
   EngineRunPackage,
   EngineRunRequest,
+  ExecutableSearchRequest,
+  ExecutableSearchResult,
   FailureAnalysis,
   FailureAnalysisRequest,
+  FilePickRequest,
   ArtifactIndex,
   ArtifactIndexRequest,
   ArtifactRecord,
@@ -144,6 +147,16 @@ export const api = {
     call<boolean>("open_plugin_folder", undefined, () => true),
   openPath: (path: string) =>
     call<boolean>("open_path_in_system", { path }, () => true),
+  pickFile: (request: FilePickRequest) =>
+    call<string | null>("pick_file_in_system", { request }, () => null),
+  findExecutable: (request: ExecutableSearchRequest) =>
+    call<ExecutableSearchResult>("find_executable", { request }, () => ({
+      found: false,
+      command: null,
+      path: null,
+      checkedLocations: [],
+      message: "Web 预览模式无法访问本机文件系统。"
+    })),
   listProjects: () =>
     call<ProjectSummary[]>("list_projects", undefined, () => []),
   createProject: (request: CreateProjectRequest) =>

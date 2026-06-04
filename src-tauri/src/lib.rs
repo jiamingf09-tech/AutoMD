@@ -22,7 +22,8 @@ mod trajectory;
 use crate::models::*;
 use crate::project_store::ProjectDatabase;
 use crate::task_runner::TaskManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -62,6 +63,7 @@ fn apply_installation_records(capabilities: &mut [EngineCapability], records: &[
                     DetectionStatus::MissingInstall => "用户保存的引擎路径标记为需要安装检查。".to_string(),
                     DetectionStatus::PlatformUnsupported => "用户保存的引擎路径标记为当前平台不支持。".to_string(),
                     DetectionStatus::RemoteRecommended => "用户保存的引擎配置建议通过远程环境运行。".to_string(),
+                    DetectionStatus::NotApplicable => "用户保存的引擎配置标记为当前环境不适用。".to_string(),
                 },
             };
         }
@@ -154,6 +156,201 @@ fn open_path_in_system(path: String) -> Result<bool, String> {
     }
     tauri_plugin_opener::open_path(target, None::<&str>).map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+#[tauri::command]
+fn pick_file_in_system(request: FilePickRequest) -> Result<Option<String>, String> {
+    let title = request.title.unwrap_or_else(|| "选择文件".to_string());
+    pick_file_dialog(&title, &request.extensions)
+}
+
+#[tauri::command]
+fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchResult, String> {
+    let mut checked_locations = Vec::new();
+    let mut dirs = common_executable_dirs();
+    dirs.extend(request.extra_dirs.into_iter().map(PathBuf::from));
+
+    for command in request.commands.iter().filter(|command| !command.trim().is_empty()) {
+        if let Ok(path) = which::which(command) {
+            return Ok(ExecutableSearchResult {
+                found: true,
+                command: Some(command.clone()),
+                path: Some(path.display().to_string()),
+                checked_locations,
+                message: format!("已在 PATH 中找到 {command}。"),
+            });
+        }
+
+        let command_path = PathBuf::from(command);
+        if command_path.components().count() > 1 && is_existing_file(&command_path) {
+            return Ok(ExecutableSearchResult {
+                found: true,
+                command: Some(command.clone()),
+                path: Some(command_path.display().to_string()),
+                checked_locations,
+                message: "已找到用户提供的可执行文件路径。".to_string(),
+            });
+        }
+
+        for dir in &dirs {
+            for candidate in executable_candidates(command) {
+                let path = dir.join(&candidate);
+                checked_locations.push(path.display().to_string());
+                if is_existing_file(&path) {
+                    return Ok(ExecutableSearchResult {
+                        found: true,
+                        command: Some(command.clone()),
+                        path: Some(path.display().to_string()),
+                        checked_locations,
+                        message: format!("已在常见安装目录中找到 {command}。"),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(ExecutableSearchResult {
+        found: false,
+        command: None,
+        path: None,
+        checked_locations,
+        message: "自动查找未发现可执行文件。可以手动选择，或进入自动安装/编译向导。".to_string(),
+    })
+}
+
+fn pick_file_dialog(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+    if cfg!(target_os = "macos") {
+        pick_file_macos(title, extensions)
+    } else if cfg!(target_os = "windows") {
+        pick_file_windows(title, extensions)
+    } else {
+        pick_file_linux(title)
+    }
+}
+
+fn pick_file_macos(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+    let escaped_title = escape_applescript(title);
+    let extension_filter = if extensions.is_empty() {
+        String::new()
+    } else {
+        let values = extensions
+            .iter()
+            .map(|extension| extension.trim_start_matches('.'))
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| format!("\"{}\"", escape_applescript(extension)))
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            String::new()
+        } else {
+            format!(" of type {{{}}}", values.join(", "))
+        }
+    };
+    let script = format!("POSIX path of (choose file with prompt \"{escaped_title}\"{extension_filter})");
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!path.is_empty()).then_some(path));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.to_lowercase().contains("user canceled") || stderr.contains("-128") {
+        return Ok(None);
+    }
+    Err(stderr.trim().to_string())
+}
+
+fn pick_file_windows(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+    let filter = if extensions.is_empty() {
+        "All files (*.*)|*.*".to_string()
+    } else {
+        let patterns = extensions
+            .iter()
+            .map(|extension| format!("*.{}", extension.trim_start_matches('.')))
+            .collect::<Vec<_>>()
+            .join(";");
+        format!("Selected files ({patterns})|{patterns}|All files (*.*)|*.*")
+    };
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = '{}'; $d.Filter = '{}'; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $d.FileName }}",
+        title.replace('\'', "''"),
+        filter.replace('\'', "''")
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!path.is_empty()).then_some(path));
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+fn pick_file_linux(title: &str) -> Result<Option<String>, String> {
+    for (command, args) in [
+        ("zenity", vec!["--file-selection", "--title", title]),
+        ("kdialog", vec!["--getopenfilename", "."]),
+    ] {
+        if which::which(command).is_err() {
+            continue;
+        }
+        let output = Command::new(command)
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return Ok((!path.is_empty()).then_some(path));
+        }
+    }
+    Err("当前 Linux 环境未检测到 zenity/kdialog，无法打开图形文件选择器。".to_string())
+}
+
+fn common_executable_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/opt/local/bin"),
+        PathBuf::from("/opt/conda/bin"),
+        PathBuf::from("/opt/gromacs/bin"),
+        PathBuf::from("/usr/local/gromacs/bin"),
+        PathBuf::from("/Applications/Docker.app/Contents/Resources/bin"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        for suffix in [
+            "miniconda3/bin",
+            "miniforge3/bin",
+            "mambaforge/bin",
+            "micromamba/bin",
+            "anaconda3/bin",
+            ".local/bin",
+            "gromacs/bin",
+        ] {
+            dirs.push(PathBuf::from(&home).join(suffix));
+        }
+    }
+    dirs
+}
+
+fn executable_candidates(command: &str) -> Vec<String> {
+    if cfg!(target_os = "windows") && !command.to_ascii_lowercase().ends_with(".exe") {
+        vec![command.to_string(), format!("{command}.exe")]
+    } else {
+        vec![command.to_string()]
+    }
+}
+
+fn is_existing_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn escape_applescript(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[tauri::command]
@@ -462,6 +659,8 @@ pub fn run() {
             list_plugin_manifests,
             open_plugin_folder,
             open_path_in_system,
+            pick_file_in_system,
+            find_executable,
             list_projects,
             create_project,
             delete_project,
