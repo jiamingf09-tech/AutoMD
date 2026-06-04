@@ -126,6 +126,7 @@ pub fn search_dirs() -> Vec<PathBuf> {
 fn automd_app_data_dirs(home: &str) -> Vec<PathBuf> {
     let home = PathBuf::from(home);
     let mut dirs = Vec::new();
+    dirs.push(home.join(".automd"));
     if cfg!(target_os = "macos") {
         dirs.push(home.join("Library").join("Application Support").join("com.noir.automd"));
     } else if cfg!(target_os = "windows") {

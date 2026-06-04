@@ -683,11 +683,60 @@ pub struct GpuAvailability {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CpuHardware {
+    pub brand: String,
+    pub architecture: String,
+    pub logical_cores: u16,
+    pub physical_cores: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryHardware {
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuDevice {
+    pub id: String,
+    pub name: String,
+    pub vendor: String,
+    pub backend: Option<GpuBackend>,
+    pub memory_bytes: Option<u64>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskVolume {
+    pub id: String,
+    pub mount_point: String,
+    pub filesystem: String,
+    pub total_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareDiagnostics {
+    pub cpu: CpuHardware,
+    pub memory: MemoryHardware,
+    pub gpus: Vec<GpuDevice>,
+    pub disks: Vec<DiskVolume>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub os: String,
     pub arch: String,
     pub tools: Vec<ToolDiagnostic>,
     pub gpu: GpuAvailability,
+    pub hardware: HardwareDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

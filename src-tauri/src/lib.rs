@@ -51,8 +51,42 @@ fn engine_conda_package(engine_id: &str) -> Option<&'static str> {
     }
 }
 
+fn engine_python_module(engine_id: &str) -> Option<&'static str> {
+    match engine_id {
+        "openmm" => Some("openmm"),
+        "hoomd" => Some("hoomd"),
+        _ => None,
+    }
+}
+
 fn miniforge_prefix(engines_root: &Path) -> PathBuf {
     engines_root.join("_tools").join("miniforge3")
+}
+
+fn path_has_whitespace(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().chars().any(char::is_whitespace)
+}
+
+fn home_automd_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(PathBuf::from(home).join(".automd"));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        return Some(PathBuf::from(profile).join(".automd"));
+    }
+    None
+}
+
+fn managed_engines_root(app_dir: &Path) -> PathBuf {
+    // Miniforge refuses prefixes containing spaces. macOS app data lives under
+    // "Application Support", so keep engine/tool environments in a no-space
+    // user-managed directory while projects/plugins stay in the normal app data.
+    if path_has_whitespace(app_dir) {
+        if let Some(home_dir) = home_automd_dir().filter(|path| !path_has_whitespace(path)) {
+            return home_dir.join("engines");
+        }
+    }
+    app_dir.join("engines")
 }
 
 fn conda_binary(prefix: &Path) -> PathBuf {
@@ -68,6 +102,14 @@ fn mamba_binary(prefix: &Path) -> PathBuf {
         prefix.join("Scripts").join("mamba.exe")
     } else {
         prefix.join("bin").join("mamba")
+    }
+}
+
+fn python_binary(prefix: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        prefix.join("Scripts").join("python.exe")
+    } else {
+        prefix.join("bin").join("python")
     }
 }
 
@@ -224,18 +266,41 @@ fn command_tail(bytes: &[u8]) -> String {
 }
 
 fn locate_installed_binary(prefix: &Path, engine_id: &str) -> Option<PathBuf> {
+    if engine_python_module(engine_id).is_some() {
+        let python = python_binary(prefix);
+        return python.is_file().then_some(python);
+    }
+
     let bin = prefix.join("bin");
-    let mut candidates: Vec<String> = engine_registry::detect_engine_by_id(engine_id)
+    let candidates: Vec<String> = engine_registry::detect_engine_by_id(engine_id)
         .map(|capability| capability.executable_names)
         .unwrap_or_default();
-    if candidates.is_empty() {
-        // Python-library engines (e.g. OpenMM) ship no CLI; point at the env python.
-        candidates.push("python".to_string());
-    }
     candidates
         .into_iter()
         .map(|name| bin.join(name))
         .find(|path| path.exists())
+}
+
+fn detect_python_module_version(python: &Path, module: &str) -> Option<String> {
+    let script = format!(
+        r#"import importlib.util, importlib.metadata as m
+name = {module:?}
+if importlib.util.find_spec(name) is None:
+    raise SystemExit(2)
+try:
+    print(m.version(name))
+except Exception:
+    print("installed")
+"#
+    );
+    let output = Command::new(python).args(["-c", &script]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn detect_installed_version(binary: &Path) -> Option<String> {
@@ -245,6 +310,13 @@ fn detect_installed_version(binary: &Path) -> Option<String> {
         .next()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
+}
+
+fn detect_installed_engine_version(binary: &Path, engine_id: &str) -> Option<String> {
+    if let Some(module) = engine_python_module(engine_id) {
+        return detect_python_module_version(binary, module);
+    }
+    detect_installed_version(binary)
 }
 
 #[tauri::command]
@@ -265,6 +337,12 @@ fn list_engine_capabilities(state: tauri::State<'_, AppState>) -> Vec<EngineCapa
 
 fn apply_installation_records(capabilities: &mut [EngineCapability], records: &[EngineInstallationRecord]) {
     for capability in capabilities {
+        if matches!(
+            capability.detection.status,
+            DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported
+        ) {
+            continue;
+        }
         if let Some(record) = records.iter().find(|record| record.engine_id == capability.id) {
             capability.detection = DetectionState {
                 status: record.authorization_status.clone(),
@@ -480,6 +558,14 @@ async fn install_engine(
     engine_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<EngineInstallationRecord, String> {
+    if let Some(capability) = engine_registry::detect_engine_by_id(&engine_id) {
+        if matches!(
+            capability.detection.status,
+            DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported
+        ) {
+            return Err(capability.detection.message);
+        }
+    }
     let package = engine_conda_package(&engine_id).ok_or_else(|| {
         format!("{engine_id} 暂不支持一键安装（通常需要许可或手动编译），请在指引页查看安装方式。")
     })?;
@@ -506,9 +592,21 @@ async fn install_engine(
                 return Err(format!("{id} 安装失败：\n{}", command_tail(&output.stderr)));
             }
             let binary = locate_installed_binary(&prefix, &id).ok_or_else(|| {
-                format!("{id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
+                if engine_python_module(&id).is_some() {
+                    format!("{id} 安装完成，但未在 {} 找到 Python 环境。", prefix.display())
+                } else {
+                    format!("{id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
+                }
             })?;
-            let version = detect_installed_version(&binary);
+            let version = detect_installed_engine_version(&binary, &id);
+            if let Some(module) = engine_python_module(&id) {
+                if version.is_none() {
+                    return Err(format!(
+                        "{id} 安装完成，但 {} 无法导入 Python 模块 {module}。",
+                        binary.display()
+                    ));
+                }
+            }
             Ok((binary.display().to_string(), version))
         })
         .await
@@ -621,6 +719,41 @@ fn pick_file_in_system(request: FilePickRequest) -> Result<Option<String>, Strin
     pick_file_dialog(&title, &request.extensions)
 }
 
+fn find_python_module_executable(
+    module: &str,
+    dirs: &[PathBuf],
+    checked_locations: &mut Vec<String>,
+) -> Option<(PathBuf, Option<String>)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for command in ["python3", "python"] {
+        if let Some(path) = sysenv::resolve_command(command) {
+            candidates.push(path);
+        }
+    }
+    for dir in dirs {
+        for command in ["python3", "python"] {
+            for candidate in sysenv::executable_candidates(command) {
+                candidates.push(dir.join(candidate));
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        checked_locations.push(candidate.display().to_string());
+        if !candidate.is_file() {
+            continue;
+        }
+        if let Some(version) = detect_python_module_version(&candidate, module) {
+            return Some((candidate, Some(version)));
+        }
+    }
+    None
+}
+
 #[tauri::command]
 fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchResult, String> {
     let mut checked_locations = Vec::new();
@@ -630,6 +763,22 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
     dirs.extend(request.extra_dirs.into_iter().map(PathBuf::from));
 
     for command in request.commands.iter().filter(|command| !command.trim().is_empty()) {
+        if let Some(module) = command.strip_prefix("python module:").map(str::trim) {
+            if let Some((path, version)) = find_python_module_executable(module, &dirs, &mut checked_locations) {
+                let version_text = version
+                    .map(|value| format!("，版本 {value}"))
+                    .unwrap_or_default();
+                return Ok(ExecutableSearchResult {
+                    found: true,
+                    command: Some(command.clone()),
+                    path: Some(path.display().to_string()),
+                    checked_locations,
+                    message: format!("已在 {} 检测到 Python 模块 {module}{version_text}。", path.display()),
+                });
+            }
+            continue;
+        }
+
         if let Ok(path) = which::which(command) {
             return Ok(ExecutableSearchResult {
                 found: true,
@@ -1080,7 +1229,7 @@ pub fn run() {
             std::fs::create_dir_all(&project_root)?;
             let plugin_root = app_dir.join("plugins");
             std::fs::create_dir_all(&plugin_root)?;
-            let engines_root = app_dir.join("engines");
+            let engines_root = managed_engines_root(&app_dir);
             std::fs::create_dir_all(&engines_root)?;
             let db = ProjectDatabase::open(app_dir.join("automd.sqlite"))
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;

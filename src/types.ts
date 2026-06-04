@@ -238,6 +238,44 @@ export interface GpuAvailability {
   checkedAt: string;
 }
 
+export interface CpuHardware {
+  brand: string;
+  architecture: string;
+  logicalCores: number;
+  physicalCores?: number | null;
+}
+
+export interface MemoryHardware {
+  totalBytes?: number | null;
+  availableBytes?: number | null;
+  detail: string;
+}
+
+export interface GpuDevice {
+  id: string;
+  name: string;
+  vendor: string;
+  backend?: GpuBackend | null;
+  memoryBytes?: number | null;
+  detail: string;
+}
+
+export interface DiskVolume {
+  id: string;
+  mountPoint: string;
+  filesystem: string;
+  totalBytes?: number | null;
+  availableBytes?: number | null;
+  detail: string;
+}
+
+export interface HardwareDiagnostics {
+  cpu: CpuHardware;
+  memory: MemoryHardware;
+  gpus: GpuDevice[];
+  disks: DiskVolume[];
+}
+
 export interface SimulationStage {
   id: string;
   kind: SimulationStageKind;
@@ -461,6 +499,7 @@ export interface RuntimeDiagnostics {
   arch: string;
   tools: ToolDiagnostic[];
   gpu: GpuAvailability;
+  hardware: HardwareDiagnostics;
 }
 
 export interface ScienceToolDiagnostic {

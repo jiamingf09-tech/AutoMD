@@ -3010,7 +3010,9 @@ ul {
    Settings dialog
    ============================================================ */
 .settings-dialog {
-  width: min(420px, 100%);
+  width: min(840px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
 }
 
 .settings-head {
@@ -3031,9 +3033,100 @@ ul {
   padding-top: 12px;
 }
 
+.settings-section-title {
+  display: grid;
+  gap: 3px;
+}
+
+.settings-section-title h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
 .settings-hint {
   color: var(--text-4);
   font-size: 12px;
+}
+
+.settings-hardware-grid,
+.settings-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-card,
+.settings-device-row {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 11px;
+}
+
+.settings-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.settings-card span,
+.settings-device-row span {
+  color: var(--text-4);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-card strong,
+.settings-device-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-card small,
+.settings-control-grid small,
+.settings-device-row small {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.settings-wide-control {
+  grid-column: 1 / -1;
+}
+
+.settings-range-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px;
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-range-row input[type="range"] {
+  width: 100%;
+}
+
+.settings-device-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.settings-device-list h5 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.settings-device-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.7fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.settings-device-row div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .settings-meta {
@@ -3064,6 +3157,12 @@ ul {
     left: 12px;
     right: 12px;
     width: auto;
+  }
+
+  .settings-hardware-grid,
+  .settings-control-grid,
+  .settings-device-row {
+    grid-template-columns: 1fr;
   }
 }
 

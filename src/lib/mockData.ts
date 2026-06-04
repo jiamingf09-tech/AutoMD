@@ -236,6 +236,39 @@ export const mockDiagnostics: RuntimeDiagnostics = {
     detail: "预览环境按 CPU fallback 展示；桌面应用启动时会检测 CUDA、ROCm 或 macOS Metal。",
     checkedAt: now()
   },
+  hardware: {
+    cpu: {
+      brand: "Web preview CPU",
+      architecture: "browser",
+      logicalCores: 8,
+      physicalCores: null
+    },
+    memory: {
+      totalBytes: 16 * 1024 ** 3,
+      availableBytes: null,
+      detail: "Web 预览模式使用示例内存。"
+    },
+    gpus: [
+      {
+        id: "cpu",
+        name: "CPU 模式",
+        vendor: "None",
+        backend: null,
+        memoryBytes: null,
+        detail: "Web 预览模式无法访问真实 GPU。"
+      }
+    ],
+    disks: [
+      {
+        id: "disk0",
+        mountPoint: "/mock",
+        filesystem: "mockfs",
+        totalBytes: 512 * 1024 ** 3,
+        availableBytes: 256 * 1024 ** 3,
+        detail: "Web 预览磁盘。"
+      }
+    ]
+  },
   tools: [
     { id: "conda", label: "Conda", command: "conda", status: "missingInstall", detail: "Web 预览模式" },
     { id: "docker", label: "Docker", command: "docker", status: "missingInstall", detail: "Web 预览模式" },

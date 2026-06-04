@@ -90,6 +90,14 @@ const NOTIFICATION_ICON: Record<NotificationSeverity, string> = {
 
 type ThemeMode = "light" | "dark";
 
+interface PerformancePreferences {
+  cpuThreads: number;
+  gpuDeviceId: string;
+  gpuCount: number;
+  memoryLimitGb: number;
+  diskId: string;
+}
+
 type BackgroundTaskKind = "search" | "download" | "install" | "build" | "compile";
 type BackgroundTaskStatus = "running" | "completed" | "failed";
 
@@ -102,6 +110,64 @@ interface BackgroundTask {
   detail: string;
   startedAt: string;
   updatedAt: string;
+}
+
+const PERFORMANCE_PREF_KEY = "automd-performance-preferences";
+
+function loadPerformancePreferences(): PerformancePreferences {
+  if (typeof window === "undefined") {
+    return { cpuThreads: 0, gpuDeviceId: "auto", gpuCount: 1, memoryLimitGb: 0, diskId: "auto" };
+  }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PERFORMANCE_PREF_KEY) ?? "{}") as Partial<PerformancePreferences>;
+    return {
+      cpuThreads: Number(parsed.cpuThreads) || 0,
+      gpuDeviceId: parsed.gpuDeviceId || "auto",
+      gpuCount: Number.isFinite(Number(parsed.gpuCount)) ? Math.max(0, Number(parsed.gpuCount)) : 1,
+      memoryLimitGb: Number(parsed.memoryLimitGb) || 0,
+      diskId: parsed.diskId || "auto"
+    };
+  } catch {
+    return { cpuThreads: 0, gpuDeviceId: "auto", gpuCount: 1, memoryLimitGb: 0, diskId: "auto" };
+  }
+}
+
+function savePerformancePreferences(preferences: PerformancePreferences) {
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(PERFORMANCE_PREF_KEY, JSON.stringify(preferences));
+  }
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function suggestedCpuThreads(diagnostics: RuntimeDiagnostics | null) {
+  const logical = diagnostics?.hardware.cpu.logicalCores || 1;
+  return clampNumber(Math.min(8, Math.max(1, logical - 1)), 1, logical);
+}
+
+function effectiveCpuThreads(preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null) {
+  const logical = diagnostics?.hardware.cpu.logicalCores || Math.max(1, preferences.cpuThreads || 1);
+  return clampNumber(preferences.cpuThreads || suggestedCpuThreads(diagnostics), 1, logical);
+}
+
+function effectiveGpuCount(preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null) {
+  if (preferences.gpuDeviceId === "cpu") return 0;
+  const availableGpus = diagnostics?.hardware.gpus.filter((gpu) => gpu.backend).length ?? 0;
+  if (availableGpus <= 0) return 0;
+  return clampNumber(preferences.gpuCount || 1, 0, availableGpus);
+}
+
+function applyPerformanceToPlan(plan: SimulationPlan, preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null): SimulationPlan {
+  return {
+    ...plan,
+    resources: {
+      ...plan.resources,
+      cpuThreads: effectiveCpuThreads(preferences, diagnostics),
+      gpuCount: effectiveGpuCount(preferences, diagnostics)
+    }
+  };
 }
 
 /** Viewport width below which the layout starts to feel cramped. */
@@ -178,16 +244,16 @@ function DeleteStructureModal({ structure, deleting, onCancel, onConfirm }: { st
 }
 
 // Ordered to match the actual beginner workflow (top → bottom): create a
-// project & import a structure, install/detect an engine, configure, run, then
-// view results. Advanced tabs (remote / build / plugins) follow the separator.
+// project & import a structure, configure, run, then view results. Advanced
+// infrastructure tabs (remote / build / engines / plugins) follow the separator.
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
   { id: "overview", label: "项目", description: "创建项目并导入结构" },
-  { id: "engines", label: "引擎", description: "安装 / 检测模拟引擎" },
   { id: "workflow", label: "流程", description: "参数、阶段和分析模块" },
   { id: "run", label: "运行", description: "本地运行与任务监控" },
   { id: "report", label: "报告", description: "可复现实验输出" },
   { id: "remote", label: "远程", description: "SSH / HPC 集群执行" },
   { id: "build", label: "编译", description: "源码构建和容器 recipe" },
+  { id: "engines", label: "引擎", description: "安装 / 检测模拟引擎" },
   { id: "plugins", label: "插件", description: "扩展 manifest 和能力" }
 ];
 
@@ -323,6 +389,15 @@ const statusText: Record<DetectionStatus, string> = {
   remoteRecommended: "建议远程",
   notApplicable: "不适用"
 };
+
+function isEnginePlatformBlocked(engine: EngineCapability): boolean {
+  return engine.detection.status === "notApplicable" || engine.detection.status === "platformUnsupported";
+}
+
+function enginePlatformMessage(engine: EngineCapability): string {
+  return engine.detection.message
+    || `${engine.name} 不支持当前平台；支持平台：${engine.platformSupport.native.join(", ")}。请改用受支持平台、WSL2、容器或远程/HPC。`;
+}
 
 const severityText: Record<ValidationSeverity, string> = {
   info: "信息",
@@ -466,6 +541,7 @@ function App() {
     checkedAt: new Date().toISOString()
   });
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [performancePreferences, setPerformancePreferences] = useState<PerformancePreferences>(() => loadPerformancePreferences());
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([]);
   const [showBgTasks, setShowBgTasks] = useState(false);
   const [scienceDiagnostics, setScienceDiagnostics] = useState<ScienceSidecarDiagnostics | null>(null);
@@ -649,6 +725,31 @@ function App() {
   const showProjectBanner = !["engines", "build", "plugins", "guide"].includes(activeTab);
   const showStructureRequiredWarning = showProjectBanner && Boolean(activeProject) && !activeStructure;
 
+  useEffect(() => {
+    if (!diagnostics || performancePreferences.cpuThreads > 0) return;
+    const next = { ...performancePreferences, cpuThreads: suggestedCpuThreads(diagnostics) };
+    savePerformancePreferences(next);
+    setPerformancePreferences(next);
+    setPlan((current) => current ? applyPerformanceToPlan(current, next, diagnostics) : current);
+  }, [diagnostics, performancePreferences]);
+
+  function updatePerformancePreferences(patch: Partial<PerformancePreferences>) {
+    const logical = diagnostics?.hardware.cpu.logicalCores || 1;
+    const next = {
+      ...performancePreferences,
+      ...patch
+    };
+    next.cpuThreads = clampNumber(Math.round(next.cpuThreads || suggestedCpuThreads(diagnostics)), 1, logical);
+    const availableGpuCount = diagnostics?.hardware.gpus.filter((gpu) => gpu.backend).length ?? 0;
+    next.gpuCount = next.gpuDeviceId === "cpu" || availableGpuCount <= 0
+      ? 0
+      : clampNumber(Math.round(next.gpuCount || 1), 0, availableGpuCount);
+    next.memoryLimitGb = Math.max(0, Number(next.memoryLimitGb) || 0);
+    savePerformancePreferences(next);
+    setPerformancePreferences(next);
+    setPlan((current) => current ? applyPerformanceToPlan(current, next, diagnostics) : current);
+  }
+
   function startBackgroundTask(label: string, kind: BackgroundTaskKind, detail = "准备中") {
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -795,7 +896,10 @@ function App() {
           engineId: "gromacs",
           domain: "biomolecular"
         });
-        setPlan(restoredStructures[0] ? { ...initialPlan, system: systemFromStructure(restoredStructures[0]) } : initialPlan);
+        const restoredPlan = restoredStructures[0]
+          ? { ...initialPlan, system: systemFromStructure(restoredStructures[0]) }
+          : initialPlan;
+        setPlan(applyPerformanceToPlan(restoredPlan, performancePreferences, runtime));
       }
     } catch (caught) {
       reportError(caught);
@@ -817,7 +921,7 @@ function App() {
         engineId: selectedEngineId,
         domain
       });
-      setPlan(generatedPlan);
+      setPlan(applyPerformanceToPlan(generatedPlan, performancePreferences, diagnostics));
       setTask(null);
       setTaskRecords([]);
       setArtifactRecords([]);
@@ -854,7 +958,7 @@ function App() {
         engineId: project.preferredEngineId ?? selectedEngineId,
         domain: project.domain
       });
-      setPlan(generatedPlan);
+      setPlan(applyPerformanceToPlan(generatedPlan, performancePreferences, diagnostics));
       setTask(null);
       setRunPackage(null);
       setLocalSnapshot(null);
@@ -1133,8 +1237,8 @@ function App() {
     setActiveTab("guide");
     pushNotification({
       severity: "info",
-      title: "提醒",
-      message: `${tool.label} 需由系统、GPU 驱动或集群环境提供，无法一键安装。已打开使用指引。`
+      title: "请查看安装方式",
+      message: `${tool.label} 不是 AutoMD 可以静默安装的 Conda 工具，通常涉及系统服务、虚拟机、GPU 驱动或 HPC 登录节点。已打开使用指引中的安装说明。`
     });
   }
 
@@ -1214,7 +1318,22 @@ function App() {
     }
   }
 
+  function warnUnsupportedEnginePlatform(engine: EngineCapability) {
+    setSelectedEngineId(engine.id);
+    pushNotification({
+      severity: "warning",
+      title: "平台不支持",
+      message: enginePlatformMessage(engine),
+      action: { label: "去远程页", run: () => setActiveTab("remote") },
+      guide: true
+    });
+  }
+
   async function autoFindEngine(engine: EngineCapability) {
+    if (isEnginePlatformBlocked(engine)) {
+      warnUnsupportedEnginePlatform(engine);
+      return;
+    }
     const taskId = startBackgroundTask(`自动查找 ${engine.name}`, "search", "扫描 PATH 和常见引擎目录");
     try {
       setSelectedEngineId(engine.id);
@@ -1239,6 +1358,10 @@ function App() {
   }
 
   async function manualFindEngine(engine: EngineCapability) {
+    if (isEnginePlatformBlocked(engine)) {
+      warnUnsupportedEnginePlatform(engine);
+      return;
+    }
     const taskId = startBackgroundTask(`手动选择 ${engine.name}`, "search", "等待用户选择引擎可执行文件");
     try {
       setSelectedEngineId(engine.id);
@@ -1265,6 +1388,10 @@ function App() {
   }
 
   async function autoInstallEngine(engine: EngineCapability) {
+    if (isEnginePlatformBlocked(engine)) {
+      warnUnsupportedEnginePlatform(engine);
+      return;
+    }
     // One-click install for engines available on conda-forge (no manual download
     // or compilation). Commercial / licensed engines fall back to build recipes.
     if (installableEngines.includes(engine.id)) {
@@ -2487,7 +2614,15 @@ function App() {
         onGuide={() => setActiveTab("guide")}
       />
       {settingsOpen ? (
-        <SettingsModal theme={theme} setTheme={setTheme} onClose={() => setSettingsOpen(false)} />
+        <SettingsModal
+          theme={theme}
+          setTheme={setTheme}
+          diagnostics={diagnostics}
+          performancePreferences={performancePreferences}
+          updatePerformancePreferences={updatePerformancePreferences}
+          plan={plan}
+          onClose={() => setSettingsOpen(false)}
+        />
       ) : null}
       {deleteTarget ? (
         <DeleteProjectModal
@@ -2708,14 +2843,6 @@ function GuidePanel({
       next: "导入后进入“流程”设置力场、溶剂、离子和阶段参数；还没配置引擎时先去“引擎”。"
     },
     {
-      title: "引擎",
-      target: "engines",
-      use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
-      fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；可通过 conda-forge 安装的引擎点“一键安装”会真实下载并安装。需要许可或复杂平台构建的引擎会生成编译脚本或要求手动配置授权路径。",
-      check: "ready 表示可直接调用；需要安装表示先用自动安装或去“编译”；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
-      next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
-    },
-    {
       title: "流程",
       target: "workflow",
       use: "编辑 SimulationPlan：体系、力场、溶剂、离子、模拟阶段、输出和基础分析。这里是参数工作的中心。",
@@ -2730,6 +2857,14 @@ function GuidePanel({
       fill: "选择本地运行模式，设置批量重复数量和 seed，必要时编辑原生参数文件，粘贴日志样本做解析。",
       check: "先确认当前项目固定条里显示了当前结构，再生成 run package；没有选中结构时 AutoMD 会直接拒绝运行。之后再看任务状态、日志尾部、失败分类、checkpoint 和 artifact。真实执行前最好先 Dry run。",
       next: "本地完成后刷新 artifact 并分析；集群任务去“远程”；需要报告去“报告”。"
+    },
+    {
+      title: "报告",
+      target: "report",
+      use: "整理可复现实验记录，导出 Markdown、HTML 或 PDF。适合项目结束、阶段汇报或复现实验归档。",
+      fill: "选择报告格式，刷新 artifact 和分析缓存，确认项目、参数、环境、命令、日志和图表都已进入报告。",
+      check: "报告应能回答：输入是什么、用什么引擎和版本、参数是什么、命令如何执行、结果在哪里、哪些地方需要人工复核。",
+      next: "导出后保存报告和项目目录；需要继续生产模拟时回“运行”用 checkpoint resume。"
     },
     {
       title: "远程",
@@ -2748,20 +2883,20 @@ function GuidePanel({
       next: "编译成功后回“引擎”保存新路径；失败时看日志分类和缺失依赖。"
     },
     {
+      title: "引擎",
+      target: "engines",
+      use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
+      fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；可通过 conda-forge 安装的引擎点“一键安装”会真实下载并安装。需要许可或复杂平台构建的引擎会生成编译脚本或要求手动配置授权路径。",
+      check: "ready 表示可直接调用；需要安装表示先用一键安装或去“编译”；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
+      next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
+    },
+    {
       title: "插件",
       target: "plugins",
       use: "查看和管理扩展 manifest。插件可以增加引擎适配器、分析模块、远程调度器、构建 recipe 或报告模板。",
       fill: "把 .automd-plugin.json 放入插件目录，声明 id、name、kind、version、entrypoint、capabilities、license 和支持平台。",
       check: "查看 warning、entrypoint、sourcePath 和 capabilities。未知来源插件不要启用执行命令，先读 manifest。",
       next: "插件被识别后，对应能力会出现在引擎、分析、远程、编译或报告页面。"
-    },
-    {
-      title: "报告",
-      target: "report",
-      use: "整理可复现实验记录，导出 Markdown、HTML 或 PDF。适合项目结束、阶段汇报或复现实验归档。",
-      fill: "选择报告格式，刷新 artifact 和分析缓存，确认项目、参数、环境、命令、日志和图表都已进入报告。",
-      check: "报告应能回答：输入是什么、用什么引擎和版本、参数是什么、命令如何执行、结果在哪里、哪些地方需要人工复核。",
-      next: "导出后保存报告和项目目录；需要继续生产模拟时回“运行”用 checkpoint resume。"
     }
   ];
 
@@ -2990,16 +3125,17 @@ function GuidePanel({
         <div className="panel-title-row">
           <div>
             <h3>引擎安装、部署和编译</h3>
-            <p className="muted">能自动安装的会直接装到 AutoMD 应用数据目录；需要源码/GPU/MPI/许可细节的才生成可检查脚本。</p>
+            <p className="muted">能一键安装的会装到 AutoMD 管理的无空格目录；系统服务、GPU 驱动、容器虚拟机和 HPC 调度器会给出明确安装方式。</p>
           </div>
           <button type="button" onClick={() => setActiveTab("build")}>打开编译页</button>
         </div>
         <div className="guide-section">
           <h4>推荐操作顺序</h4>
           <ol className="guide-steps compact">
-            <li>在“远程/本机运行环境”和“引擎”页，真正需要安装的项目会显示“自动查找 / 手动查找 / 自动安装”三个按钮；与当前显卡无关的 CUDA/ROCm 会显示“不适用”。</li>
-            <li>Conda/Mamba、MPI、PLUMED、GROMACS、OpenMM、AmberTools、LAMMPS、CP2K 和 HOOMD-blue 的“一键安装”会实际执行：没有 conda 时先下载 Miniforge，再用 conda-forge 创建隔离环境。</li>
-            <li>Docker/Podman/Apptainer、CUDA/ROCm 驱动、SLURM/PBS/LSF 客户端通常涉及系统权限、厂商驱动或集群策略，AutoMD 不会伪装成已安装；会保留明确说明和手动配置入口。</li>
+            <li>本机运行环境里，Conda、Mamba、MPI 和 PLUMED 这类 AutoMD 能管理的项目会显示“一键安装”。</li>
+            <li>Docker、Podman、Apptainer、CUDA/ROCm 驱动、SLURM/PBS/LSF 这类系统或集群工具不会显示假安装按钮；缺失时点“查看安装方式”，已有替代工具时显示“不适用”。</li>
+            <li>GROMACS、OpenMM、AmberTools、LAMMPS、CP2K 和 HOOMD-blue 的“一键安装”会实际执行：没有 Conda 时先下载 Miniforge，再用 conda-forge 创建隔离环境。</li>
+            <li>Miniforge 和引擎环境会安装到 AutoMD 管理的无空格目录，例如 <span className="mono">~/.automd/engines</span>；这避免 macOS <span className="mono">Application Support</span> 空格导致安装器失败。</li>
             <li>需要源码/GPU/MPI/PLUMED 特殊构建时，先 Dry run，确认命令、下载源、写入目录、权限、prefix、GPU/MPI/PLUMED 选项。</li>
             <li>选择“只写脚本”时，脚本会落盘；你可以拿到 WSL2、Linux 服务器或 HPC 登录节点上再运行。</li>
             <li>只有在本机环境明确可控时才选择“执行构建”。执行后看日志路径、失败分类和生成的可执行文件。</li>
@@ -3014,13 +3150,21 @@ function GuidePanel({
           </dl>
           <h4>自动安装覆盖范围</h4>
           <dl className="definition-list">
-            <div><dt>Conda / Mamba</dt><dd>自动下载 Miniforge 并安装到 AutoMD 应用数据目录的 engines/_tools/miniforge3，不写系统目录。Mamba 会在这个内置 Miniforge 中额外安装 mamba 包。</dd></div>
+            <div><dt>Conda / Mamba</dt><dd>自动下载 Miniforge 并安装到 AutoMD 管理目录的 <span className="mono">engines/_tools/miniforge3</span>，不写系统目录。Mamba 会在这个内置 Miniforge 中额外安装 mamba 包。</dd></div>
             <div><dt>MPI / PLUMED</dt><dd>通过 conda-forge 创建 AutoMD 管理的隔离环境，安装 openmpi 或 plumed，并把生成的可执行文件路径回填到本机运行环境。</dd></div>
-            <div><dt>开源引擎</dt><dd>GROMACS、OpenMM、AmberTools、LAMMPS、CP2K、HOOMD-blue 走 conda-forge 一键安装；安装后自动保存引擎路径并重新检测能力。</dd></div>
-            <div><dt>容器工具</dt><dd>Docker Desktop、Podman、Apptainer 通常涉及系统服务、管理员权限或虚拟机初始化。AutoMD 可以生成 recipe，但不会假装能静默完成系统级安装。</dd></div>
+            <div><dt>开源引擎</dt><dd>GROMACS、AmberTools、LAMMPS、CP2K 这类 CLI 引擎会保存可执行文件路径；OpenMM 和 HOOMD-blue 是 Python 模块型引擎，会保存可导入模块的 Python 路径。</dd></div>
+            <div><dt>容器工具</dt><dd>Docker Desktop、Podman、Apptainer 涉及系统服务、虚拟机或 Linux/HPC 环境。AutoMD 可以生成 recipe，但不会把系统级安装伪装成一键完成。</dd></div>
             <div><dt>GPU 驱动</dt><dd>CUDA/NVIDIA 驱动、ROCm/HIP 驱动必须匹配显卡、系统版本和内核/驱动。AutoMD 只在显卡相关时提示需安装；无关时显示“不适用”。</dd></div>
             <div><dt>HPC 调度器</dt><dd>SLURM/PBS/LSF 客户端通常由集群 module 或登录节点提供。桌面端缺失时应配置远程 profile，而不是在本机强行安装调度器。</dd></div>
             <div><dt>商业/受限引擎</dt><dd>NAMD、AMBER pmemd、CHARMM、Desmond、ACEMD 等需要用户已有许可或授权环境。AutoMD 只保存路径、检测授权状态并生成运行入口。</dd></div>
+          </dl>
+          <h4>不能一键安装的工具怎么处理</h4>
+          <dl className="definition-list">
+            <div><dt>Docker</dt><dd>macOS/Windows 安装 Docker Desktop，启动后等待状态变成 running；Linux 用发行版包管理器安装 Docker Engine，并确认当前用户有运行权限。AutoMD 只需要能找到 <span className="mono">docker</span> 命令。</dd></div>
+            <div><dt>Podman</dt><dd>macOS/Windows 推荐 Podman Desktop 或 Homebrew/winget 安装；macOS 安装后还需要初始化并启动 podman machine。Linux 可用发行版包管理器安装。AutoMD 只检测 <span className="mono">podman</span> 命令，Docker 已可用时 Podman 会显示不适用。</dd></div>
+            <div><dt>Apptainer</dt><dd>主要用于 Linux/HPC。macOS/Windows 桌面不建议本机安装；应在远程 Linux、WSL2、HPC 登录节点或管理员提供的 module 环境中使用。</dd></div>
+            <div><dt>SLURM / PBS / LSF</dt><dd>这些不是普通桌面软件，而是集群调度系统。通常只在 HPC 登录节点有 <span className="mono">sbatch</span>、<span className="mono">qsub</span>、<span className="mono">bsub</span>。本机缺失不影响你在“远程”页配置 profile。</dd></div>
+            <div><dt>CUDA / ROCm</dt><dd>只在显卡和平台相关时需要。Apple Silicon/Intel macOS 不需要 CUDA 或 ROCm；NVIDIA Linux/Windows 关注 CUDA，AMD Linux 关注 ROCm。</dd></div>
           </dl>
         </div>
       </section>
@@ -3453,12 +3597,33 @@ function NotificationStack({
 function SettingsModal({
   theme,
   setTheme,
+  diagnostics,
+  performancePreferences,
+  updatePerformancePreferences,
+  plan,
   onClose
 }: {
   theme: ThemeMode;
   setTheme: (value: ThemeMode) => void;
+  diagnostics: RuntimeDiagnostics | null;
+  performancePreferences: PerformancePreferences;
+  updatePerformancePreferences: (patch: Partial<PerformancePreferences>) => void;
+  plan: SimulationPlan | null;
   onClose: () => void;
 }) {
+  const logicalCores = Math.max(1, diagnostics?.hardware.cpu.logicalCores ?? performancePreferences.cpuThreads ?? 1);
+  const physicalCores = diagnostics?.hardware.cpu.physicalCores ?? null;
+  const cpuThreads = effectiveCpuThreads(performancePreferences, diagnostics);
+  const gpuDevices = diagnostics?.hardware.gpus ?? [];
+  const usableGpuDevices = gpuDevices.filter((gpu) => gpu.backend);
+  const diskVolumes = diagnostics?.hardware.disks ?? [];
+  const selectedDisk = diskVolumes.find((disk) => disk.id === performancePreferences.diskId) ?? diskVolumes[0] ?? null;
+  const selectedGpu = gpuDevices.find((gpu) => gpu.id === performancePreferences.gpuDeviceId) ?? null;
+  const gpuCount = effectiveGpuCount(performancePreferences, diagnostics);
+  const memoryLimitLabel = performancePreferences.memoryLimitGb > 0
+    ? `${performancePreferences.memoryLimitGb} GB`
+    : "自动";
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -3492,6 +3657,147 @@ function SettingsModal({
             </select>
           </label>
           <p className="settings-hint">主题偏好会被记住，下次启动自动应用。</p>
+        </div>
+        <div className="settings-section">
+          <div className="settings-section-title">
+            <h4>性能配置</h4>
+            <p className="settings-hint">这些设置会写入当前流程的资源参数；本地运行、远程模板和后续安装/分析任务都会优先参考它。</p>
+          </div>
+          {diagnostics ? (
+            <>
+              <div className="settings-hardware-grid">
+                <div className="settings-card">
+                  <span>CPU</span>
+                  <strong>{diagnostics.hardware.cpu.brand || diagnostics.hardware.cpu.architecture}</strong>
+                  <small>
+                    {logicalCores} 逻辑核心
+                    {physicalCores ? ` / ${physicalCores} 物理核心` : ""}
+                  </small>
+                </div>
+                <div className="settings-card">
+                  <span>内存</span>
+                  <strong>{formatBytes(diagnostics.hardware.memory.totalBytes)}</strong>
+                  <small>
+                    {diagnostics.hardware.memory.availableBytes
+                      ? `可用 ${formatBytes(diagnostics.hardware.memory.availableBytes)}`
+                      : diagnostics.hardware.memory.detail}
+                  </small>
+                </div>
+                <div className="settings-card">
+                  <span>GPU</span>
+                  <strong>{gpuDevices.length ? `${gpuDevices.length} 个设备` : "未检测到"}</strong>
+                  <small>{usableGpuDevices.length ? `${usableGpuDevices.length} 个可用于加速` : diagnostics.gpu.reason}</small>
+                </div>
+                <div className="settings-card">
+                  <span>磁盘</span>
+                  <strong>{diskVolumes.length ? `${diskVolumes.length} 个卷` : "未检测到"}</strong>
+                  <small>{selectedDisk ? `${selectedDisk.mountPoint} 可用 ${formatBytes(selectedDisk.availableBytes)}` : "等待系统诊断"}</small>
+                </div>
+              </div>
+              <div className="settings-control-grid">
+                <label className="settings-wide-control">
+                  CPU 核心数
+                  <div className="settings-range-row">
+                    <input
+                      type="range"
+                      min="1"
+                      max={logicalCores}
+                      value={cpuThreads}
+                      onChange={(event) => updatePerformancePreferences({ cpuThreads: Number(event.target.value) })}
+                    />
+                    <input
+                      type="number"
+                      min="1"
+                      max={logicalCores}
+                      value={cpuThreads}
+                      onChange={(event) => updatePerformancePreferences({ cpuThreads: Number(event.target.value) })}
+                    />
+                  </div>
+                  <small>建议不要全占用，至少给系统保留 1 个逻辑核心。当前计划会使用 {plan?.resources.cpuThreads ?? cpuThreads} 线程。</small>
+                </label>
+                <label>
+                  GPU 选择
+                  <select
+                    value={performancePreferences.gpuDeviceId}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      updatePerformancePreferences({
+                        gpuDeviceId: value,
+                        gpuCount: value === "cpu" ? 0 : usableGpuDevices.length > 0 ? Math.max(1, gpuCount) : 0
+                      });
+                    }}
+                  >
+                    <option value="auto">自动选择可用 GPU</option>
+                    <option value="cpu">只用 CPU</option>
+                    {gpuDevices.map((gpu) => (
+                      <option key={gpu.id} value={gpu.id} disabled={!gpu.backend}>
+                        {gpu.name} {gpu.backend ? `(${gpuBackendText[gpu.backend]})` : "(不适用)"}
+                      </option>
+                    ))}
+                  </select>
+                  <small>
+                    {selectedGpu
+                      ? `${selectedGpu.vendor} · ${selectedGpu.backend ? gpuBackendText[selectedGpu.backend] : "不适用"}`
+                      : usableGpuDevices.length ? "自动会优先使用可加速设备。" : "未检测到可用 GPU 时会使用 CPU 模式。"}
+                  </small>
+                </label>
+                <label>
+                  GPU 数量
+                  <input
+                    type="number"
+                    min="0"
+                    max={usableGpuDevices.length}
+                    value={gpuCount}
+                    disabled={performancePreferences.gpuDeviceId === "cpu" || usableGpuDevices.length === 0}
+                    onChange={(event) => updatePerformancePreferences({ gpuCount: Number(event.target.value) })}
+                  />
+                  <small>当前计划 GPU 数量：{plan?.resources.gpuCount ?? gpuCount}</small>
+                </label>
+                <label>
+                  内存上限
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={performancePreferences.memoryLimitGb}
+                    onChange={(event) => updatePerformancePreferences({ memoryLimitGb: Number(event.target.value) })}
+                  />
+                  <small>0 表示自动；当前为 {memoryLimitLabel}。用于后台分析和任务提示。</small>
+                </label>
+                <label>
+                  工作磁盘
+                  <select
+                    value={performancePreferences.diskId}
+                    onChange={(event) => updatePerformancePreferences({ diskId: event.target.value })}
+                  >
+                    <option value="auto">自动选择项目所在磁盘</option>
+                    {diskVolumes.map((disk) => (
+                      <option key={disk.id} value={disk.id}>
+                        {disk.mountPoint} · 可用 {formatBytes(disk.availableBytes)}
+                      </option>
+                    ))}
+                  </select>
+                  <small>{selectedDisk ? `${selectedDisk.filesystem} · 总量 ${formatBytes(selectedDisk.totalBytes)}` : "项目仍默认写入项目目录。"}</small>
+                </label>
+              </div>
+              <div className="settings-device-list">
+                <h5>检测到的 GPU</h5>
+                {gpuDevices.length ? gpuDevices.map((gpu) => (
+                  <div className="settings-device-row" key={gpu.id}>
+                    <div>
+                      <strong>{gpu.name}</strong>
+                      <small>{gpu.vendor} · {gpu.backend ? gpuBackendText[gpu.backend] : "不适用"} · {formatBytes(gpu.memoryBytes)}</small>
+                    </div>
+                    <span>{gpu.detail}</span>
+                  </div>
+                )) : (
+                  <p className="settings-hint">未检测到独立或可加速 GPU。AutoMD 会继续使用 CPU 模式。</p>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="settings-hint">正在读取系统硬件信息，稍后会显示 CPU、内存、GPU 和磁盘。</p>
+          )}
         </div>
         <div className="settings-section">
           <dl className="settings-meta">
@@ -3835,6 +4141,8 @@ function EnginesPanel({
         <div className="engine-grid">
           {engines.map((engine) => {
             const needsAction = engine.detection.status !== "ready";
+            const platformBlocked = isEnginePlatformBlocked(engine);
+            const platformBlockedTitle = platformBlocked ? enginePlatformMessage(engine) : undefined;
             return (
             <article
               key={engine.id}
@@ -3862,9 +4170,29 @@ function EnginesPanel({
               </dl>
               {needsAction ? (
                 <div className="engine-card-actions" onClick={(event) => event.stopPropagation()}>
-                  <button type="button" onClick={() => autoFindEngine(engine)}>自动查找</button>
-                  <button type="button" onClick={() => manualFindEngine(engine)}>手动查找</button>
-                  <button type="button" className="primary" onClick={() => autoInstallEngine(engine)}>
+                  <button
+                    type="button"
+                    aria-disabled={platformBlocked}
+                    title={platformBlockedTitle}
+                    onClick={() => autoFindEngine(engine)}
+                  >
+                    自动查找
+                  </button>
+                  <button
+                    type="button"
+                    aria-disabled={platformBlocked}
+                    title={platformBlockedTitle}
+                    onClick={() => manualFindEngine(engine)}
+                  >
+                    手动查找
+                  </button>
+                  <button
+                    type="button"
+                    className={platformBlocked ? "" : "primary"}
+                    aria-disabled={platformBlocked}
+                    title={platformBlockedTitle}
+                    onClick={() => autoInstallEngine(engine)}
+                  >
                     {installableEngines.includes(engine.id) ? "一键安装" : "生成编译脚本"}
                   </button>
                 </div>
@@ -4920,6 +5248,7 @@ function RemotePanel({
         <div className="tool-list">
           {diagnostics?.tools.map((tool) => {
             const showActions = tool.status === "missingInstall" || tool.status === "missingLicense";
+            const canInstall = installableTools.includes(tool.id);
             return (
               <div className={`tool-row ${showActions ? "needs-action" : ""}`} key={tool.id}>
                 <div>
@@ -4931,8 +5260,8 @@ function RemotePanel({
                   <div className="tool-action-row">
                     <button type="button" onClick={() => autoFindTool(tool)}>自动查找</button>
                     <button type="button" onClick={() => manualFindTool(tool)}>手动查找</button>
-                    <button type="button" className="primary" onClick={() => autoInstallTool(tool)}>
-                      {installableTools.includes(tool.id) ? "一键安装" : "自动安装"}
+                    <button type="button" className={canInstall ? "primary" : ""} onClick={() => autoInstallTool(tool)}>
+                      {canInstall ? "一键安装" : "查看安装方式"}
                     </button>
                   </div>
                 ) : (
@@ -5732,14 +6061,19 @@ function TrajectoryAnalysisPackagePanel({
   );
 }
 
-function formatBytes(value: number) {
-  if (value < 1024) {
-    return `${value} B`;
+function formatBytes(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) {
+    return "未知";
   }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let normalized = value;
+  let unitIndex = 0;
+  while (normalized >= 1024 && unitIndex < units.length - 1) {
+    normalized /= 1024;
+    unitIndex += 1;
   }
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  const precision = unitIndex === 0 ? 0 : normalized >= 100 ? 0 : 1;
+  return `${normalized.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function AnalysisChartGrid({ analysisResult }: { analysisResult: AnalysisParseResult | null }) {

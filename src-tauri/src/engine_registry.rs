@@ -50,9 +50,13 @@ fn detect_engine(definition: EngineDefinition) -> EngineCapability {
         Detector::PythonModule(module) => vec![format!("python module: {module}")],
     };
 
-    let detection = match &definition.detector {
-        Detector::Executable(names) => detect_executable(names, &definition.license),
-        Detector::PythonModule(module) => detect_python_module(module, &definition.license),
+    let detection = if !supports_current_platform(&definition.platform_support) {
+        platform_not_applicable_detection(&definition)
+    } else {
+        match &definition.detector {
+            Detector::Executable(names) => detect_executable(names, &definition.license),
+            Detector::PythonModule(module) => detect_python_module(module, &definition.license),
+        }
     };
 
     EngineCapability {
@@ -79,6 +83,56 @@ fn detect_engine(definition: EngineDefinition) -> EngineCapability {
         detection,
         docs_url: definition.docs_url.to_string(),
         notes: definition.notes.into_iter().map(String::from).collect(),
+    }
+}
+
+fn current_native_platform() -> Platform {
+    match std::env::consts::OS {
+        "windows" => Platform::Windows,
+        "macos" => Platform::Macos,
+        _ => Platform::Linux,
+    }
+}
+
+fn supports_current_platform(platform_support: &PlatformSupport) -> bool {
+    platform_support.native.contains(&current_native_platform())
+}
+
+fn platform_label(platform: &Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "windows",
+        Platform::Macos => "macos",
+        Platform::Linux => "linux",
+        Platform::Wsl2 => "wsl2",
+        Platform::RemoteLinux => "remoteLinux",
+    }
+}
+
+fn platform_list(platforms: &[Platform]) -> String {
+    platforms
+        .iter()
+        .map(platform_label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn platform_not_applicable_detection(definition: &EngineDefinition) -> DetectionState {
+    let current = platform_label(&current_native_platform());
+    let native = platform_list(&definition.platform_support.native);
+    let fallback = platform_list(&definition.platform_support.recommended_fallbacks);
+    let suffix = if fallback.is_empty() {
+        "请换到受支持平台后再配置该引擎。".to_string()
+    } else {
+        format!("建议使用 {fallback}。")
+    };
+    DetectionState {
+        status: DetectionStatus::NotApplicable,
+        path: None,
+        version: None,
+        message: format!(
+            "{} 不支持当前平台 {current}；支持平台：{native}。{suffix}",
+            definition.name
+        ),
     }
 }
 
@@ -115,26 +169,35 @@ fn detect_python_module(module: &str, license: &LicensePolicy) -> DetectionState
         "import importlib.util, importlib.metadata as m; name='{module}'; spec=importlib.util.find_spec(name); assert spec is not None; print(m.version(name))"
     );
 
-    match Command::new("python3").args(["-c", &script]).output() {
-        Ok(output) if output.status.success() => DetectionState {
-            status: if license.requires_user_license {
-                DetectionStatus::MissingLicense
-            } else {
-                DetectionStatus::Ready
-            },
-            path: Some(format!("python3::{module}")),
-            version: String::from_utf8(output.stdout)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty()),
-            message: "已检测到 Python 模块。".to_string(),
-        },
-        _ => DetectionState {
-            status: DetectionStatus::MissingInstall,
-            path: None,
-            version: None,
-            message: format!("未在当前 python3 环境中检测到模块：{module}"),
-        },
+    for command in ["python3", "python"] {
+        let Some(python) = crate::sysenv::resolve_command(command) else {
+            continue;
+        };
+        match Command::new(&python).args(["-c", &script]).output() {
+            Ok(output) if output.status.success() => {
+                return DetectionState {
+                    status: if license.requires_user_license {
+                        DetectionStatus::MissingLicense
+                    } else {
+                        DetectionStatus::Ready
+                    },
+                    path: Some(python.display().to_string()),
+                    version: String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    message: format!("已在 {} 检测到 Python 模块 {module}。", python.display()),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    DetectionState {
+        status: DetectionStatus::MissingInstall,
+        path: None,
+        version: None,
+        message: format!("未在可访问的 Python 环境中检测到模块：{module}"),
     }
 }
 
