@@ -1222,6 +1222,9 @@ function App() {
       ]);
       setLogReport(report);
       setSampleFailureAnalysis(failure);
+      if (failure && failure.severity !== "info") {
+        notifyFailure(failure);
+      }
     } catch (caught) {
       reportError(caught);
     }
@@ -1241,6 +1244,9 @@ function App() {
       });
       setLocalSnapshot(snapshot);
       setManualResumePlan(snapshot.resumePlan ?? null);
+      if (snapshot.failureAnalysis && snapshot.failureAnalysis.severity !== "info") {
+        notifyFailure(snapshot.failureAnalysis);
+      }
       await refreshTaskRecords();
       if (snapshot.artifacts.length) {
         const index = {
@@ -1758,6 +1764,29 @@ function App() {
 
   function notifySuccess(message: string, title = "完成") {
     pushNotification({ severity: "success", title, message });
+  }
+
+  /** Surface a diagnosed run/build failure as a toast with a category-aware one-click fix. */
+  function notifyFailure(failure: FailureAnalysis) {
+    const fixes: Partial<Record<FailureAnalysis["category"], { label: string; run: () => void }>> = {
+      missingExecutable: { label: "去引擎页安装", run: () => setActiveTab("engines") },
+      licenseRequired: { label: "去引擎页", run: () => setActiveTab("engines") },
+      missingInput: { label: "去项目页导入", run: () => setActiveTab("overview") },
+      missingTopology: { label: "去流程页", run: () => setActiveTab("workflow") },
+      missingForceField: { label: "去流程页", run: () => setActiveTab("workflow") },
+      parameterMismatch: { label: "去流程页", run: () => setActiveTab("workflow") },
+      mpiFailure: { label: "去远程页", run: () => setActiveTab("remote") },
+      schedulerFailure: { label: "去远程页", run: () => setActiveTab("remote") }
+    };
+    const suggestion = failure.suggestions[0];
+    const message = suggestion ? `${suggestion.title}：${suggestion.detail}` : failure.message;
+    pushNotification({
+      severity: failure.severity === "error" ? "error" : "warning",
+      title: `运行问题 · ${failureCategoryText[failure.category]}`,
+      message,
+      action: fixes[failure.category],
+      guide: true
+    });
   }
 
   // Compatibility shim: existing `setError("…")` calls now surface as error toasts;
