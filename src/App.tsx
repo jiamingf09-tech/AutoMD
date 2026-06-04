@@ -1,5 +1,5 @@
 import appIconUrl from './assets/icon.png';
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
 import type {
   AnalysisKind,
@@ -177,13 +177,16 @@ function DeleteStructureModal({ structure, deleting, onCancel, onConfirm }: { st
   );
 }
 
+// Ordered to match the actual beginner workflow (top → bottom): create a
+// project & import a structure, install/detect an engine, configure, run, then
+// view results. Advanced tabs (remote / build / plugins) follow the separator.
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
-  { id: "overview", label: "项目", description: "创建、导入和结构视图" },
+  { id: "overview", label: "项目", description: "创建项目并导入结构" },
+  { id: "engines", label: "引擎", description: "安装 / 检测模拟引擎" },
   { id: "workflow", label: "流程", description: "参数、阶段和分析模块" },
-  { id: "run", label: "运行", description: "本地、容器和 HPC 调度" },
-  { id: "remote", label: "远程", description: "SSH 和队列 profile" },
+  { id: "run", label: "运行", description: "本地运行与任务监控" },
   { id: "report", label: "报告", description: "可复现实验输出" },
-  { id: "engines", label: "引擎", description: "检测、授权和平台能力" },
+  { id: "remote", label: "远程", description: "SSH / HPC 集群执行" },
   { id: "build", label: "编译", description: "源码构建和容器 recipe" },
   { id: "plugins", label: "插件", description: "扩展 manifest 和能力" }
 ];
@@ -854,6 +857,19 @@ function App() {
       setTask(null);
       setRunPackage(null);
       setLocalSnapshot(null);
+      // Clear the previous project's derived state so switching projects never
+      // shows stale run/report/trajectory data (refreshCachedMetadata below
+      // reloads artifacts/analysis/structures for the newly selected project).
+      setArtifactIndex(null);
+      setAnalysisResult(null);
+      setTrajectoryIndex(null);
+      setTrajectoryChunk(null);
+      setTrajectoryAnalysisPackage(null);
+      setExportedReport(null);
+      setBatchPackage(null);
+      setPreparationPackage(null);
+      setManualResumePlan(null);
+      setStructureImportResult(null);
       const loadedStructures = await refreshCachedMetadata(project.path);
       if (loadedStructures[0]) {
         setPlan((current) => current ? { ...current, system: systemFromStructure(loadedStructures[0]) } : current);
@@ -2130,7 +2146,7 @@ function App() {
         <nav className="nav-list" aria-label="AutoMD sections">
           {tabs.map((tab) => (
             <button
-              className={`nav-item ${activeTab === tab.id ? "active" : ""} ${tab.id === "engines" ? "nav-separated" : ""}`}
+              className={`nav-item ${activeTab === tab.id ? "active" : ""} ${tab.id === "remote" ? "nav-separated" : ""}`}
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               type="button"
@@ -2486,62 +2502,174 @@ function GuidePanel({
   setActiveTab: (tab: TabId) => void;
 }) {
   const pluginKinds = Object.keys(pluginKindText) as PluginKind[];
+  const conceptRows: Array<{ term: string; meaning: string; where: string }> = [
+    {
+      term: "当前项目",
+      meaning: "AutoMD 的工作目录。一个项目会保存原始输入、导入后的结构、生成的参数文件、运行日志、checkpoint、轨迹、分析结果和报告。",
+      where: "在项目、流程、运行、远程和报告页顶部固定显示。确认这里的项目名再点击任何运行类按钮。"
+    },
+    {
+      term: "当前结构",
+      meaning: "真正要拿去做模拟的分子结构。只有选中结构后，软件才允许生成结构准备文件、运行包、远程提交脚本或报告。",
+      where: "在项目页的结构索引中选择。没有结构时，后续页面会警告并拒绝发送 MD 运行指令。"
+    },
+    {
+      term: "结构准备与分析环境",
+      meaning: "AutoMD 管理的 Python 科学环境，负责 PDBFixer/OpenMM/RDKit/Open Babel/AmberTools/MDAnalysis/MDTraj 这类工具。",
+      where: "在流程页查看。当前引擎需要的工具显示可用或需安装，不需要的显示不适用。"
+    },
+    {
+      term: "SimulationPlan",
+      meaning: "GUI 中的统一模拟计划，包含体系、力场、水模型、离子、阶段长度、资源和分析模块。",
+      where: "在流程页编辑。它不是 GROMACS .mdp 或 AMBER mdin，而是生成这些原生文件的上层计划。"
+    },
+    {
+      term: "参数映射",
+      meaning: "把 GUI 参数翻译成当前引擎的原生字段，例如 GROMACS .mdp、OpenMM runner、AMBER mdin、NAMD conf。",
+      where: "在流程页的高级折叠区查看。普通用户先看参数检查；正式长模拟前再检查映射和生成文件。"
+    },
+    {
+      term: "结构准备文件",
+      meaning: "运行前生成的输入准备文件，例如修复结构脚本、environment.yml、tleap 输入、OpenMM 预处理脚本和配体参数化提示。",
+      where: "在流程页生成。它不是最终结果，而是帮助你把结构变成可运行输入。"
+    },
+    {
+      term: "运行包",
+      meaning: "可以执行或提交的一组文件，包含引擎输入、命令脚本、日志路径、checkpoint 路径和 artifact 约定。",
+      where: "在运行页生成。先 Dry run 检查，再真实执行。"
+    },
+    {
+      term: "Artifact",
+      meaning: "运行产生或分析产生的文件索引，例如日志、轨迹、能量、分析表、报告和 checkpoint。",
+      where: "运行完成后在运行页刷新，报告页会复用这些记录。"
+    },
+    {
+      term: "Checkpoint",
+      meaning: "中断后继续模拟的恢复点。真实生产模拟一定要设置合理 checkpoint 间隔。",
+      where: "运行页查看和恢复。不要随手删除 run directory。"
+    },
+    {
+      term: "Walltime",
+      meaning: "给本地/远程任务预留的实际机器运行时间，不等于模拟时间。模拟时间用 ns/us/ms 表示。",
+      where: "生产模拟长度在流程页用 ns；HPC walltime 在远程或资源设置里用小时。"
+    }
+  ];
+
   const quickStartSteps: Array<{ title: string; desc: string; tab: TabId; cta: string }> = [
-    { title: "新建项目", desc: "在项目页创建项目，自动生成可复现实验目录与 SQLite 索引。", tab: "overview", cta: "去新建" },
-    { title: "准备引擎", desc: "引擎页对 GROMACS / OpenMM / LAMMPS 等点「一键安装」（conda-forge，零编译）。", tab: "engines", cta: "去安装" },
-    { title: "导入并选中结构", desc: "回到项目页导入 PDB / mmCIF / SDF / SMILES 或已有引擎工程，并确认它成为当前结构。", tab: "overview", cta: "去导入" },
-    { title: "配置参数", desc: "流程页设置力场、水模型、模拟阶段与分析模块。", tab: "workflow", cta: "去配置" },
-    { title: "运行", desc: "运行页先用 Mock runner 验证闭环，再切换真实本地或远程执行。", tab: "run", cta: "去运行" },
-    { title: "导出报告", desc: "报告页汇总轨迹、分析表与可复现实验输出。", tab: "report", cta: "去报告" }
+    { title: "创建项目", desc: "在项目页创建一个项目，确认顶部固定条显示的是这个项目。项目会自动建立 inputs、generated、runs、trajectories、analysis、reports 等目录。", tab: "overview", cta: "去新建" },
+    { title: "配置引擎", desc: "到引擎页选择目标引擎。入门生物分子优先 GROMACS；快速教学或 Python 自定义优先 OpenMM；缺失时点自动查找、手动查找或一键安装。", tab: "engines", cta: "去安装" },
+    { title: "导入结构", desc: "回项目页用浏览按钮选择 PDB、mmCIF、SDF、MOL2、SMILES 或已有工程，并在结构索引中确认当前结构已选中。", tab: "overview", cta: "去导入" },
+    { title: "准备科学环境", desc: "流程页会显示当前引擎需要哪些 Python/AmberTools 工具。可用就继续，需安装就点一键安装，不适用的不用管。", tab: "workflow", cta: "去检查" },
+    { title: "设置参数", desc: "在流程页设置力场、水模型、盒子 padding、盐浓度、温度、压力、阶段长度和生产模拟长度。测试先用 1 ns，正式再拉长。", tab: "workflow", cta: "去配置" },
+    { title: "生成运行包", desc: "运行页先 Dry run，只生成输入、命令和脚本，不启动引擎。检查无误后再本地运行或转远程/HPC。", tab: "run", cta: "去运行" },
+    { title: "分析轨迹", desc: "运行完成后刷新 artifact，索引轨迹，再生成 RMSD、RMSF、Rg、氢键、能量和温压等分析。", tab: "run", cta: "去分析" },
+    { title: "导出报告", desc: "报告页导出 Markdown、HTML 或 PDF，保留输入、环境、参数、命令、日志、分析和复现记录。", tab: "report", cta: "去报告" }
   ];
   const exampleFlow: Array<{ step: string; action: string; details: string; done: string }> = [
     {
-      step: "1. 创建示例项目",
-      action: "进入“项目”页，创建项目，例如 Protein_Water_Demo。",
-      details: "选择生物分子项目类型，项目目录建议放在空间充足的位置。导入本地 PDB/mmCIF 文件时可直接点“浏览”打开系统文件管理器；如果还没有真实结构，可以先用已有小蛋白或短肽文件练习完整流程。",
-      done: "项目列表出现新项目，结构索引中有已选中的结构；结构摘要能显示原子数、残基数、链信息或导入文件路径。没有选中结构时，流程、运行、远程和报告入口会提醒并拒绝生成运行指令。"
+      step: "1. 新建项目并确认当前项目",
+      action: "打开“项目”页，在“创建项目”里填写名称，例如 Protein_Water_Demo，领域选择“生物分子”，首选引擎选择 GROMACS 或 OpenMM，然后点击创建。",
+      details: "项目名建议只包含英文、数字、下划线或短横线，方便在 HPC、脚本和报告里复现。项目目录建议放在空间充足的位置，轨迹文件可能很大。创建后不要急着去运行，先看页面顶部固定条是不是显示新项目。",
+      done: "顶部固定条显示当前项目；项目索引里能看到这个项目；点击“打开文件夹”能打开项目目录。"
     },
     {
-      step: "2. 准备结构",
-      action: "在“项目/流程”相关区域检查结构准备包。",
-      details: "确认缺失原子、氢原子、非标准残基、配体和水/离子处理。蛋白示例可使用 pH 7.0 加氢、Amber99SB-ILDN 或 CHARMM36 类蛋白力场、TIP3P 水模型、0.15 M NaCl，并中和体系。",
-      done: "准备包能生成拓扑/结构输入；如果配体参数失败，先回到配体参数化而不是直接运行。"
+      step: "2. 导入并选中结构",
+      action: "在“导入结构”卡片里选择输入类型，点击“浏览”选文件，再点击“导入到 inputs/”。",
+      details: "PDB/mmCIF 适合蛋白、核酸和复合物；SDF/MOL2/SMILES 适合小分子；已有 GROMACS、OpenMM、AMBER、NAMD 等工程可以作为已有引擎工程导入。显示名称可以留空，软件会用文件名；导入后输入框会清空，方便继续导入第二个结构。",
+      done: "结构索引中出现导入项，并且目标结构被选中。结构与轨迹视图不再只是空状态。"
     },
     {
-      step: "3. 配置 GROMACS 或 OpenMM",
-      action: "进入“引擎”页，选择要跑的引擎并保存路径。",
-      details: "状态不是 ready 时，优先点“自动查找”；找不到再点“手动查找”选择可执行文件；GROMACS、OpenMM、AmberTools、LAMMPS、CP2K、HOOMD-blue 等可安装引擎点“一键安装”会直接通过 conda-forge 安装到 AutoMD 应用数据目录。没有 conda 时会先自动安装内置 Miniforge。商业/受限引擎仍需要你已有授权。",
-      done: "引擎卡片显示可用版本、平台、GPU/MPI/PLUMED 能力和授权状态。"
+      step: "3. 检查引擎和科学环境",
+      action: "先到“引擎”页让目标引擎变成可用，再回“流程”页看结构准备与分析环境。",
+      details: "GROMACS、OpenMM、AmberTools、LAMMPS、CP2K、HOOMD-blue 等开源工具优先用一键安装。NAMD、AMBER pmemd、CHARMM、Desmond、ACEMD 等受限或商业引擎必须使用你已有授权环境。流程页的科学环境用于结构修复、加氢、配体处理、OpenMM 快速验证和轨迹分析；当前引擎不需要的项目会显示“不适用”。",
+      done: "目标引擎显示 ready 或可用；流程页里当前引擎必需的科学工具没有红色缺失项。"
     },
     {
-      step: "4. 设置模拟流程",
-      action: "进入“流程”页，逐段检查 EM、NVT、NPT、Production。",
-      details: "入门示例可设置 EM 5000-50000 steps，NVT 100 ps，NPT 100 ps，Production 1 ns；温度 300 K，压力 1 bar，timestep 2 fs，约束 H-bonds，checkpoint/report interval 10-100 ps。",
-      done: "Validation 没有 error；warning 要读完，尤其是力场、水模型、离子浓度、平台能力和输出频率。"
+      step: "4. 设置入门参数",
+      action: "在“流程”页设置模拟参数。蛋白水溶液入门建议：蛋白力场 CHARMM36m 或 Amber 系列，水模型 TIP3P，padding 1.0 nm，盐浓度 0.15 M，温度 300 K，压力 1 bar。",
+      details: "阶段建议先跑短测试：能量最小化 5000 到 50000 steps，NVT 100 ps，NPT 100 ps，Production 1 ns。测试稳定后再把生产模拟长度改成 10 ns、100 ns 或更长。生产模拟长度是模拟时间，单位是 ns；HPC walltime 才是机器排队/运行时间，单位通常是小时。",
+      done: "参数检查显示通过或只有可理解的提示；没有选中结构时这里不应继续生成运行文件。"
     },
     {
-      step: "5. 先生成运行包",
-      action: "进入“运行”页，先用 Dry run 或生成 run package。",
-      details: "生成 run package 前必须已经选中一个结构。Dry run 只写输入文件、命令、脚本和目录，不启动引擎。检查 .mdp/.tpr/.top、OpenMM runner、run.sh、checkpoint 路径和输出文件布局。",
-      done: "run directory、命令、输入文件和 artifact 预期清楚；这一步过了再进入真实执行。"
+      step: "5. 生成结构准备文件",
+      action: "在“流程”页点击“生成结构准备文件”。",
+      details: "这一步会写出预处理脚本、environment.yml、配体/AmberTools 提示和参数准备清单。它解决的是“结构能不能被准备成可运行输入”，不是正式开始模拟。如果这里失败，先处理缺失原子、非标准残基、配体参数、力场或工具缺失。",
+      done: "结构准备文件列表不再为空；错误信息明确指出是缺工具、缺输入、参数化失败还是路径问题。"
     },
     {
-      step: "6. 运行本地或远程任务",
-      action: "本地小体系可直接运行；集群任务进入“远程”页生成提交脚本。",
-      details: "本地运行时关注日志、进度、checkpoint 和失败分类。HPC 运行时先 dry-run profile，确认 ssh、rsync、workdir、module load、队列、GPU 资源和 walltime。",
-      done: "任务状态能从 preparing/running 进入 completed，或失败时能看到明确原因。"
+      step: "6. Dry run 生成运行包",
+      action: "进入“运行”页，先选择 Dry run 或生成 run package。",
+      details: "Dry run 只写输入文件、命令和脚本，不启动引擎。检查 .mdp、.top、.tpr、OpenMM runner、NAMD conf、run.sh、checkpoint 路径、日志路径和轨迹路径。看不懂原生文件时，至少确认路径在当前项目目录内，命令里使用的是你配置的引擎。",
+      done: "运行包生成成功，artifact 里能看到将要产生的日志、checkpoint、轨迹、分析和报告路径。"
     },
     {
-      step: "7. 索引轨迹并分析",
-      action: "回到“运行”页刷新 artifacts，索引轨迹，生成分析包。",
-      details: "先索引 xtc/trr/dcd/pdb/xyz，再分块预览轨迹。常用分析包括 RMSD、RMSF、Rg、氢键、距离、角度、二面角、能量、温度、压力和接触图。",
-      done: "分析结果有曲线、统计值或缓存记录；大轨迹不要一次性加载到前端。"
+      step: "7. 真实运行或提交远程任务",
+      action: "小体系可以在“运行”页启动本地任务；大体系、Linux-only 引擎或 GPU 队列任务去“远程”页生成 HPC 脚本。",
+      details: "本地任务要看日志尾部、进度、checkpoint、失败分类和底部后台任务状态。远程任务先检查 SSH、rsync、workdir、module load、队列名、GPU 资源和 walltime；第一次建议只写脚本或 Dry run，不要直接提交长任务。",
+      done: "任务进入 completed，或失败时能看到具体原因。中断后优先用 checkpoint resume。"
     },
     {
-      step: "8. 导出报告",
-      action: "进入“报告”页，选择 Markdown、HTML 或 PDF。",
-      details: "报告应包含项目、环境、引擎版本、参数、运行命令、日志摘要、checkpoint、轨迹摘要、分析结果和可复现记录。正式项目建议保留原生参数文件。",
-      done: "导出路径出现报告文件；报告能说明这次模拟怎样复现、哪里可能需要人工复核。"
+      step: "8. 分析、检查质量并导出报告",
+      action: "运行结束后刷新 artifact，索引轨迹，生成分析包，再到“报告”页导出。",
+      details: "入门必须看 RMSD、温度、压力和能量是否稳定；RMSF 看柔性区域；Rg 看整体紧密程度；氢键、距离、角度和二面角用于解释局部事件。报告应包含结构、环境、引擎版本、参数、命令、日志、checkpoint、轨迹摘要、图表和人工复核点。",
+      done: "报告文件已生成，别人拿到项目目录和报告能知道输入是什么、怎么跑、结果在哪里、如何复现。"
+    }
+  ];
+
+  const parameterRows: Array<{ item: string; beginner: string; note: string }> = [
+    { item: "蛋白力场", beginner: "蛋白体系优先 CHARMM36m 或 Amber 系列。", note: "配体、金属、膜蛋白或非标准残基可能需要额外参数。不要只因为下拉框里有选项就假设它适合所有分子。" },
+    { item: "水模型", beginner: "入门水溶液常用 TIP3P。", note: "水模型最好和力场推荐搭配，不同引擎名字可能不同，参数映射会把 GUI 选项翻译成原生字段。" },
+    { item: "盒子 padding", beginner: "蛋白到盒子边界先用 1.0 nm。", note: "太小容易和周期边界相互作用，太大会显著增加水分子和计算量。" },
+    { item: "盐浓度", beginner: "常见生理盐浓度可用 0.15 M，并中和体系电荷。", note: "如果实验体系有特定离子条件，应按实验条件设置。" },
+    { item: "温度/压力", beginner: "常见水溶液测试用 300 K 和 1 bar。", note: "NVT 控温，NPT 控温控压；膜体系、材料体系和特殊溶剂需要更谨慎。" },
+    { item: "Timestep", beginner: "有氢键约束时常用 2 fs；不确定先用更保守设置。", note: "数值发散时先降低 timestep、加强最小化、检查初始冲突和约束。" },
+    { item: "生产模拟长度", beginner: "测试先 1 ns；看稳定后再做 10 ns、100 ns 或更长。", note: "这是模拟时间，不是现实等待时间。现实等待时间由机器性能、体系大小和资源决定。" },
+    { item: "输出频率", beginner: "测试可密一点，正式长模拟不要太密。", note: "输出太频繁会产生巨大轨迹和日志；太稀会错过事件。先按 10 到 100 ps 量级检查。" },
+    { item: "Checkpoint 间隔", beginner: "长任务一定要开 checkpoint，间隔比输出频率略长也可以。", note: "HPC walltime 到期、断电或取消任务时，checkpoint 是恢复依据。" }
+  ];
+
+  const scienceRows: Array<{ tool: string; role: string; needed: string }> = [
+    { tool: "OpenMM", role: "Python MD 引擎和快速验证环境。可直接跑小体系，也可用于生成/检查 Python runner。", needed: "选择 OpenMM 引擎时必需；只跑 GROMACS/LAMMPS/CP2K 时通常不适用或可选。" },
+    { tool: "PDBFixer", role: "修复 PDB/mmCIF 中缺失原子、加氢、处理简单结构清理。", needed: "生物分子结构准备常用；材料体系或已有完整拓扑时可能不适用。" },
+    { tool: "MDAnalysis", role: "读取轨迹并计算 RMSD、RMSF、Rg、距离、氢键等分析。", needed: "几乎所有需要分析轨迹的工作流都建议安装。" },
+    { tool: "MDTraj", role: "轻量轨迹读取、几何分析和部分格式互转。", needed: "常用于轨迹预览和基础分析；某些材料模板只作为可选分析工具。" },
+    { tool: "RDKit", role: "小分子读写、SMILES/SDF 处理、基础化学检查。", needed: "有配体、小分子或 SMILES 输入时需要；纯蛋白水溶液可选。" },
+    { tool: "Open Babel", role: "分子格式转换和部分小分子预处理。", needed: "SDF/MOL2/SMILES 互转或配体流程常用；纯蛋白可选。" },
+    { tool: "AmberTools tleap", role: "生成 Amber 拓扑、坐标和力场输入。", needed: "AmberTools/AMBER 生态必需；GROMACS/OpenMM 只在复用 Amber 输入时需要。" },
+    { tool: "AmberTools antechamber/parmchk2", role: "配体电荷和 GAFF/参数检查入口。", needed: "小分子配体参数化时需要；没有配体时不适用。" },
+    { tool: "AmberTools cpptraj", role: "Amber 轨迹后处理和分析。", needed: "AMBER 轨迹分析常用；其他引擎可选。" }
+  ];
+
+  const pluginKindGuideRows: Array<{ kind: PluginKind; role: string; example: string; safety: string }> = [
+    {
+      kind: "engineAdapter",
+      role: "新增或增强一个 MD 引擎的接入能力，例如检测版本、生成输入、启动任务、解析日志、处理 checkpoint。",
+      example: "给 GENESIS、Tinker、实验室内部 runner 或某个商业引擎增加适配。",
+      safety: "会执行外部命令，必须确认 entrypoint、licensePolicy、sourcePath 和写入目录。"
+    },
+    {
+      kind: "analysisModule",
+      role: "增加新的分析指标、图表或轨迹处理流程。",
+      example: "新增接触图、MM/PBSA 摘要、自定义距离监控、膜厚度或材料 RDF 分析。",
+      safety: "通常读取轨迹和写 analysis 输出，注意大文件内存占用和脚本来源。"
+    },
+    {
+      kind: "remoteScheduler",
+      role: "增加新的远程调度器、队列脚本模板或文件同步策略。",
+      example: "适配实验室私有调度器、云主机提交脚本或特殊 SLURM 资源语法。",
+      safety: "会触发 ssh、rsync 或提交命令，先 Dry run 并检查远程工作目录。"
+    },
+    {
+      kind: "buildRecipe",
+      role: "增加引擎安装、源码编译、容器 recipe 或诊断脚本。",
+      example: "为带 PLUMED 的 GROMACS、带 KOKKOS 的 LAMMPS 或集群 CP2K 生成 recipe。",
+      safety: "可能下载源码和运行编译命令，必须确认下载源、prefix 和权限。"
+    },
+    {
+      kind: "reportTemplate",
+      role: "增加报告模板、章节组织或导出格式。",
+      example: "实验室标准报告、课程作业报告、商业项目审计报告。",
+      safety: "通常只读取项目 artifact 和分析缓存，但仍要避免模板泄露隐私路径或许可证信息。"
     }
   ];
 
@@ -2575,7 +2703,7 @@ function GuidePanel({
       use: "编辑 SimulationPlan：体系、力场、溶剂、离子、模拟阶段、输出和基础分析。这里是参数工作的中心。",
       fill: "设置力场、水模型、盒子尺寸、离子浓度、温度、压力、timestep、阶段时长、checkpoint 间隔和输出频率。复杂引擎参数保留原生文件编辑。",
       check: "看参数映射是否 mapped、approximated 或 unsupported。unsupported 不代表不能跑，但代表需要人工看原生输入文件。",
-      next: "Validation 通过后去“运行”生成 run package；结构准备失败则回到项目/结构输入。"
+      next: "参数检查通过后去“运行”生成 run package；结构准备失败则回到项目/结构输入。"
     },
     {
       title: "运行",
@@ -2624,7 +2752,7 @@ function GuidePanel({
       <section className="panel span-3 guide-hero">
         <div>
           <p className="eyebrow">AutoMD 软件使用手册</p>
-          <h3>按页面完成分子动力学项目：导入结构、配置引擎、设置参数、运行、分析和导出报告。</h3>
+          <h3>从零完成一次分子动力学模拟：创建项目、导入结构、配置引擎、准备体系、运行、分析和导出报告。</h3>
         </div>
         <div className="guide-actions">
           <button type="button" className="primary" onClick={() => setActiveTab("overview")}>
@@ -2642,8 +2770,8 @@ function GuidePanel({
       <section className="panel span-3 guide-quickstart">
         <div className="panel-title-row">
           <div>
-            <h3>快速开始（6 步）</h3>
-            <p className="muted">照着点就能跑通一次完整流程；每一步都能直接跳到对应页面。</p>
+            <h3>快速开始（8 步）</h3>
+            <p className="muted">这是给第一次使用者的最短路线。每一步都能直接跳到对应页面，先跑短测试，再放大到正式模拟。</p>
           </div>
         </div>
         <ol className="quickstart-list">
@@ -2665,8 +2793,25 @@ function GuidePanel({
       <section className="panel span-3">
         <div className="panel-title-row">
           <div>
+            <h3>先弄懂这些词</h3>
+            <p className="muted">AutoMD 会把复杂的引擎文件藏到后台，但这些词决定你知道自己正在操作什么。</p>
+          </div>
+        </div>
+        <dl className="definition-list">
+          {conceptRows.map((row) => (
+            <div key={row.term}>
+              <dt>{row.term}</dt>
+              <dd>{row.meaning} {row.where}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
             <h3>完整示例：小型蛋白水溶液模拟</h3>
-            <p className="muted">下面是一条可以照着走的完整路线。没有真实引擎时，也可以先用 Mock runner 验证软件操作闭环。</p>
+            <p className="muted">下面是一条可以照着走的完整路线。目标是先跑一个 1 ns 的短测试，确认输入、引擎和分析闭环都正常。</p>
           </div>
         </div>
         <div className="guide-flow-list">
@@ -2680,6 +2825,60 @@ function GuidePanel({
               </dl>
             </article>
           ))}
+        </div>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>第一次模拟怎么填参数</h3>
+            <p className="muted">这些不是万能科学结论，而是软件入门时比较稳的默认起点。正式课题要按体系和文献复核。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("workflow")}>打开流程页</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">项目</div>
+          <div className="guide-table-head">入门填法</div>
+          <div className="guide-table-head">什么时候要复核</div>
+          {parameterRows.map((row) => (
+            <Fragment key={row.item}>
+              <div><strong>{row.item}</strong></div>
+              <div>{row.beginner}</div>
+              <div>{row.note}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>结构准备与分析环境是什么</h3>
+            <p className="muted">它不是让你学习 Python，而是 AutoMD 为结构准备和分析自动管理的一套科学工具。当前引擎不需要的项会显示“不适用”。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("workflow")}>打开流程页</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">工具</div>
+          <div className="guide-table-head">作用</div>
+          <div className="guide-table-head">什么时候需要</div>
+          {scienceRows.map((row) => (
+            <Fragment key={row.tool}>
+              <div><strong>{row.tool}</strong></div>
+              <div>{row.role}</div>
+              <div>{row.needed}</div>
+            </Fragment>
+          ))}
+        </div>
+        <div className="guide-section">
+          <h4>按钮应该怎么用</h4>
+          <ol className="guide-steps compact">
+            <li>先看状态：可用表示软件已经能调用；需安装表示当前引擎需要但没找到；不适用表示这个工具不参与当前引擎流程。</li>
+            <li>点“自动查找”会扫描 PATH、AutoMD 管理目录和常见安装位置。</li>
+            <li>点“手动查找”会打开系统文件选择器，让你选择 Python 或可执行文件。</li>
+            <li>点“一键安装”会创建或修复 AutoMD 管理的 automd-science 环境，优先从 conda-forge 安装，不写入系统 Python。</li>
+            <li>推荐环境的 environment.yml 只是高级预览，普通用户不需要手动复制。安装失败时再展开它，看缺的是包管理器、网络、权限还是具体包。</li>
+          </ol>
         </div>
       </section>
 
@@ -2733,6 +2932,17 @@ function GuidePanel({
             <p className="muted">先把引擎登记到“引擎”页；缺少依赖时去“编译”页生成安装或编译脚本；平台不合适时走远程。</p>
           </div>
           <button type="button" onClick={() => setActiveTab("engines")}>打开引擎页</button>
+        </div>
+        <div className="guide-section">
+          <h4>不知道选哪个时先按这个规则</h4>
+          <dl className="definition-list">
+            <div><dt>蛋白/核酸/配体的常规生物分子模拟</dt><dd>优先 GROMACS。它适合完整闭环、速度快、资料多，也最适合作为 AutoMD 的默认入门路线。</dd></div>
+            <div><dt>教学、快速验证、自定义 Python 逻辑</dt><dd>选 OpenMM。它对 Python 友好，适合先确认结构和参数思路，但大型生产任务仍要看硬件和体系大小。</dd></div>
+            <div><dt>Amber 拓扑、配体参数、cpptraj 分析</dt><dd>装 AmberTools。它既可以独立做输入生态，也能给其他引擎准备配体和分析材料。</dd></div>
+            <div><dt>材料、粗粒化或非生物分子模型</dt><dd>看 LAMMPS、CP2K、HOOMD-blue、DL_POLY。复杂模型通常需要保留原生 input 文件编辑。</dd></div>
+            <div><dt>实验室已经有商业/受限引擎授权</dt><dd>使用 NAMD、AMBER pmemd、CHARMM、Desmond 或 ACEMD 入口。AutoMD 只保存路径和生成运行入口，不下载这些引擎。</dd></div>
+            <div><dt>桌面电脑跑不动或平台不支持</dt><dd>不要硬装。去“远程”页配置 SSH/HPC，或在“编译”页生成 Linux/容器/集群脚本。</dd></div>
+          </dl>
         </div>
         <div className="guide-engine-list">
           {engineGuideRows.map((row) => {
@@ -2860,6 +3070,25 @@ function GuidePanel({
           ))}
         </div>
         <div className="guide-section">
+          <h4>插件类型分别会影响哪里</h4>
+          <div className="guide-plugin-list">
+            {pluginKindGuideRows.map((row) => (
+              <article className="guide-plugin-row" key={row.kind}>
+                <div>
+                  <h4>{pluginKindText[row.kind]}</h4>
+                  <div className="chip-row">
+                    <span>{row.kind}</span>
+                    <span>{pluginRegistry?.manifests.filter((manifest) => manifest.kind === row.kind).length ?? 0} 个已识别</span>
+                  </div>
+                </div>
+                <dl className="compact-dl">
+                  <div><dt>作用</dt><dd>{row.role}</dd></div>
+                  <div><dt>例子</dt><dd>{row.example}</dd></div>
+                  <div><dt>安全检查</dt><dd>{row.safety}</dd></div>
+                </dl>
+              </article>
+            ))}
+          </div>
           <h4>当前已识别插件</h4>
           {pluginRegistry?.manifests.length ? (
             <div className="guide-plugin-list">
@@ -3043,7 +3272,9 @@ function AppStatusBar({
         <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
           <span className="gpu-status-dot" />
           <span>{gpu?.label ?? "GPU 状态检测中"}</span>
-          {gpu ? <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small> : null}
+          {gpu && !gpu.label.includes("模式") ? (
+            <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small>
+          ) : null}
         </div>
       </div>
     </footer>
