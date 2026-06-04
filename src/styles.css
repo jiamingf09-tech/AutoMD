@@ -672,6 +672,20 @@ ul {
   line-height: 1.5;
 }
 
+.structure-required-warning {
+  align-items: center;
+}
+
+.structure-required-warning span {
+  flex: 1 1 360px;
+}
+
+.structure-required-warning button {
+  flex: 0 0 auto;
+  border-color: color-mix(in srgb, var(--warn-fg), transparent 58%);
+  color: var(--warn-fg);
+}
+
 .current-project-panel .definition-list dd {
   overflow-wrap: anywhere;
 }

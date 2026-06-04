@@ -698,14 +698,29 @@ fn validate_simulation_plan(plan: SimulationPlan) -> ValidationReport {
     planner::validate_plan(&plan)
 }
 
+fn require_plan_structure(plan: &SimulationPlan) -> Result<(), String> {
+    let has_structure = plan
+        .system
+        .source_path
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|path| !path.is_empty());
+    if has_structure {
+        Ok(())
+    } else {
+        Err("未选中结构：请先在“项目”页导入并选中一个结构；AutoMD 不会在无结构时生成或发送分子动力学运行指令。".to_string())
+    }
+}
+
 #[tauri::command]
 fn map_engine_parameters(request: ParameterMappingRequest) -> ParameterMappingReport {
     parameter_mapping::map_parameters(request)
 }
 
 #[tauri::command]
-fn create_mock_task(plan: SimulationPlan) -> SimulationTask {
-    planner::mock_task(plan)
+fn create_mock_task(plan: SimulationPlan) -> Result<SimulationTask, String> {
+    require_plan_structure(&plan)?;
+    Ok(planner::mock_task(plan))
 }
 
 #[tauri::command]
@@ -729,13 +744,15 @@ fn read_structure_file(request: StructureFileRequest) -> Result<StructureFilePay
 }
 
 #[tauri::command]
-fn generate_slurm_script(plan: SimulationPlan) -> String {
-    recipes::slurm_script(&plan)
+fn generate_slurm_script(plan: SimulationPlan) -> Result<String, String> {
+    require_plan_structure(&plan)?;
+    Ok(recipes::slurm_script(&plan))
 }
 
 #[tauri::command]
-fn generate_remote_execution_package(request: RemoteExecutionRequest) -> RemoteExecutionPackage {
-    recipes::remote_execution_package(request)
+fn generate_remote_execution_package(request: RemoteExecutionRequest) -> Result<RemoteExecutionPackage, String> {
+    require_plan_structure(&request.plan)?;
+    Ok(recipes::remote_execution_package(request))
 }
 
 #[tauri::command]
@@ -770,11 +787,13 @@ fn run_build_workflow(request: BuildWorkflowRequest) -> Result<BuildWorkflowResu
 
 #[tauri::command]
 fn prepare_engine_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, String> {
+    require_plan_structure(&request.plan)?;
     engine_adapters::prepare_run_package(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn prepare_batch_experiment(request: BatchExperimentRequest) -> Result<BatchExperimentPackage, String> {
+    require_plan_structure(&request.plan)?;
     batch::prepare_batch_experiment(request).map_err(|error| error.to_string())
 }
 
@@ -790,11 +809,13 @@ fn write_project_text_file(request: ProjectTextFileWriteRequest) -> Result<Proje
 
 #[tauri::command]
 fn prepare_structure_package(request: StructurePreparationRequest) -> Result<StructurePreparationPackage, String> {
+    require_plan_structure(&request.plan)?;
     science_sidecar::prepare_structure_package(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn prepare_trajectory_analysis_package(request: TrajectoryAnalysisRequest) -> Result<TrajectoryAnalysisPackage, String> {
+    require_plan_structure(&request.plan)?;
     science_sidecar::prepare_analysis_package(request).map_err(|error| error.to_string())
 }
 
@@ -818,6 +839,7 @@ fn start_local_engine_run(
     request: StartLocalRunRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<LocalTaskSnapshot, String> {
+    require_plan_structure(&request.plan)?;
     let project_id = request.plan.project_id;
     let snapshot = state
         .task_manager

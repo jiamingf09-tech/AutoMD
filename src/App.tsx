@@ -597,7 +597,7 @@ function App() {
           fn();
         }
       })
-      .catch(() => undefined);
+      .catch((error) => console.warn("menu-action listener failed", error));
     return () => {
       active = false;
       if (unlisten) {
@@ -653,6 +653,7 @@ function App() {
   const activeProject = currentProject ?? projects[0] ?? null;
   const activeStructure = structures.find((s) => s.id === activeStructureId) ?? null;
   const showProjectBanner = !["engines", "build", "plugins", "guide"].includes(activeTab);
+  const showStructureRequiredWarning = showProjectBanner && Boolean(activeProject) && !activeStructure;
 
   function startBackgroundTask(label: string, kind: BackgroundTaskKind, detail = "准备中") {
     const now = new Date().toISOString();
@@ -681,6 +682,26 @@ function App() {
     window.setTimeout(() => {
       setBackgroundTasks((items) => items.filter((task) => task.id !== id));
     }, 12000);
+  }
+
+  function requireActiveStructure(action = "继续分子动力学流程"): StructureEntry | null {
+    if (!activeProject) {
+      notifyError("需要先创建或选择项目，再导入结构。");
+      setActiveTab("overview");
+      return null;
+    }
+    if (!activeStructure || !plan?.system.sourcePath) {
+      pushNotification({
+        severity: "warning",
+        title: "未选中结构",
+        message: `请先在“项目”页导入并选中一个结构，再${action}。没有选中结构时，AutoMD 会拒绝生成或发送分子动力学运行指令。`,
+        action: { label: "去选择结构", run: () => setActiveTab("overview") },
+        guide: false
+      });
+      setActiveTab("overview");
+      return null;
+    }
+    return activeStructure;
   }
 
   function patchRuntimeTool(toolId: string, patch: Partial<ToolDiagnostic>) {
@@ -1228,6 +1249,9 @@ function App() {
     if (!plan) {
       return;
     }
+    if (!requireActiveStructure("生成运行计划")) {
+      return;
+    }
     try {
       const activeProject = currentProject ?? projects[0] ?? null;
       const [queuedTask, script, preparedPackage] = await Promise.all([
@@ -1254,6 +1278,9 @@ function App() {
 
   async function generateBatchExperiment() {
     if (!plan) {
+      return;
+    }
+    if (!requireActiveStructure("生成批量重复实验包")) {
       return;
     }
     const activeProject = currentProject ?? projects[0] ?? null;
@@ -1347,6 +1374,9 @@ function App() {
     if (!plan) {
       return;
     }
+    if (!requireActiveStructure("生成结构准备包")) {
+      return;
+    }
     try {
       const activeProject = currentProject ?? projects[0] ?? null;
       const prepared = await api.prepareStructurePackage({
@@ -1389,6 +1419,9 @@ function App() {
 
   async function startLocalRun() {
     if (!plan) {
+      return;
+    }
+    if (!requireActiveStructure("启动本地任务")) {
       return;
     }
     try {
@@ -1475,6 +1508,9 @@ function App() {
     const runDirectory = localSnapshot?.runDirectory ?? runPackage?.runDirectory ?? null;
     if (!activeProject || !plan || !runDirectory) {
       setError("需要先创建项目并生成 run package，才能扫描 checkpoint。");
+      return;
+    }
+    if (!requireActiveStructure("扫描 checkpoint")) {
       return;
     }
     try {
@@ -1588,6 +1624,9 @@ function App() {
       setError("需要先创建项目并生成 SimulationPlan，才能生成 MDAnalysis 分析包。");
       return;
     }
+    if (!requireActiveStructure("生成 MDAnalysis 分析包")) {
+      return;
+    }
     const trajectoryPath = artifactIndex?.artifacts.find((artifact) => artifact.kind === "trajectory")?.path ?? null;
     try {
       const analysisPackage = await api.prepareTrajectoryAnalysisPackage({
@@ -1609,6 +1648,9 @@ function App() {
     const activeProject = currentProject ?? projects[0] ?? null;
     if (!activeProject || !plan) {
       setError("需要先创建项目并生成 SimulationPlan，才能导出报告。");
+      return;
+    }
+    if (!requireActiveStructure("导出模拟报告")) {
       return;
     }
     try {
@@ -1715,6 +1757,9 @@ function App() {
       setError("需要先生成 SimulationPlan 并选择远程 profile。");
       return;
     }
+    if (!requireActiveStructure("生成远程执行包")) {
+      return;
+    }
     try {
       const generated = await api.remoteExecutionPackage({
         plan,
@@ -1773,7 +1818,7 @@ function App() {
       setRemoteProfiles((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
       setSelectedRemoteProfileId(saved.id);
       setRemoteProfileDraft(saved);
-      if (plan) {
+      if (plan && activeStructure && plan.system.sourcePath) {
         const activeProject = currentProject ?? projects[0] ?? null;
         const generated = await api.remoteExecutionPackage({
           plan,
@@ -1782,6 +1827,10 @@ function App() {
           includeSubmit: true
         });
         setRemotePackage(generated);
+        setRemoteJobSnapshot(null);
+        setRemoteWorkflowResult(null);
+      } else {
+        setRemotePackage(null);
         setRemoteJobSnapshot(null);
         setRemoteWorkflowResult(null);
       }
@@ -1833,6 +1882,9 @@ function App() {
     const activeProject = currentProject ?? projects[0] ?? null;
     if (!activeProject || !remotePackage) {
       setError("需要先创建项目并生成远程执行包，才能运行远程步骤。");
+      return;
+    }
+    if (!requireActiveStructure("运行远程步骤")) {
       return;
     }
     try {
@@ -2100,6 +2152,19 @@ function App() {
           />
         ) : null}
 
+        {showStructureRequiredWarning ? (
+          <section className="engine-reminder structure-required-warning" role="alert">
+            <strong>未选中结构</strong>
+            <span>
+              当前项目还没有选中的结构。请先在“项目”页导入并选中一个 PDB/mmCIF/SDF/MOL2/SMILES
+              或已有引擎工程文件；在此之前，AutoMD 不会生成或发送分子动力学运行指令。
+            </span>
+            <button type="button" onClick={() => setActiveTab("overview")}>
+              去选择结构
+            </button>
+          </section>
+        ) : null}
+
         {activeTab === "overview" && (
           <ProjectPanel
             projects={projects}
@@ -2356,7 +2421,7 @@ function GuidePanel({
   const quickStartSteps: Array<{ title: string; desc: string; tab: TabId; cta: string }> = [
     { title: "新建项目", desc: "在项目页创建项目，自动生成可复现实验目录与 SQLite 索引。", tab: "overview", cta: "去新建" },
     { title: "准备引擎", desc: "引擎页对 GROMACS / OpenMM / LAMMPS 等点「一键安装」（conda-forge，零编译）。", tab: "engines", cta: "去安装" },
-    { title: "导入结构", desc: "回到项目页导入 PDB / mmCIF / SDF / SMILES 或已有引擎工程。", tab: "overview", cta: "去导入" },
+    { title: "导入并选中结构", desc: "回到项目页导入 PDB / mmCIF / SDF / SMILES 或已有引擎工程，并确认它成为当前结构。", tab: "overview", cta: "去导入" },
     { title: "配置参数", desc: "流程页设置力场、水模型、模拟阶段与分析模块。", tab: "workflow", cta: "去配置" },
     { title: "运行", desc: "运行页先用 Mock runner 验证闭环，再切换真实本地或远程执行。", tab: "run", cta: "去运行" },
     { title: "导出报告", desc: "报告页汇总轨迹、分析表与可复现实验输出。", tab: "report", cta: "去报告" }
@@ -2366,7 +2431,7 @@ function GuidePanel({
       step: "1. 创建示例项目",
       action: "进入“项目”页，创建项目，例如 Protein_Water_Demo。",
       details: "选择生物分子项目类型，项目目录建议放在空间充足的位置。导入本地 PDB/mmCIF 文件时可直接点“浏览”打开系统文件管理器；如果还没有真实结构，可以先用已有小蛋白或短肽文件练习完整流程。",
-      done: "项目列表出现新项目，结构摘要能显示原子数、残基数、链信息或导入文件路径。"
+      done: "项目列表出现新项目，结构索引中有已选中的结构；结构摘要能显示原子数、残基数、链信息或导入文件路径。没有选中结构时，流程、运行、远程和报告入口会提醒并拒绝生成运行指令。"
     },
     {
       step: "2. 准备结构",
@@ -2389,7 +2454,7 @@ function GuidePanel({
     {
       step: "5. 先生成运行包",
       action: "进入“运行”页，先用 Dry run 或生成 run package。",
-      details: "Dry run 只写输入文件、命令、脚本和目录，不启动引擎。检查 .mdp/.tpr/.top、OpenMM runner、run.sh、checkpoint 路径和输出文件布局。",
+      details: "生成 run package 前必须已经选中一个结构。Dry run 只写输入文件、命令、脚本和目录，不启动引擎。检查 .mdp/.tpr/.top、OpenMM runner、run.sh、checkpoint 路径和输出文件布局。",
       done: "run directory、命令、输入文件和 artifact 预期清楚；这一步过了再进入真实执行。"
     },
     {
@@ -2425,7 +2490,7 @@ function GuidePanel({
       target: "overview",
       use: "创建项目、快速切换项目、打开项目文件夹、导入结构，并查看结构与轨迹视图。",
       fill: "填写项目名、领域、首选引擎；导入 PDB/mmCIF/SDF/MOL2/SMILES 或已有工程目录。文件路径可以手输，也可以点“浏览”打开系统文件管理器。",
-      check: "当前项目固定条显示正确项目；结构导入后能看到 importedPath、原子/残基/链摘要，结构视图从空状态变为 Mol* 加载状态。",
+      check: "当前项目固定条显示正确项目；结构导入后能看到 importedPath、原子/残基/链摘要，并且结构索引里有当前选中项。结构视图从空状态变为 Mol* 加载状态。",
       next: "导入后进入“流程”设置力场、溶剂、离子和阶段参数；还没配置引擎时先去“引擎”。"
     },
     {
@@ -2449,7 +2514,7 @@ function GuidePanel({
       target: "run",
       use: "执行本地任务、Dry run、Mock runner、日志解析、取消任务、checkpoint resume、批量重复实验、轨迹索引和分析包生成。",
       fill: "选择本地运行模式，设置批量重复数量和 seed，必要时编辑原生参数文件，粘贴日志样本做解析。",
-      check: "先确认 run package，再看任务状态、日志尾部、失败分类、checkpoint 和 artifact。真实执行前最好先 Dry run。",
+      check: "先确认当前项目固定条里显示了当前结构，再生成 run package；没有选中结构时 AutoMD 会直接拒绝运行。之后再看任务状态、日志尾部、失败分类、checkpoint 和 artifact。真实执行前最好先 Dry run。",
       next: "本地完成后刷新 artifact 并分析；集群任务去“远程”；需要报告去“报告”。"
     },
     {
@@ -2457,7 +2522,7 @@ function GuidePanel({
       target: "remote",
       use: "配置 SSH/HPC profile，生成同步、提交、查询、日志和回收脚本。适合大体系、GPU 队列和 Linux-only 引擎。",
       fill: "填写 host、user、port、workdir、scheduler、queue/partition、account、walltime、CPU/GPU、module load 和运行命令模板。",
-      check: "先 Dry run，看 rsync、ssh、sbatch/qsub/bsub、状态查询和日志路径是否正确。workdir 必须有写权限。",
+      check: "先确认已选中结构，再 Dry run，看 rsync、ssh、sbatch/qsub/bsub、状态查询和日志路径是否正确。workdir 必须有写权限。",
       next: "脚本确认后执行提交；任务完成后回收结果，再到“运行/报告”分析。"
     },
     {

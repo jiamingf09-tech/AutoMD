@@ -51,6 +51,8 @@ const requiredUiText = [
   "插件目录由当前系统的应用数据目录动态生成",
   "后台任务",
   "GPU 状态检测中",
+  "未选中结构",
+  "拒绝生成或发送分子动力学运行指令",
 ];
 for (const text of requiredUiText) {
   check(app.includes(text), `missing workflow UI text: ${text}`);
