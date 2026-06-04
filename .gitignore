@@ -10,3 +10,9 @@ src-tauri/gen/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Claude AI config
+.claude/
+
+# macOS installer artifacts
+*.dmg
