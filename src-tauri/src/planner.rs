@@ -77,14 +77,6 @@ pub fn validate_plan(plan: &SimulationPlan) -> ValidationReport {
         });
     }
 
-    if plan.resources.gpu_count > 0 && matches!(plan.resources.execution_mode, ExecutionMode::LocalProcess) {
-        items.push(ValidationItem {
-            severity: ValidationSeverity::Info,
-            field: "resources.gpuCount".to_string(),
-            message: "GPU 可用性将在启动前按引擎后端再次检查。".to_string(),
-        });
-    }
-
     if plan.solvent.padding_nm < 0.5 {
         items.push(ValidationItem {
             severity: ValidationSeverity::Warning,

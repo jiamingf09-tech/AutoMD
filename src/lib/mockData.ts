@@ -227,6 +227,15 @@ export const mockEngineInstallations: EngineInstallationRecord[] = [
 export const mockDiagnostics: RuntimeDiagnostics = {
   os: "web-preview",
   arch: "browser",
+  gpu: {
+    available: false,
+    mode: "cpuFallback",
+    backend: null,
+    label: "GPU 不可用：CPU 模式",
+    reason: "Web 预览模式无法访问本机 GPU。",
+    detail: "预览环境按 CPU fallback 展示；桌面应用启动时会检测 CUDA、ROCm 或 macOS Metal。",
+    checkedAt: now()
+  },
   tools: [
     { id: "conda", label: "Conda", command: "conda", status: "missingInstall", detail: "Web 预览模式" },
     { id: "docker", label: "Docker", command: "docker", status: "missingInstall", detail: "Web 预览模式" },
@@ -469,7 +478,7 @@ export function mockValidate(plan: SimulationPlan): ValidationReport {
   return {
     status: plan.stages.some((stage) => stage.enabled) ? "valid" : "invalid",
     items: plan.stages.some((stage) => stage.enabled)
-      ? [{ severity: "info", field: "resources.gpuCount", message: "Web 预览模式使用模拟校验。" }]
+      ? []
       : [{ severity: "error", field: "stages", message: "至少需要启用一个模拟阶段。" }]
   };
 }

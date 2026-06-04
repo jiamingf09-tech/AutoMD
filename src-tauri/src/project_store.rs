@@ -138,6 +138,37 @@ impl ProjectDatabase {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
     }
 
+    /// Permanently delete a project: its on-disk directory (inputs, generated,
+    /// runs, trajectories, analysis, reports, …) and all database records that
+    /// reference it. Returns false if no project with `id` exists.
+    pub fn delete_project(&self, id: String) -> Result<bool, StoreError> {
+        let path: String = match self.connection.query_row(
+            "SELECT path FROM projects WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(value) => value,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+            Err(error) => return Err(StoreError::Database(error)),
+        };
+
+        let directory = PathBuf::from(&path);
+        if directory.exists() {
+            fs::remove_dir_all(&directory)?;
+        }
+
+        self.connection
+            .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM tasks WHERE project_id = ?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM artifact_records WHERE project_path = ?1", params![path])?;
+        self.connection
+            .execute("DELETE FROM analysis_cache WHERE project_path = ?1", params![path])?;
+
+        Ok(true)
+    }
+
     pub fn list_remote_profiles(&self) -> Result<Vec<RemoteProfile>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, host, scheduler, workdir, module_load_json, default_queue

@@ -627,10 +627,23 @@ pub struct ToolDiagnostic {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GpuAvailability {
+    pub available: bool,
+    pub mode: String,
+    pub backend: Option<GpuBackend>,
+    pub label: String,
+    pub reason: String,
+    pub detail: String,
+    pub checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub os: String,
     pub arch: String,
     pub tools: Vec<ToolDiagnostic>,
+    pub gpu: GpuAvailability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -140,6 +140,23 @@ fn list_plugin_manifests(state: tauri::State<'_, AppState>) -> Result<PluginRegi
 }
 
 #[tauri::command]
+fn open_plugin_folder(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    std::fs::create_dir_all(&state.plugin_root).map_err(|error| error.to_string())?;
+    tauri_plugin_opener::open_path(&state.plugin_root, None::<&str>).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn open_path_in_system(path: String) -> Result<bool, String> {
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err(format!("路径不存在：{}", target.display()));
+    }
+    tauri_plugin_opener::open_path(target, None::<&str>).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
 fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectSummary>, String> {
     let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
     db.list_projects().map_err(|error| error.to_string())
@@ -153,6 +170,12 @@ fn create_project(
     let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
     db.create_project(request, &state.project_root)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_project(id: String, state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    db.delete_project(id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -437,8 +460,11 @@ pub fn run() {
             save_engine_installation,
             delete_engine_installation,
             list_plugin_manifests,
+            open_plugin_folder,
+            open_path_in_system,
             list_projects,
             create_project,
+            delete_project,
             generate_simulation_plan,
             validate_simulation_plan,
             map_engine_parameters,

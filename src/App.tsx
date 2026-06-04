@@ -56,18 +56,247 @@ import type {
   ValidationSeverity
 } from "./types";
 
-type TabId = "overview" | "projects" | "engines" | "workflow" | "run" | "remote" | "build" | "plugins" | "report";
+type TabId = "overview" | "workflow" | "run" | "remote" | "report" | "engines" | "build" | "plugins" | "guide";
+
+type ThemeMode = "light" | "dark";
+
+/** Viewport width below which the layout starts to feel cramped. */
+const MIN_COMFORTABLE_WIDTH = 1024;
+
+/**
+ * Passive, non-blocking banner shown when the window is narrower than the
+ * comfortable layout width. Read-only: it never touches app state or APIs.
+ */
+function WindowSizeNotice() {
+  const [width, setWidth] = useState<number>(() =>
+    typeof window === "undefined" ? MIN_COMFORTABLE_WIDTH : window.innerWidth
+  );
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    function onResize() {
+      setWidth(window.innerWidth);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  if (width >= MIN_COMFORTABLE_WIDTH || dismissed) {
+    return null;
+  }
+
+  return (
+    <div className="window-size-notice" role="status">
+      <span>当前窗口较窄，部分元素可能显示拥挤或错位，建议加宽窗口以获得最佳显示效果。</span>
+      <button type="button" onClick={() => setDismissed(true)}>
+        知道了
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Destructive, two-stage project-deletion dialog. Renders a full-viewport
+ * blurred red scrim over the whole app. The Cancel button is auto-focused so
+ * the Enter key always defaults to the safe action; deleting requires an
+ * explicit second confirmation.
+ */
+function DeleteProjectModal({
+  project,
+  stage,
+  deleting,
+  onCancel,
+  onConfirm
+}: {
+  project: ProjectSummary;
+  stage: "warn" | "confirm";
+  deleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  // Keep focus on the safe (Cancel) action — also re-focus when the stage
+  // advances to the second confirmation, so Enter never deletes by accident.
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, [stage]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-overlay" role="presentation" onMouseDown={onCancel}>
+      <div
+        className="modal-dialog modal-danger"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="delete-project-title"
+        aria-describedby="delete-project-body"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modal-icon" aria-hidden="true">⚠</div>
+        {stage === "warn" ? (
+          <>
+            <h3 id="delete-project-title">永久删除项目？</h3>
+            <div id="delete-project-body" className="modal-body">
+              <p>
+                即将删除「<strong>{project.name}</strong>」。此操作<strong>不可撤销</strong>。
+              </p>
+              <p>
+                项目目录将被整体永久删除，包括原始数据、中间数据和最终数据（inputs、generated、runs、trajectories、analysis、reports
+                等全部内容）。
+              </p>
+              <p className="modal-path mono">{project.path}</p>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 id="delete-project-title">二次确认</h3>
+            <div id="delete-project-body" className="modal-body">
+              <p>
+                请再次确认：确定要<strong>永久删除</strong>「<strong>{project.name}</strong>」吗？删除后<strong>无法恢复</strong>。
+              </p>
+            </div>
+          </>
+        )}
+        <div className="modal-actions">
+          <button type="button" className="modal-cancel" ref={cancelRef} onClick={onCancel} disabled={deleting}>
+            取消
+          </button>
+          <button type="button" className="modal-delete" onClick={onConfirm} disabled={deleting}>
+            {stage === "warn" ? "删除" : deleting ? "删除中…" : "确认删除"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
-  { id: "overview", label: "总览", description: "项目状态和体系预览" },
-  { id: "projects", label: "项目", description: "项目创建和目录结构" },
-  { id: "engines", label: "引擎", description: "检测、授权和平台能力" },
+  { id: "overview", label: "项目", description: "创建、导入和结构视图" },
   { id: "workflow", label: "流程", description: "参数、阶段和分析模块" },
   { id: "run", label: "运行", description: "本地、容器和 HPC 调度" },
   { id: "remote", label: "远程", description: "SSH 和队列 profile" },
+  { id: "report", label: "报告", description: "可复现实验输出" },
+  { id: "engines", label: "引擎", description: "检测、授权和平台能力" },
   { id: "build", label: "编译", description: "源码构建和容器 recipe" },
-  { id: "plugins", label: "插件", description: "扩展 manifest 和能力" },
-  { id: "report", label: "报告", description: "可复现实验输出" }
+  { id: "plugins", label: "插件", description: "扩展 manifest 和能力" }
+];
+
+const guideTab = {
+  id: "guide" as const,
+  label: "使用指引",
+  description: "软件使用、配置和部署手册"
+};
+
+const engineGuideRows = [
+  {
+    id: "gromacs",
+    category: "首选生物分子引擎",
+    install: "推荐 Conda/Mamba 或源码 CMake。源码编译时按需启用 MPI、CUDA/ROCm/OpenCL、PLUMED。",
+    configure: "在引擎页保存 gmx/gmx_mpi 路径、版本和授权状态；在流程页选择力场、溶剂、离子和阶段；在运行页生成 .mdp、topol、run 脚本。",
+    notes: "最适合作为首版闭环：准备、最小化、NVT/NPT、生产、checkpoint resume 和基础分析。"
+  },
+  {
+    id: "openmm",
+    category: "Python/快速原型引擎",
+    install: "推荐 Conda/Mamba 环境安装 openmm、pdbfixer、mdanalysis；GPU 后端由平台和包版本决定。",
+    configure: "在引擎页保存 Python/OpenMM 环境路径；在“流程”页选择 timestep、temperature、pressure、checkpoint/report interval。",
+    notes: "适合教学、快速验证和自定义 Python runner；复杂体系仍建议先用结构准备和参数检查。"
+  },
+  {
+    id: "ambertools",
+    category: "Amber 输入生态",
+    install: "推荐 Conda/Mamba 安装 ambertools；商业 AMBER pmemd 不随软件分发。",
+    configure: "配置 tleap、sander、cpptraj 可执行文件；使用结构准备页生成 tleap、mdin 和 cpptraj 分析输入。",
+    notes: "AmberTools 可用于参数化、拓扑生成和分析；pmemd 需要用户已有许可。"
+  },
+  {
+    id: "namd",
+    category: "用户自备许可入口",
+    install: "用户自行下载并按 NAMD 许可安装；AutoMD 只保存路径、检测版本和生成 .conf/运行入口。",
+    configure: "在引擎页标记授权状态，保存 namd2/namd3 路径；在运行页检查 .conf、结构、拓扑和参数文件。",
+    notes: "不要把 NAMD 二进制放进 AutoMD 发布包。Windows/macOS 不适合的场景可走远程 Linux。"
+  },
+  {
+    id: "lammps",
+    category: "材料和粗粒化扩展",
+    install: "推荐源码 CMake 或容器；按模型启用 KSPACE、MOLECULE、GPU/KOKKOS、MPI 等包。",
+    configure: "保存 lmp 可执行文件路径；保留原生 input 文件编辑；远程/HPC 运行通常比桌面更可靠。",
+    notes: "材料体系参数差异大，GUI 只映射常用资源和阶段，复杂 input 以原生编辑为准。"
+  },
+  {
+    id: "cp2k",
+    category: "QM/MM 和材料计算",
+    install: "推荐 toolchain/source build 或 HPC module；BLAS/LAPACK、MPI、libxc、ELPA、CUDA 支持需按集群环境决定。",
+    configure: "保存 cp2k/CP2K module 信息；在“编译”页生成 recipe，在“远程”页生成 SLURM/PBS/LSF 脚本。",
+    notes: "桌面一键编译风险高，建议优先 dry-run、写脚本、远程执行。"
+  },
+  {
+    id: "genesis",
+    category: "生物分子高性能扩展",
+    install: "推荐源码编译或 HPC module；GPU/MPI 能力按平台检测结果提示。",
+    configure: "保存 spdyn/atdyn 路径；在流程页使用阶段模板，复杂参数保留原生输入文件。",
+    notes: "后续可扩展完整模板；当前适合作为检测、打包和远程运行入口。"
+  },
+  {
+    id: "hoomd",
+    category: "粒子模拟和材料扩展",
+    install: "推荐 Conda/Python 环境；GPU 能力依赖 HOOMD-blue 版本和 CUDA/平台。",
+    configure: "保存 Python 环境或 hoomd runner；使用插件/原生脚本承载复杂模型。",
+    notes: "适合自定义脚本型工作流，GUI 应避免过度抽象模型细节。"
+  },
+  {
+    id: "dl_poly",
+    category: "经典 MD 扩展",
+    install: "通常为源码或集群 module；MPI 构建更适合 HPC。",
+    configure: "保存可执行文件和 module load；原生 CONTROL/FIELD/CONFIG 文件保留编辑入口。",
+    notes: "作为后续材料/经典 MD 模板扩展。"
+  },
+  {
+    id: "tinker",
+    category: "极化力场扩展",
+    install: "用户安装 Tinker/Tinker-HP；按平台保存可执行文件路径。",
+    configure: "保存 dynamic/minimize/analyze 等入口；key 文件使用原生编辑器。",
+    notes: "重点是路径检测、key 文件管理和运行/分析日志解析。"
+  },
+  {
+    id: "amber_pmemd",
+    category: "商业/受限引擎",
+    install: "用户自行获取 AMBER 许可并安装；AutoMD 不下载、不分发。",
+    configure: "只保存 pmemd/pmemd.cuda 路径和许可状态；运行前给出授权提示。",
+    notes: "可复用 AmberTools 输入生态，但执行入口必须来自用户环境。"
+  },
+  {
+    id: "charmm",
+    category: "商业/受限引擎",
+    install: "用户自行安装并完成许可授权。",
+    configure: "保存 charmm 可执行文件路径；原生命令文件由用户检查。",
+    notes: "AutoMD 只做检测、模板入口和日志/报告衔接。"
+  },
+  {
+    id: "desmond",
+    category: "商业/受限引擎",
+    install: "用户在自己的 Schrodinger 授权环境中配置。",
+    configure: "保存 launcher 或命令路径；不自动下载、不自动绕过许可证。",
+    notes: "建议作为企业/实验室已有环境的适配入口。"
+  },
+  {
+    id: "acemd",
+    category: "商业/受限引擎",
+    install: "用户自行安装并授权。",
+    configure: "保存路径和许可状态；复杂参数保留原生配置文件。",
+    notes: "适合后续高级适配器扩展。"
+  }
 ];
 
 const engineLabel: Record<string, string> = {
@@ -209,6 +438,22 @@ function isNativeEditablePath(path: string) {
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const workspaceRef = useRef<HTMLElement | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") return "light";
+    const stored = window.localStorage.getItem("automd-theme");
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    window.localStorage.setItem("automd-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    workspaceRef.current?.scrollTo({ top: 0 });
+  }, [activeTab]);
   const [engines, setEngines] = useState<EngineCapability[]>([]);
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallationRecord[]>([]);
   const [engineInstallationDraft, setEngineInstallationDraft] = useState<EngineInstallationRecord>({
@@ -244,6 +489,9 @@ function App() {
   const [remoteLogOutput, setRemoteLogOutput] = useState("step 5000 of 10000\nPerformance: 82.125 ns/day");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [currentProject, setCurrentProject] = useState<ProjectSummary | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
+  const [deleteStage, setDeleteStage] = useState<"warn" | "confirm">("warn");
+  const [deletingProject, setDeletingProject] = useState(false);
   const [plan, setPlan] = useState<SimulationPlan | null>(null);
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [parameterMappingReport, setParameterMappingReport] = useState<ParameterMappingReport | null>(null);
@@ -331,9 +579,12 @@ function App() {
     [engines, selectedEngineId]
   );
 
-  const openSourceCount = engines.filter((engine) => !engine.license.requiresUserLicense).length;
-  const externalCount = engines.filter((engine) => engine.license.requiresUserLicense).length;
   const readyCount = engines.filter((engine) => engine.detection.status === "ready").length;
+  const activeView = activeTab === "guide"
+    ? guideTab
+    : tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
+  const activeProject = currentProject ?? projects[0] ?? null;
+  const showProjectBanner = !["engines", "build", "plugins", "guide"].includes(activeTab);
 
   async function bootstrap() {
     try {
@@ -415,6 +666,88 @@ function App() {
     } catch (caught) {
       reportError(caught);
     }
+  }
+
+  async function selectProject(project: ProjectSummary) {
+    try {
+      setCurrentProject(project);
+      setProjects((items) => [project, ...items.filter((item) => item.id !== project.id)]);
+      if (project.preferredEngineId) {
+        setSelectedEngineId(project.preferredEngineId);
+      }
+      const generatedPlan = await api.generatePlan({
+        projectId: project.id,
+        name: `${project.name} workflow`,
+        engineId: project.preferredEngineId ?? selectedEngineId,
+        domain: project.domain
+      });
+      setPlan(generatedPlan);
+      setTask(null);
+      setRunPackage(null);
+      setLocalSnapshot(null);
+      await refreshCachedMetadata(project.path);
+      const records = await api.listTaskRecords(project.id);
+      setTaskRecords(records);
+    } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  function openProjectFolder(path?: string | null) {
+    if (!path) {
+      setError("当前没有可打开的项目目录。");
+      return;
+    }
+    void api.openPath(path).catch(reportError);
+  }
+
+  function requestDeleteProject(project: ProjectSummary) {
+    setDeleteStage("warn");
+    setDeleteTarget(project);
+  }
+
+  function cancelDeleteProject() {
+    if (deletingProject) {
+      return;
+    }
+    setDeleteTarget(null);
+    setDeleteStage("warn");
+  }
+
+  async function confirmDeleteProject() {
+    if (!deleteTarget || deletingProject) {
+      return;
+    }
+    // First click on "删除" only advances to the second confirmation.
+    if (deleteStage === "warn") {
+      setDeleteStage("confirm");
+      return;
+    }
+    const target = deleteTarget;
+    setDeletingProject(true);
+    try {
+      await api.deleteProject(target.id);
+      setProjects((items) => items.filter((item) => item.id !== target.id));
+      if (currentProject?.id === target.id) {
+        setCurrentProject(null);
+        setPlan(null);
+        setTask(null);
+        setTaskRecords([]);
+        setArtifactRecords([]);
+        setAnalysisCacheRecords([]);
+        setStructureImportResult(null);
+      }
+      setDeleteTarget(null);
+      setDeleteStage("warn");
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setDeletingProject(false);
+    }
+  }
+
+  function openPluginFolder() {
+    void api.openPluginFolder().catch(reportError);
   }
 
   async function importStructure() {
@@ -1098,7 +1431,9 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <>
+      <WindowSizeNotice />
+      <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">A</div>
@@ -1110,7 +1445,7 @@ function App() {
         <nav className="nav-list" aria-label="AutoMD sections">
           {tabs.map((tab) => (
             <button
-              className={`nav-item ${activeTab === tab.id ? "active" : ""}`}
+              className={`nav-item ${activeTab === tab.id ? "active" : ""} ${tab.id === "engines" ? "nav-separated" : ""}`}
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               type="button"
@@ -1121,36 +1456,66 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <span className="status-dot ready" />
-          <span>{readyCount} 个本地能力已检测可用</span>
+          <button
+            type="button"
+            className={`guide-launch ${activeTab === "guide" ? "active" : ""}`}
+            onClick={() => setActiveTab("guide")}
+          >
+            <span>使用指引</span>
+            <small>软件配置、引擎、插件和部署</small>
+          </button>
+          <div className="sidebar-status-row">
+            <span className="status-dot ready" />
+            <span>{readyCount} 个本地能力已检测可用</span>
+            <button
+              type="button"
+              className="theme-toggle"
+              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+              aria-label={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}
+              title={theme === "dark" ? "浅色模式" : "深色模式"}
+            >
+              {theme === "dark" ? "☀" : "🌙"}
+            </button>
+          </div>
         </div>
       </aside>
 
-      <section className="workspace">
+      <section className="workspace" ref={workspaceRef}>
         <header className="topbar">
           <div>
             <p className="eyebrow">跨平台生物分子 MD 首版</p>
-            <h2>{tabs.find((tab) => tab.id === activeTab)?.label}</h2>
+            <h2>{activeView.label}</h2>
           </div>
-          <div className="topbar-actions">
-            <select
-              value={selectedEngineId}
-              onChange={(event) => {
-                const engineId = event.target.value;
-                setSelectedEngineId(engineId);
-                updatePlan((current) => ({ ...current, engineId }));
-              }}
-            >
-              {engines.map((engine) => (
-                <option value={engine.id} key={engine.id}>
-                  {engine.name}
-                </option>
-              ))}
-            </select>
-            <button type="button" className="primary" onClick={queueMockTask}>
-              生成运行计划
-            </button>
-          </div>
+          {activeTab === "guide" ? (
+            <div className="topbar-actions">
+              <button type="button" onClick={() => setActiveTab("overview")}>
+                新建项目
+              </button>
+              <button type="button" className="primary" onClick={() => setActiveTab("engines")}>
+                配置引擎
+              </button>
+            </div>
+          ) : (
+            <div className="topbar-actions">
+              <select
+                value={selectedEngineId}
+                onChange={(event) => {
+                  const engineId = event.target.value;
+                  setSelectedEngineId(engineId);
+                  updatePlan((current) => ({ ...current, engineId }));
+                }}
+              >
+                {engines.map((engine) => (
+                  <option value={engine.id} key={engine.id}>
+                    {engine.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="primary" onClick={queueMockTask}>
+                生成运行计划
+              </button>
+            </div>
+          )}
         </header>
 
         {error ? (
@@ -1163,25 +1528,21 @@ function App() {
           </div>
         ) : null}
 
-        {activeTab === "overview" && (
-          <OverviewPanel
-            openSourceCount={openSourceCount}
-            externalCount={externalCount}
-            readyCount={readyCount}
-            project={currentProject ?? projects[0] ?? null}
-            plan={plan}
-            validation={validation}
+        {showProjectBanner ? (
+          <CurrentProjectBanner
+            project={activeProject}
+            openProjectFolder={openProjectFolder}
           />
-        )}
+        ) : null}
 
-        {activeTab === "projects" && (
-          <ProjectsPanel
+        {activeTab === "overview" && (
+          <ProjectPanel
             projects={projects}
             projectName={projectName}
             setProjectName={setProjectName}
             domain={domain}
             setDomain={setDomain}
-            project={currentProject ?? projects[0] ?? null}
+            project={activeProject}
             selectedEngineId={selectedEngineId}
             engines={engines}
             importSourceKind={importSourceKind}
@@ -1193,9 +1554,12 @@ function App() {
             importDisplayName={importDisplayName}
             setImportDisplayName={setImportDisplayName}
             structureImportResult={structureImportResult}
+            plan={plan}
             createProject={createProject}
             importStructure={importStructure}
-            setCurrentProject={setCurrentProject}
+            selectProject={selectProject}
+            requestDeleteProject={requestDeleteProject}
+            openProjectFolder={openProjectFolder}
           />
         )}
 
@@ -1326,7 +1690,7 @@ function App() {
         )}
 
         {activeTab === "plugins" && (
-          <PluginsPanel pluginRegistry={pluginRegistry} />
+          <PluginsPanel pluginRegistry={pluginRegistry} openPluginFolder={openPluginFolder} />
         )}
 
         {activeTab === "report" && (
@@ -1344,73 +1708,508 @@ function App() {
             exportReport={exportReport}
           />
         )}
+
+        {activeTab === "guide" && (
+          <GuidePanel
+            engines={engines}
+            pluginRegistry={pluginRegistry}
+            setActiveTab={setActiveTab}
+          />
+        )}
       </section>
-    </main>
+      </main>
+      <AppStatusBar diagnostics={diagnostics} />
+      {deleteTarget ? (
+        <DeleteProjectModal
+          project={deleteTarget}
+          stage={deleteStage}
+          deleting={deletingProject}
+          onCancel={cancelDeleteProject}
+          onConfirm={confirmDeleteProject}
+        />
+      ) : null}
+    </>
   );
 }
 
-function OverviewPanel({
-  openSourceCount,
-  externalCount,
-  readyCount,
-  project,
-  plan,
-  validation
+function GuidePanel({
+  engines,
+  pluginRegistry,
+  setActiveTab
 }: {
-  openSourceCount: number;
-  externalCount: number;
-  readyCount: number;
-  project: ProjectSummary | null;
-  plan: SimulationPlan | null;
-  validation: ValidationReport | null;
+  engines: EngineCapability[];
+  pluginRegistry: PluginRegistrySnapshot | null;
+  setActiveTab: (tab: TabId) => void;
 }) {
+  const pluginKinds = Object.keys(pluginKindText) as PluginKind[];
+  const exampleFlow: Array<{ step: string; action: string; details: string; done: string }> = [
+    {
+      step: "1. 创建示例项目",
+      action: "进入“项目”页，创建项目，例如 Protein_Water_Demo。",
+      details: "选择生物分子项目类型，项目目录建议放在空间充足的位置。导入本地 PDB/mmCIF 文件；如果还没有真实结构，可以先用已有小蛋白或短肽文件练习完整流程。",
+      done: "项目列表出现新项目，结构摘要能显示原子数、残基数、链信息或导入文件路径。"
+    },
+    {
+      step: "2. 准备结构",
+      action: "在“项目/流程”相关区域检查结构准备包。",
+      details: "确认缺失原子、氢原子、非标准残基、配体和水/离子处理。蛋白示例可使用 pH 7.0 加氢、Amber99SB-ILDN 或 CHARMM36 类蛋白力场、TIP3P 水模型、0.15 M NaCl，并中和体系。",
+      done: "准备包能生成拓扑/结构输入；如果配体参数失败，先回到配体参数化而不是直接运行。"
+    },
+    {
+      step: "3. 配置 GROMACS 或 OpenMM",
+      action: "进入“引擎”页，选择要跑的引擎并保存路径。",
+      details: "GROMACS 填 gmx 或 gmx_mpi；OpenMM 填 Python/Conda 环境。状态为 ready 才适合真实运行；缺失时先到“编译”页生成安装脚本，或先用 Mock runner 验证软件流程。",
+      done: "引擎卡片显示可用版本、平台、GPU/MPI/PLUMED 能力和授权状态。"
+    },
+    {
+      step: "4. 设置模拟流程",
+      action: "进入“流程”页，逐段检查 EM、NVT、NPT、Production。",
+      details: "入门示例可设置 EM 5000-50000 steps，NVT 100 ps，NPT 100 ps，Production 1 ns；温度 300 K，压力 1 bar，timestep 2 fs，约束 H-bonds，checkpoint/report interval 10-100 ps。",
+      done: "Validation 没有 error；warning 要读完，尤其是力场、水模型、离子浓度、平台能力和输出频率。"
+    },
+    {
+      step: "5. 先生成运行包",
+      action: "进入“运行”页，先用 Dry run 或生成 run package。",
+      details: "Dry run 只写输入文件、命令、脚本和目录，不启动引擎。检查 .mdp/.tpr/.top、OpenMM runner、run.sh、checkpoint 路径和输出文件布局。",
+      done: "run directory、命令、输入文件和 artifact 预期清楚；这一步过了再进入真实执行。"
+    },
+    {
+      step: "6. 运行本地或远程任务",
+      action: "本地小体系可直接运行；集群任务进入“远程”页生成提交脚本。",
+      details: "本地运行时关注日志、进度、checkpoint 和失败分类。HPC 运行时先 dry-run profile，确认 ssh、rsync、workdir、module load、队列、GPU 资源和 walltime。",
+      done: "任务状态能从 preparing/running 进入 completed，或失败时能看到明确原因。"
+    },
+    {
+      step: "7. 索引轨迹并分析",
+      action: "回到“运行”页刷新 artifacts，索引轨迹，生成分析包。",
+      details: "先索引 xtc/trr/dcd/pdb/xyz，再分块预览轨迹。常用分析包括 RMSD、RMSF、Rg、氢键、距离、角度、二面角、能量、温度、压力和接触图。",
+      done: "分析结果有曲线、统计值或缓存记录；大轨迹不要一次性加载到前端。"
+    },
+    {
+      step: "8. 导出报告",
+      action: "进入“报告”页，选择 Markdown、HTML 或 PDF。",
+      details: "报告应包含项目、环境、引擎版本、参数、运行命令、日志摘要、checkpoint、轨迹摘要、分析结果和可复现记录。正式项目建议保留原生参数文件。",
+      done: "导出路径出现报告文件；报告能说明这次模拟怎样复现、哪里可能需要人工复核。"
+    }
+  ];
+
+  const moduleRows: Array<{
+    title: string;
+    target: TabId;
+    use: string;
+    fill: string;
+    check: string;
+    next: string;
+  }> = [
+    {
+      title: "项目",
+      target: "overview",
+      use: "创建项目、快速切换项目、打开项目文件夹、导入结构，并查看结构与轨迹视图。",
+      fill: "填写项目名、领域、首选引擎；导入 PDB/mmCIF/SDF/MOL2/SMILES 或已有工程目录。项目索引里可以一键打开项目所在文件夹。",
+      check: "当前项目固定条显示正确项目；结构导入后能看到 importedPath、原子/残基/链摘要，结构视图从空状态变为 Mol* 加载状态。",
+      next: "导入后进入“流程”设置力场、溶剂、离子和阶段参数；还没配置引擎时先去“引擎”。"
+    },
+    {
+      title: "引擎",
+      target: "engines",
+      use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
+      fill: "填写可执行文件路径、版本、授权状态和检测记录。商业/受限引擎只登记用户已有路径，不在软件里下载。",
+      check: "ready 表示可直接调用；需要安装表示先去 Build；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
+      next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
+    },
+    {
+      title: "流程",
+      target: "workflow",
+      use: "编辑 SimulationPlan：体系、力场、溶剂、离子、模拟阶段、输出和基础分析。这里是参数工作的中心。",
+      fill: "设置力场、水模型、盒子尺寸、离子浓度、温度、压力、timestep、阶段时长、checkpoint 间隔和输出频率。复杂引擎参数保留原生文件编辑。",
+      check: "看参数映射是否 mapped、approximated 或 unsupported。unsupported 不代表不能跑，但代表需要人工看原生输入文件。",
+      next: "Validation 通过后去“运行”生成 run package；结构准备失败则回到项目/结构输入。"
+    },
+    {
+      title: "运行",
+      target: "run",
+      use: "执行本地任务、Dry run、Mock runner、日志解析、取消任务、checkpoint resume、批量重复实验、轨迹索引和分析包生成。",
+      fill: "选择本地运行模式，设置批量重复数量和 seed，必要时编辑原生参数文件，粘贴日志样本做解析。",
+      check: "先确认 run package，再看任务状态、日志尾部、失败分类、checkpoint 和 artifact。真实执行前最好先 Dry run。",
+      next: "本地完成后刷新 artifact 并分析；集群任务去“远程”；需要报告去“报告”。"
+    },
+    {
+      title: "远程",
+      target: "remote",
+      use: "配置 SSH/HPC profile，生成同步、提交、查询、日志和回收脚本。适合大体系、GPU 队列和 Linux-only 引擎。",
+      fill: "填写 host、user、port、workdir、scheduler、queue/partition、account、walltime、CPU/GPU、module load 和运行命令模板。",
+      check: "先 Dry run，看 rsync、ssh、sbatch/qsub/bsub、状态查询和日志路径是否正确。workdir 必须有写权限。",
+      next: "脚本确认后执行提交；任务完成后回收结果，再到“运行/报告”分析。"
+    },
+    {
+      title: "编译",
+      target: "build",
+      use: "生成安装脚本、源码编译 recipe、容器 recipe 和构建日志。适合没有引擎、需要 MPI/GPU/PLUMED 或平台不支持时使用。",
+      fill: "选择引擎和构建模式，设置 prefix、MPI、GPU 后端、PLUMED、容器工具和超时。默认先 dry-run 或只写脚本。",
+      check: "读 build manifest，确认不会写入系统目录、不会绕过许可证、下载源可信、GPU/MPI 选项符合机器或集群环境。",
+      next: "编译成功后回“引擎”保存新路径；失败时看日志分类和缺失依赖。"
+    },
+    {
+      title: "插件",
+      target: "plugins",
+      use: "查看和管理扩展 manifest。插件可以增加引擎适配器、分析模块、远程调度器、构建 recipe 或报告模板。",
+      fill: "把 .automd-plugin.json 放入插件目录，声明 id、name、kind、version、entrypoint、capabilities、license 和支持平台。",
+      check: "查看 warning、entrypoint、sourcePath 和 capabilities。未知来源插件不要启用执行命令，先读 manifest。",
+      next: "插件被识别后，对应能力会出现在引擎、分析、远程、编译或报告页面。"
+    },
+    {
+      title: "报告",
+      target: "report",
+      use: "整理可复现实验记录，导出 Markdown、HTML 或 PDF。适合项目结束、阶段汇报或复现实验归档。",
+      fill: "选择报告格式，刷新 artifact 和分析缓存，确认项目、参数、环境、命令、日志和图表都已进入报告。",
+      check: "报告应能回答：输入是什么、用什么引擎和版本、参数是什么、命令如何执行、结果在哪里、哪些地方需要人工复核。",
+      next: "导出后保存报告和项目目录；需要继续生产模拟时回“运行”用 checkpoint resume。"
+    }
+  ];
+
   return (
-    <div className="content-grid overview-grid">
-      <section className="panel span-2">
-        <MoleculeViewport plan={plan} project={project} />
-      </section>
-      <section className="panel">
-        <h3>能力快照</h3>
-        <div className="metric-grid">
-          <Metric label="开源/自由工具" value={openSourceCount} />
-          <Metric label="用户自带许可" value={externalCount} />
-          <Metric label="本地可用" value={readyCount} />
-          <Metric label="流程阶段" value={plan?.stages.length ?? 0} />
+    <div className="guide-page">
+      <section className="panel span-3 guide-hero">
+        <div>
+          <p className="eyebrow">AutoMD 软件使用手册</p>
+          <h3>按页面完成分子动力学项目：导入结构、配置引擎、设置参数、运行、分析和导出报告。</h3>
+        </div>
+        <div className="guide-actions">
+          <button type="button" className="primary" onClick={() => setActiveTab("overview")}>
+            从新建项目开始
+          </button>
+          <button type="button" onClick={() => setActiveTab("engines")}>
+            去配置引擎
+          </button>
+          <button type="button" onClick={() => setActiveTab("build")}>
+            查看编译部署
+          </button>
         </div>
       </section>
-      <section className="panel">
-        <h3>当前项目</h3>
-        {project ? (
-          <dl className="definition-list">
-            <div><dt>名称</dt><dd>{project.name}</dd></div>
-            <div><dt>领域</dt><dd>{project.domain}</dd></div>
-            <div><dt>状态</dt><dd>{project.status}</dd></div>
-            <div><dt>目录</dt><dd className="mono">{project.path}</dd></div>
-          </dl>
-        ) : (
-          <EmptyState title="尚未创建项目" text="创建项目后会生成可复现实验目录和 SQLite 索引。" />
-        )}
-      </section>
-      <section className="panel span-2">
-        <h3>首版路线</h3>
-        <div className="roadmap">
-          {["M0 架构和 schema", "M1 GUI 骨架", "M2 GROMACS 闭环", "M3 多引擎", "M4 远程/HPC", "M5 编译与扩展"].map((item, index) => (
-            <div className="roadmap-item" key={item}>
-              <span>{index + 1}</span>
-              <p>{item}</p>
-            </div>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>完整示例：小型蛋白水溶液模拟</h3>
+            <p className="muted">下面是一条可以照着走的完整路线。没有真实引擎时，也可以先用 Mock runner 验证软件操作闭环。</p>
+          </div>
+        </div>
+        <div className="guide-flow-list">
+          {exampleFlow.map((item) => (
+            <article className="guide-flow-step" key={item.step}>
+              <h4>{item.step}</h4>
+              <dl className="compact-dl">
+                <div><dt>在软件里做什么</dt><dd>{item.action}</dd></div>
+                <div><dt>怎么填</dt><dd>{item.details}</dd></div>
+                <div><dt>完成标志</dt><dd>{item.done}</dd></div>
+              </dl>
+            </article>
           ))}
         </div>
       </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>每个页面怎么用</h3>
+            <p className="muted">先按页面职责找入口，再看“完成标志”。这样比到处找按钮更稳。</p>
+          </div>
+        </div>
+        <div className="guide-module-list">
+          {moduleRows.map((row) => (
+            <article className="guide-module-row" key={row.title}>
+              <div>
+                <h4>{row.title}</h4>
+                <button type="button" onClick={() => setActiveTab(row.target)}>
+                  打开{row.title}页
+                </button>
+              </div>
+              <dl className="compact-dl">
+                <div><dt>用途</dt><dd>{row.use}</dd></div>
+                <div><dt>需要填写/检查</dt><dd>{row.fill}</dd></div>
+                <div><dt>完成标志</dt><dd>{row.check}</dd></div>
+                <div><dt>下一步</dt><dd>{row.next}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>固定当前项目和底部状态栏</h3>
+            <p className="muted">这两个区域不属于某一次参数设置，而是帮助你随时确认“现在操作的是哪个项目、当前机器适合怎么跑”。</p>
+          </div>
+        </div>
+        <dl className="definition-list">
+          <div><dt>当前项目</dt><dd>在项目、流程、运行、远程和报告页顶部固定显示。滚动页面时仍能看到项目名、状态、目录，并可以快速切换项目或打开项目文件夹。</dd></div>
+          <div><dt>GPU 状态</dt><dd>软件启动时自动检测 CUDA、ROCm 或 macOS Metal 能力，并在窗口底部右侧显示红/绿指示灯。绿色表示可用；红色表示当前按 CPU fallback 使用。</dd></div>
+          <div><dt>悬停提示</dt><dd>鼠标放到底部 GPU 状态上，会显示不可用原因，例如未检测到 GPU 工具、平台/引擎不支持，或预览环境无法访问硬件。</dd></div>
+          <div><dt>结构视图</dt><dd>新项目默认为空，导入结构后才会加载 Mol*。如果结构路径无效或格式不支持，视图会保留错误提示而不是显示假的分子图。</dd></div>
+        </dl>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>引擎配置</h3>
+            <p className="muted">先把引擎登记到“引擎”页；缺少依赖时去“编译”页生成安装或编译脚本；平台不合适时走远程。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("engines")}>打开引擎页</button>
+        </div>
+        <div className="guide-engine-list">
+          {engineGuideRows.map((row) => {
+            const engine = engines.find((item) => item.id === row.id);
+            return (
+              <article className="guide-engine-row" key={row.id}>
+                <div>
+                  <h4>{engine?.name ?? engineLabel[row.id] ?? row.id}</h4>
+                  <div className="chip-row">
+                    <span>{row.category}</span>
+                    {engine ? <span>{statusText[engine.detection.status]}</span> : <span>等待注册</span>}
+                    {engine?.license.requiresUserLicense ? <span>用户自带许可</span> : <span>开源/自由获取优先</span>}
+                  </div>
+                </div>
+                <dl className="compact-dl">
+                  <div><dt>安装</dt><dd>{row.install}</dd></div>
+                  <div><dt>配置</dt><dd>{row.configure}</dd></div>
+                  <div><dt>注意</dt><dd>{row.notes}</dd></div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="panel span-2">
+        <div className="panel-title-row">
+          <div>
+            <h3>引擎安装、部署和编译</h3>
+            <p className="muted">软件内的“一键部署”会先生成可检查脚本，不会默认静默改系统目录。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("build")}>打开编译页</button>
+        </div>
+        <div className="guide-section">
+          <h4>推荐操作顺序</h4>
+          <ol className="guide-steps compact">
+            <li>在“引擎”页先检测 PATH、Conda/Mamba、Docker/Podman、CUDA/ROCm/OpenCL、MPI 和 PLUMED。</li>
+            <li>如果引擎缺失，在“编译”页选择引擎，生成容器 recipe、源码脚本和 build manifest。</li>
+            <li>先 Dry run，确认命令、下载源、写入目录、权限、prefix、GPU/MPI/PLUMED 选项。</li>
+            <li>选择“只写脚本”时，脚本会落盘；你可以拿到 WSL2、Linux 服务器或 HPC 登录节点上再运行。</li>
+            <li>只有在本机环境明确可控时才选择“执行构建”。执行后看日志路径、失败分类和生成的可执行文件。</li>
+          </ol>
+          <h4>常见构建选项</h4>
+          <dl className="definition-list">
+            <div><dt>MPI</dt><dd>多节点或多进程任务启用。桌面单机测试可先关闭，HPC 建议启用。</dd></div>
+            <div><dt>GPU</dt><dd>CUDA、ROCm、OpenCL、Metal、SYCL 能力按引擎和平台判断，不能简单等价。</dd></div>
+            <div><dt>PLUMED</dt><dd>增强采样常见于 GROMACS/LAMMPS/CP2K 等，必须匹配引擎版本重新编译或动态链接。</dd></div>
+            <div><dt>Prefix</dt><dd>优先使用用户目录、Conda 环境或容器路径。系统目录需要管理员权限，不建议默认写入。</dd></div>
+            <div><dt>容器</dt><dd>开源引擎可生成 Docker/Podman recipe；商业/受限引擎只能在用户已有授权环境中配置路径。</dd></div>
+          </dl>
+        </div>
+      </section>
+
       <section className="panel">
-        <h3>校验</h3>
-        <ValidationList validation={validation} />
+        <div className="panel-title-row">
+          <div>
+            <h3>平台策略</h3>
+            <p className="muted">同一个按钮背后的执行环境要因平台而异。</p>
+          </div>
+        </div>
+        <dl className="definition-list">
+          <div><dt>Windows</dt><dd>原生引擎直接调用；Linux-only 引擎优先 WSL2、容器或远程 Linux。</dd></div>
+          <div><dt>macOS</dt><dd>区分 Apple Silicon 和 Intel。Metal/GPU 支持只在引擎明确支持时显示。</dd></div>
+          <div><dt>Linux</dt><dd>最适合本地或 HPC 执行。注意 CUDA/ROCm 驱动、MPI ABI 和 module 版本。</dd></div>
+          <div><dt>HPC</dt><dd>不要在登录节点盲目编译。先生成脚本，再按集群政策提交或交给管理员环境。</dd></div>
+        </dl>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>远程/HPC 配置</h3>
+            <p className="muted">先保存 profile，再 dry-run 脚本，最后提交。不要第一次就直接执行大任务。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("remote")}>打开远程页</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">字段</div>
+          <div className="guide-table-head">怎么填</div>
+          <div className="guide-table-head">检查点</div>
+          <div><strong>Host</strong></div>
+          <div>登录节点域名，例如 login.cluster.edu。建议先在终端确认 ssh 能免密或正确输入密码。</div>
+          <div>连接失败先查网络、VPN、SSH key、known_hosts。</div>
+          <div><strong>Scheduler</strong></div>
+          <div>选择 SLURM、PBS 或 LSF。AutoMD 会按调度器生成提交、状态和回收脚本。</div>
+          <div>队列字段、GPU 资源语法、account/project 名称通常需要按集群改。</div>
+          <div><strong>Workdir</strong></div>
+          <div>远程工作目录，例如 /scratch/$USER/automd。不要放在空间很小的 home 目录。</div>
+          <div>确认有写权限，轨迹文件会很大。</div>
+          <div><strong>Module load</strong></div>
+          <div>填写 gcc/openmpi/cuda/gromacs/cp2k 等 module load 命令，每行一条。</div>
+          <div>module 版本必须和编译时 ABI 匹配。</div>
+          <div><strong>Run mode</strong></div>
+          <div>Dry run 只预览；写脚本只落盘；Execute 才会 ssh/rsync/submit。</div>
+          <div>第一次建议 Dry run 和写脚本，确认后再执行。</div>
+        </div>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>插件系统使用</h3>
+            <p className="muted">插件用于扩展能力。安装前先看来源、入口命令和 warning。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("plugins")}>打开插件页</button>
+        </div>
+        <div className="metric-grid plugin-metrics">
+          {pluginKinds.map((kind) => (
+            <Metric
+              key={kind}
+              label={pluginKindText[kind]}
+              value={pluginRegistry?.manifests.filter((manifest) => manifest.kind === kind).length ?? 0}
+            />
+          ))}
+        </div>
+        <div className="guide-section">
+          <h4>当前已识别插件</h4>
+          {pluginRegistry?.manifests.length ? (
+            <div className="guide-plugin-list">
+              {pluginRegistry.manifests.map((manifest) => (
+                <article className="guide-plugin-row" key={manifest.id}>
+                  <div>
+                    <h4>{manifest.name}</h4>
+                    <div className="chip-row">
+                      <span>{pluginKindText[manifest.kind]}</span>
+                      <span>v{manifest.version}</span>
+                      <span>{manifest.engineId ?? "通用"}</span>
+                    </div>
+                  </div>
+                  <dl className="compact-dl">
+                    <div><dt>ID</dt><dd className="mono">{manifest.id}</dd></div>
+                    <div><dt>入口</dt><dd className="mono truncate">{manifest.entrypoint}</dd></div>
+                    <div><dt>来源</dt><dd className="mono truncate">{manifest.sourcePath ?? "built-in"}</dd></div>
+                    <div><dt>能力</dt><dd>{manifest.capabilities.join(", ") || "未声明"}</dd></div>
+                    <div><dt>许可</dt><dd>{manifest.licensePolicy ?? "未声明特殊许可"}</dd></div>
+                    <div><dt>警告</dt><dd>{manifest.warnings.join("; ") || "无"}</dd></div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="尚未识别到插件" text="打开插件页确认插件目录，或放入 *.automd-plugin.json manifest 后重新扫描。" />
+          )}
+          <h4>安装插件</h4>
+          <ol className="guide-steps compact">
+            <li>把插件 manifest 放到插件目录，文件名建议以 <span className="mono">.automd-plugin.json</span> 结尾。</li>
+            <li>打开插件页，确认 manifest 数量、类型和警告信息。</li>
+            <li>插件提供的引擎适配器、分析模块、调度器或报告模板会进入对应页面。</li>
+            <li>来自未知来源的插件不要直接启用执行能力。先检查命令、脚本路径和写入目录。</li>
+          </ol>
+          <h4>manifest 至少应该说明</h4>
+          <div className="chip-row">
+            <span>id</span>
+            <span>name</span>
+            <span>kind</span>
+            <span>version</span>
+            <span>entry/command</span>
+            <span>capabilities</span>
+            <span>supportedPlatforms</span>
+            <span>license</span>
+          </div>
+          <p className="muted">
+            插件目录由当前系统的应用数据目录动态生成，不会写死某个用户名或某台电脑的绝对路径。插件页会显示本机实际目录，也可以一键打开。
+          </p>
+          <p className="muted">
+            本机当前插件目录：<span className="mono">{pluginRegistry?.pluginRoot ?? "尚未加载"}</span>
+          </p>
+        </div>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>运行、分析和报告</h3>
+            <p className="muted">建议每次真实执行前都先生成运行包；每次结束后都刷新 artifact，再做分析和报告。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("run")}>打开运行页</button>
+        </div>
+        <dl className="definition-list">
+          <div><dt>Dry run</dt><dd>只生成输入、命令和脚本，不启动进程。适合检查参数、路径和文件布局。</dd></div>
+          <div><dt>Mock runner</dt><dd>内置模拟器，用于测试 GUI、日志刷新、checkpoint、artifact 和报告闭环。</dd></div>
+          <div><dt>真实执行</dt><dd>调用用户配置的本地引擎。执行前确认路径、许可证、GPU/MPI、项目目录、输出频率和 checkpoint 间隔。</dd></div>
+          <div><dt>Checkpoint</dt><dd>中断后优先找 checkpoint resume。不要直接删除 run directory，否则会丢失恢复依据。</dd></div>
+          <div><dt>轨迹</dt><dd>先索引，再分块加载。大轨迹不要一次性加载；先抽样预览，再交给 MDAnalysis 生成分析包。</dd></div>
+          <div><dt>分析</dt><dd>RMSD 看整体稳定性，RMSF 看残基波动，Rg 看紧密程度，氢键/距离/角度/二面角看局部事件，能量/温度/压力看运行质量。</dd></div>
+          <div><dt>报告</dt><dd>报告应包含环境、参数、命令、日志、分析图表、artifact、checkpoint 和可复现记录。</dd></div>
+        </dl>
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>故障处理顺序</h3>
+            <p className="muted">先排环境，再排输入，最后排数值稳定性。</p>
+          </div>
+        </div>
+        <ol className="guide-steps compact">
+          <li>引擎显示缺失：回到引擎页保存可执行文件路径，或在“编译”页生成安装脚本。</li>
+          <li>许可证缺失：只在用户已有授权环境中配置，不在软件内下载商业引擎。</li>
+          <li>拓扑/力场失败：回到流程页检查非标准残基、配体参数、力场和水模型。</li>
+          <li>GPU 不可用：确认驱动、CUDA/ROCm/OpenCL、容器 runtime、HPC 分区和引擎编译选项。</li>
+          <li>远程失败：先检查 ssh、workdir、module load、队列名和调度器输出。</li>
+          <li>数值发散：降低 timestep、加强最小化、检查约束、温压耦合和初始结构冲突。</li>
+        </ol>
       </section>
     </div>
   );
 }
 
-function ProjectsPanel({
+function CurrentProjectBanner({
+  project,
+  openProjectFolder
+}: {
+  project: ProjectSummary | null;
+  openProjectFolder: (path?: string | null) => void;
+}) {
+  return (
+    <section className="current-project-sticky" aria-label="current project">
+      <div className="current-project-main">
+        <span className="status-dot ready" />
+        <div>
+          <small>当前项目</small>
+          <strong>{project?.name ?? "尚未选择项目"}</strong>
+        </div>
+      </div>
+      <div className="current-project-actions">
+        <button type="button" onClick={() => openProjectFolder(project?.path)} disabled={!project}>
+          打开文件夹
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function AppStatusBar({ diagnostics }: { diagnostics: RuntimeDiagnostics | null }) {
+  const gpu = diagnostics?.gpu;
+  const title = gpu
+    ? `${gpu.reason}\n${gpu.detail}\n检查时间：${new Date(gpu.checkedAt).toLocaleString()}`
+    : "正在检测 GPU 状态";
+
+  return (
+    <footer className="app-statusbar">
+      <span>AutoMD</span>
+      <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
+        <span className="gpu-status-dot" />
+        <span>{gpu?.label ?? "GPU 状态检测中"}</span>
+        {gpu ? <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small> : null}
+      </div>
+    </footer>
+  );
+}
+
+function ProjectPanel({
   projects,
   projectName,
   setProjectName,
@@ -1428,9 +2227,12 @@ function ProjectsPanel({
   importDisplayName,
   setImportDisplayName,
   structureImportResult,
+  plan,
   createProject,
   importStructure,
-  setCurrentProject
+  selectProject,
+  requestDeleteProject,
+  openProjectFolder
 }: {
   projects: ProjectSummary[];
   projectName: string;
@@ -1449,12 +2251,19 @@ function ProjectsPanel({
   importDisplayName: string;
   setImportDisplayName: (value: string) => void;
   structureImportResult: StructureImportResult | null;
+  plan: SimulationPlan | null;
   createProject: () => void;
   importStructure: () => void;
-  setCurrentProject: (project: ProjectSummary) => void;
+  selectProject: (project: ProjectSummary) => void;
+  requestDeleteProject: (project: ProjectSummary) => void;
+  openProjectFolder: (path?: string | null) => void;
 }) {
   return (
-    <div className="content-grid">
+    <div className="content-grid project-grid">
+      <section className="engine-reminder span-3" role="note">
+        <strong>请先检查引擎配置</strong>
+        <span>开始导入和运行前，建议先到“引擎”页确认 GROMACS、OpenMM 或其他目标引擎是否可用；缺失时再到“编译”页生成安装脚本。</span>
+      </section>
       <section className="panel">
         <h3>创建项目</h3>
         <label>
@@ -1476,6 +2285,27 @@ function ProjectsPanel({
         <button type="button" className="primary fill" onClick={createProject}>
           创建并生成默认流程
         </button>
+      </section>
+      <section className="panel">
+        <h3>项目索引</h3>
+        {projects.length === 0 ? (
+          <EmptyState title="暂无项目" text="AutoMD 会为每个项目创建 inputs、generated、runs、trajectories、analysis、reports、remote 等目录。" />
+        ) : (
+          <div className="project-index-list">
+            {projects.map((item) => (
+              <div className={`project-index-row ${project?.id === item.id ? "active" : ""}`} key={item.id}>
+                <button type="button" onClick={() => selectProject(item)}>
+                  <strong>{item.name}</strong>
+                  <small>{item.domain} / {item.status}</small>
+                  <span className="mono truncate">{item.path}</span>
+                </button>
+                <button type="button" className="project-delete" onClick={() => requestDeleteProject(item)}>
+                  删除项目
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
       <section className="panel">
         <h3>导入结构</h3>
@@ -1537,24 +2367,7 @@ function ProjectsPanel({
         ) : null}
       </section>
       <section className="panel span-2">
-        <h3>项目索引</h3>
-        {projects.length === 0 ? (
-          <EmptyState title="暂无项目" text="AutoMD 会为每个项目创建 inputs、generated、runs、trajectories、analysis、reports、remote 等目录。" />
-        ) : (
-          <div className="table">
-            <div className="table-head four">
-              <span>名称</span><span>领域</span><span>引擎</span><span>目录</span>
-            </div>
-            {projects.map((project) => (
-              <button className="table-row four" type="button" key={project.id} onClick={() => setCurrentProject(project)}>
-                <span>{project.name}</span>
-                <span>{project.domain}</span>
-                <span>{engines.find((engine) => engine.id === project.preferredEngineId)?.name ?? "未指定"}</span>
-                <span className="mono truncate">{project.path}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        <MoleculeViewport plan={plan} project={project} />
       </section>
     </div>
   );
@@ -3097,11 +3910,23 @@ function BuildPanel({
   );
 }
 
-function PluginsPanel({ pluginRegistry }: { pluginRegistry: PluginRegistrySnapshot | null }) {
+function PluginsPanel({
+  pluginRegistry,
+  openPluginFolder
+}: {
+  pluginRegistry: PluginRegistrySnapshot | null;
+  openPluginFolder: () => void;
+}) {
   if (!pluginRegistry) {
     return (
       <section className="panel">
-        <EmptyState title="插件注册表尚未加载" text="AutoMD 会扫描 app plugins 目录中的 *.automd-plugin.json manifest。" />
+        <div className="panel-title-row">
+          <h3>插件目录</h3>
+          <button type="button" onClick={openPluginFolder}>
+            打开插件目录
+          </button>
+        </div>
+        <EmptyState title="插件注册表尚未加载" text="AutoMD 会扫描当前系统应用数据目录中的 *.automd-plugin.json manifest。" />
       </section>
     );
   }
@@ -3114,7 +3939,12 @@ function PluginsPanel({ pluginRegistry }: { pluginRegistry: PluginRegistrySnapsh
   return (
     <div className="content-grid">
       <section className="panel">
-        <h3>插件目录</h3>
+        <div className="panel-title-row">
+          <h3>插件目录</h3>
+          <button type="button" onClick={openPluginFolder}>
+            打开插件目录
+          </button>
+        </div>
         <dl className="definition-list">
           <div><dt>路径</dt><dd className="mono">{pluginRegistry.pluginRoot}</dd></div>
           <div><dt>manifest</dt><dd>{pluginRegistry.manifests.length}</dd></div>
@@ -3657,38 +4487,22 @@ function MoleculeViewport({ plan, project }: { plan: SimulationPlan | null; proj
       <div className="viewer-header">
         <div>
           <h3>结构与轨迹视图</h3>
-          <p>{plan?.system.name ?? "导入结构后显示 Mol* 视图"}</p>
+          <p>{sourcePath ? plan?.system.name : "结构导入后就绪"}</p>
           {plan?.system.sourcePath ? <small className="mono">{plan.system.sourcePath}</small> : null}
         </div>
         <span className="viewer-badge">{viewerStatus}</span>
       </div>
       <div className={`molecule-canvas ${sourcePath ? "molstar-canvas" : ""}`} aria-label="molecular viewport">
         <div ref={hostRef} className="molstar-host" />
-        {showPlaceholder ? <MoleculePlaceholder /> : null}
+        {showPlaceholder ? (
+          <div className="molecule-empty-state">
+            <EmptyState
+              title={sourcePath ? "结构暂时无法显示" : "等待结构导入"}
+              text={sourcePath ? viewerStatus : "导入 PDB、mmCIF、SDF、MOL2、SMILES 或已有引擎工程后，这里会加载结构与轨迹视图。"}
+            />
+          </div>
+        ) : null}
       </div>
-    </div>
-  );
-}
-
-function MoleculePlaceholder() {
-  return (
-    <div className="molecule-placeholder" aria-hidden="true">
-      {Array.from({ length: 18 }).map((_, index) => (
-        <span
-          className={`atom atom-${index % 4}`}
-          key={index}
-          style={{
-            left: `${12 + ((index * 19) % 76)}%`,
-            top: `${16 + ((index * 31) % 66)}%`,
-            transform: `scale(${0.72 + (index % 5) * 0.08})`
-          }}
-        />
-      ))}
-      <svg viewBox="0 0 600 260" role="presentation">
-        <path d="M48 180 C118 48 182 58 236 118 S344 236 430 126 514 72 558 112" />
-        <path d="M82 122 C156 222 224 224 300 148 S426 58 532 180" />
-        <path d="M118 84 C210 20 344 44 480 84" />
-      </svg>
     </div>
   );
 }

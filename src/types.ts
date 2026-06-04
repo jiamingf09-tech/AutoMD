@@ -212,6 +212,16 @@ export interface ResourceSpec {
   queue?: string | null;
 }
 
+export interface GpuAvailability {
+  available: boolean;
+  mode: "gpu" | "cpuFallback";
+  backend?: GpuBackend | null;
+  label: string;
+  reason: string;
+  detail: string;
+  checkedAt: string;
+}
+
 export interface SimulationStage {
   id: string;
   kind: SimulationStageKind;
@@ -416,6 +426,7 @@ export interface RuntimeDiagnostics {
   os: string;
   arch: string;
   tools: ToolDiagnostic[];
+  gpu: GpuAvailability;
 }
 
 export interface ScienceToolDiagnostic {

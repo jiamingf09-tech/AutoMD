@@ -17,14 +17,19 @@ const lib = read("src-tauri/src/lib.rs");
 const index = read("dist/index.html");
 const ci = read(".github/workflows/ci.yml");
 
-const requiredTabs = ["总览", "项目", "引擎", "流程", "运行", "远程", "编译", "插件", "报告"];
+const requiredTabs = ["项目", "流程", "运行", "远程", "报告", "引擎", "编译", "插件"];
 for (const label of requiredTabs) {
   check(app.includes(`label: "${label}"`), `missing tab label: ${label}`);
 }
+check(!app.includes(`label: "总览"`), "old 总览 tab should not be present");
 
 const requiredUiText = [
+  "请先检查引擎配置",
+  "快速切换项目",
+  "打开文件夹",
   "创建项目",
   "导入到 inputs/",
+  "等待结构导入",
   "生成结构准备包",
   "多引擎参数映射",
   "生成 batch package",
@@ -37,6 +42,9 @@ const requiredUiText = [
   "导出 MD",
   "导出 HTML",
   "导出 PDF",
+  "打开插件目录",
+  "插件目录由当前系统的应用数据目录动态生成",
+  "GPU 状态检测中",
 ];
 for (const text of requiredUiText) {
   check(app.includes(text), `missing workflow UI text: ${text}`);
