@@ -289,8 +289,112 @@ fn get_runtime_diagnostics() -> RuntimeDiagnostics {
 }
 
 #[tauri::command]
-fn get_science_sidecar_diagnostics() -> ScienceSidecarDiagnostics {
-    science_sidecar::diagnostics()
+fn get_science_sidecar_diagnostics(state: tauri::State<'_, AppState>) -> ScienceSidecarDiagnostics {
+    science_sidecar::diagnostics(Some(&state.engines_root))
+}
+
+#[tauri::command]
+fn install_science_sidecar(state: tauri::State<'_, AppState>) -> Result<ScienceSidecarDiagnostics, String> {
+    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+    let manager = ensure_conda_manager(&state.engines_root)?;
+    let prefix = state.engines_root.join("_tools").join("automd-science");
+    let python = if cfg!(target_os = "windows") {
+        prefix.join("Scripts").join("python.exe")
+    } else {
+        prefix.join("bin").join("python")
+    };
+    let mut command = Command::new(&manager);
+    if python.is_file() {
+        command.arg("install");
+    } else {
+        command.arg("create");
+    }
+    let output = command
+        .arg("-y")
+        .arg("-p")
+        .arg(&prefix)
+        .arg("-c")
+        .arg("conda-forge")
+        .args([
+            "python=3.11",
+            "openmm",
+            "pdbfixer",
+            "mdanalysis",
+            "mdtraj",
+            "rdkit",
+            "openbabel",
+            "ambertools",
+            "numpy",
+            "pandas",
+        ])
+        .output()
+        .map_err(|error| format!("启动科学侧车安装器失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!("科学侧车环境安装失败：\n{}", command_tail(&output.stderr)));
+    }
+
+    Ok(science_sidecar::diagnostics(Some(&state.engines_root)))
+}
+
+#[tauri::command]
+fn inspect_science_tool(request: ScienceToolInspectRequest) -> Result<ScienceToolDiagnostic, String> {
+    let path = PathBuf::from(&request.executable_path);
+    if !path.is_file() {
+        return Err(format!("路径不存在或不是可执行文件：{}", path.display()));
+    }
+    if let Some(import_name) = request.import_name.as_deref() {
+        let script = format!(
+            r#"import importlib.util
+import importlib.metadata as metadata
+name = {import_name:?}
+spec = importlib.util.find_spec(name)
+if spec is None:
+    raise SystemExit(2)
+try:
+    print(metadata.version(name))
+except Exception:
+    print("installed")
+"#
+        );
+        let output = Command::new(&path)
+            .args(["-c", &script])
+            .output()
+            .map_err(|error| format!("启动 Python 失败：{error}"))?;
+        if output.status.success() {
+            return Ok(ScienceToolDiagnostic {
+                id: request.id,
+                label: request.label,
+                import_name: request.import_name,
+                command: request.command,
+                status: DetectionStatus::Ready,
+                version: String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                detail: format!("{} can import {import_name}", path.display()),
+            });
+        }
+        return Ok(ScienceToolDiagnostic {
+            id: request.id,
+            label: request.label,
+            import_name: request.import_name,
+            command: request.command,
+            status: DetectionStatus::MissingInstall,
+            version: None,
+            detail: format!("{} cannot import {import_name}", path.display()),
+        });
+    }
+
+    Ok(ScienceToolDiagnostic {
+        id: request.id,
+        label: request.label,
+        import_name: request.import_name,
+        command: request.command,
+        status: DetectionStatus::Ready,
+        version: detect_installed_version(&path),
+        detail: path.display().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1061,6 +1165,8 @@ pub fn run() {
             list_engine_capabilities,
             get_runtime_diagnostics,
             get_science_sidecar_diagnostics,
+            install_science_sidecar,
+            inspect_science_tool,
             list_remote_profile_templates,
             list_remote_profiles,
             save_remote_profile,

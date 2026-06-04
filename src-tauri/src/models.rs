@@ -713,6 +713,16 @@ pub struct ScienceSidecarDiagnostics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScienceToolInspectRequest {
+    pub id: String,
+    pub label: String,
+    pub import_name: Option<String>,
+    pub command: Option<String>,
+    pub executable_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StructurePreparationRequest {
     pub plan: SimulationPlan,
     pub project_path: Option<String>,

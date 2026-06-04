@@ -480,6 +480,14 @@ export interface ScienceSidecarDiagnostics {
   warnings: string[];
 }
 
+export interface ScienceToolInspectRequest {
+  id: string;
+  label: string;
+  importName?: string | null;
+  command?: string | null;
+  executablePath: string;
+}
+
 export interface StructurePreparationRequest {
   plan: SimulationPlan;
   projectPath?: string | null;

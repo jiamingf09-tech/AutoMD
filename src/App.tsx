@@ -43,6 +43,7 @@ import type {
   RuntimeDiagnostics,
   RunArtifact,
   ScienceSidecarDiagnostics,
+  ScienceToolDiagnostic,
   SimulationPlan,
   SimulationStage,
   SimulationTask,
@@ -3689,7 +3690,7 @@ function WorkflowPanel({
       </section>
       <section className="panel">
         <h3>分析模块</h3>
-        <div className="toggle-list">
+        <div className="toggle-list analysis-toggle-grid">
           {plan.analysis.map((module) => (
             <label className="check-row" key={module.kind}>
               <input

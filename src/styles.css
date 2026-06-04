@@ -3082,3 +3082,10 @@ ul {
     justify-self: start;
   }
 }
+
+/* Analysis-module checkboxes flow into as many columns as the panel allows,
+   so the list never leaves a tall empty gutter when the panel is wide. */
+.analysis-toggle-grid {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px 16px;
+}

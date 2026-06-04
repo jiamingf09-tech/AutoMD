@@ -48,6 +48,8 @@ import type {
   RemoteStatusParseRequest,
   RuntimeDiagnostics,
   ScienceSidecarDiagnostics,
+  ScienceToolDiagnostic,
+  ScienceToolInspectRequest,
   SimulationPlan,
   SimulationTask,
   ReportExportRequest,
@@ -151,6 +153,18 @@ export const api = {
     call<ScienceSidecarDiagnostics>("get_science_sidecar_diagnostics", undefined, () =>
       mockScienceSidecarDiagnostics
     ),
+  installScienceSidecar: () =>
+    call<ScienceSidecarDiagnostics>("install_science_sidecar", undefined, () => mockScienceSidecarDiagnostics),
+  inspectScienceTool: (request: ScienceToolInspectRequest) =>
+    call<ScienceToolDiagnostic>("inspect_science_tool", { request }, () => ({
+      id: request.id,
+      label: request.label,
+      importName: request.importName ?? null,
+      command: request.command ?? null,
+      status: "ready",
+      version: "mock",
+      detail: request.executablePath
+    })),
   remoteProfiles: () =>
     call<RemoteProfile[]>("list_remote_profiles", undefined, () => mockRemoteProfiles),
   saveRemoteProfile: (profile: RemoteProfile) =>

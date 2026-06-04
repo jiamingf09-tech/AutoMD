@@ -5,20 +5,26 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-pub fn diagnostics() -> ScienceSidecarDiagnostics {
-    let python_executable = which::which("python3").ok().map(|path| path.display().to_string());
+pub fn diagnostics(engines_root: Option<&Path>) -> ScienceSidecarDiagnostics {
+    let sidecar_python = engines_root.and_then(sidecar_python_executable);
+    let python_executable = sidecar_python
+        .or_else(|| which::which("python3").ok())
+        .map(|path| path.display().to_string());
+    let python_command = python_executable.as_deref().unwrap_or("python3");
+    let sidecar_bin = engines_root.map(|root| root.join("_tools").join("automd-science").join(bin_dir_name()));
     let mut tools = vec![
-        python_module("openmm", "OpenMM", "openmm"),
-        python_module("pdbfixer", "PDBFixer", "pdbfixer"),
-        python_module("mdanalysis", "MDAnalysis", "MDAnalysis"),
-        python_module("rdkit", "RDKit", "rdkit"),
-        python_module("openbabel", "Open Babel Python", "openbabel"),
+        python_module(python_command, "openmm", "OpenMM", "openmm"),
+        python_module(python_command, "pdbfixer", "PDBFixer", "pdbfixer"),
+        python_module(python_command, "mdanalysis", "MDAnalysis", "MDAnalysis"),
+        python_module(python_command, "mdtraj", "MDTraj", "mdtraj"),
+        python_module(python_command, "rdkit", "RDKit", "rdkit"),
+        python_module(python_command, "openbabel", "Open Babel Python", "openbabel"),
     ];
     tools.extend([
-        executable("tleap", "AmberTools tleap"),
-        executable("antechamber", "AmberTools antechamber"),
-        executable("parmchk2", "AmberTools parmchk2"),
-        executable("cpptraj", "AmberTools cpptraj"),
+        executable("tleap", "AmberTools tleap", sidecar_bin.as_deref()),
+        executable("antechamber", "AmberTools antechamber", sidecar_bin.as_deref()),
+        executable("parmchk2", "AmberTools parmchk2", sidecar_bin.as_deref()),
+        executable("cpptraj", "AmberTools cpptraj", sidecar_bin.as_deref()),
     ]);
 
     let warnings = tools
@@ -33,6 +39,28 @@ pub fn diagnostics() -> ScienceSidecarDiagnostics {
         environment_recipe: sidecar_environment_yml(),
         warnings,
     }
+}
+
+fn bin_dir_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Scripts"
+    } else {
+        "bin"
+    }
+}
+
+fn sidecar_python_executable(engines_root: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(target_os = "windows") {
+        "python.exe"
+    } else {
+        "python"
+    };
+    let python = engines_root
+        .join("_tools")
+        .join("automd-science")
+        .join(bin_dir_name())
+        .join(executable);
+    python.is_file().then_some(python)
 }
 
 pub fn prepare_structure_package(
@@ -233,7 +261,7 @@ pub fn prepare_analysis_package(
     })
 }
 
-fn python_module(id: &str, label: &str, import_name: &str) -> ScienceToolDiagnostic {
+fn python_module(python_command: &str, id: &str, label: &str, import_name: &str) -> ScienceToolDiagnostic {
     let script = format!(
         r#"import importlib.util
 import importlib.metadata as metadata
@@ -247,7 +275,7 @@ except Exception:
     print("installed")
 "#
     );
-    match Command::new("python3").args(["-c", &script]).output() {
+    match Command::new(python_command).args(["-c", &script]).output() {
         Ok(output) if output.status.success() => ScienceToolDiagnostic {
             id: id.to_string(),
             label: label.to_string(),
@@ -258,7 +286,7 @@ except Exception:
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
-            detail: "Python module import succeeded.".to_string(),
+            detail: format!("{} can import {import_name}", python_command),
         },
         _ => ScienceToolDiagnostic {
             id: id.to_string(),
@@ -267,14 +295,18 @@ except Exception:
             command: None,
             status: DetectionStatus::MissingInstall,
             version: None,
-            detail: format!("python3 cannot import {import_name}"),
+            detail: format!("{python_command} cannot import {import_name}"),
         },
     }
 }
 
-fn executable(command: &str, label: &str) -> ScienceToolDiagnostic {
-    match which::which(command) {
-        Ok(path) => ScienceToolDiagnostic {
+fn executable(command: &str, label: &str, preferred_bin_dir: Option<&Path>) -> ScienceToolDiagnostic {
+    let preferred_path = preferred_bin_dir
+        .map(|dir| dir.join(command))
+        .filter(|path| path.is_file());
+    let found = preferred_path.or_else(|| which::which(command).ok());
+    match found {
+        Some(path) => ScienceToolDiagnostic {
             id: command.to_string(),
             label: label.to_string(),
             import_name: None,
