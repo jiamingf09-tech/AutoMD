@@ -2992,3 +2992,77 @@ ul {
     width: auto;
   }
 }
+
+/* ============================================================
+   Guide quick-start checklist
+   ============================================================ */
+.quickstart-list {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quickstart-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 12px 14px;
+}
+
+.quickstart-num {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-pill);
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.quickstart-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.quickstart-body strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.quickstart-body p {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.quickstart-cta {
+  white-space: nowrap;
+  border-color: var(--brand);
+  color: var(--brand-strong);
+  font-weight: 700;
+}
+
+.quickstart-cta:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+@media (max-width: 720px) {
+  .quickstart-step {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .quickstart-cta {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}

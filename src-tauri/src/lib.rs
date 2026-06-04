@@ -26,7 +26,8 @@ use crate::task_runner::TaskManager;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+use tauri::{Emitter, Manager};
 
 struct AppState {
     db: Mutex<ProjectDatabase>,
@@ -779,6 +780,70 @@ pub fn run() {
                 engines_root,
                 task_manager: TaskManager::new(task_resource_root),
             });
+
+            // Native macOS menu bar. Custom items emit a "menu-action" event that
+            // the frontend handles (jump pages, open settings, toggle theme, …);
+            // standard items (Edit copy/paste, About, Quit, fullscreen) are native.
+            let handle = app.handle();
+            let settings_item = MenuItem::with_id(handle, "settings", "设置…", true, Some("CmdOrCtrl+,"))?;
+            let new_project_item = MenuItem::with_id(handle, "new-project", "新建项目", true, Some("CmdOrCtrl+N"))?;
+            let open_folder_item = MenuItem::with_id(handle, "open-project-folder", "打开项目文件夹", true, None::<&str>)?;
+            let toggle_theme_item = MenuItem::with_id(handle, "toggle-theme", "切换深色 / 浅色", true, Some("CmdOrCtrl+Shift+L"))?;
+            let reload_item = MenuItem::with_id(handle, "reload", "重新加载", true, Some("CmdOrCtrl+R"))?;
+            let guide_item = MenuItem::with_id(handle, "guide", "使用指引", true, None::<&str>)?;
+
+            let app_menu = SubmenuBuilder::new(handle, "AutoMD")
+                .about(None)
+                .separator()
+                .item(&settings_item)
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+            let file_menu = SubmenuBuilder::new(handle, "文件")
+                .item(&new_project_item)
+                .item(&open_folder_item)
+                .separator()
+                .close_window()
+                .build()?;
+            let edit_menu = SubmenuBuilder::new(handle, "编辑")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let view_menu = SubmenuBuilder::new(handle, "视图")
+                .item(&toggle_theme_item)
+                .separator()
+                .item(&reload_item)
+                .fullscreen()
+                .build()?;
+            let help_menu = SubmenuBuilder::new(handle, "帮助")
+                .item(&guide_item)
+                .build()?;
+            let menu = MenuBuilder::new(handle)
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &help_menu])
+                .build()?;
+            app.set_menu(menu)?;
+            app.on_menu_event(move |app, event| {
+                let id = event.id().0.as_str();
+                if id == "reload" {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.eval("window.location.reload()");
+                    }
+                    return;
+                }
+                let _ = app.emit("menu-action", id.to_string());
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

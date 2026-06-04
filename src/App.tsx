@@ -541,6 +541,53 @@ function App() {
     void bootstrap();
   }, []);
 
+  // Native macOS menu -> frontend actions (only inside Tauri).
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<string>("menu-action", (event) => {
+          switch (event.payload) {
+            case "settings":
+              setSettingsOpen(true);
+              break;
+            case "new-project":
+              setActiveTab("overview");
+              break;
+            case "open-project-folder":
+              openProjectFolder((currentProject ?? projects[0] ?? null)?.path);
+              break;
+            case "toggle-theme":
+              setTheme((current) => (current === "dark" ? "light" : "dark"));
+              break;
+            case "guide":
+              setActiveTab("guide");
+              break;
+            default:
+              break;
+          }
+        })
+      )
+      .then((fn) => {
+        if (active) {
+          unlisten = fn;
+        } else {
+          fn();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [currentProject, projects]);
+
   useEffect(() => {
     if (!plan) {
       setParameterMappingReport(null);
@@ -2204,6 +2251,14 @@ function GuidePanel({
   setActiveTab: (tab: TabId) => void;
 }) {
   const pluginKinds = Object.keys(pluginKindText) as PluginKind[];
+  const quickStartSteps: Array<{ title: string; desc: string; tab: TabId; cta: string }> = [
+    { title: "新建项目", desc: "在项目页创建项目，自动生成可复现实验目录与 SQLite 索引。", tab: "overview", cta: "去新建" },
+    { title: "准备引擎", desc: "引擎页对 GROMACS / OpenMM / LAMMPS 等点「一键安装」（conda-forge，零编译）。", tab: "engines", cta: "去安装" },
+    { title: "导入结构", desc: "回到项目页导入 PDB / mmCIF / SDF / SMILES 或已有引擎工程。", tab: "overview", cta: "去导入" },
+    { title: "配置参数", desc: "流程页设置力场、水模型、模拟阶段与分析模块。", tab: "workflow", cta: "去配置" },
+    { title: "运行", desc: "运行页先用 Mock runner 验证闭环，再切换真实本地或远程执行。", tab: "run", cta: "去运行" },
+    { title: "导出报告", desc: "报告页汇总轨迹、分析表与可复现实验输出。", tab: "report", cta: "去报告" }
+  ];
   const exampleFlow: Array<{ step: string; action: string; details: string; done: string }> = [
     {
       step: "1. 创建示例项目",
@@ -2347,6 +2402,29 @@ function GuidePanel({
             查看编译部署
           </button>
         </div>
+      </section>
+
+      <section className="panel span-3 guide-quickstart">
+        <div className="panel-title-row">
+          <div>
+            <h3>快速开始（6 步）</h3>
+            <p className="muted">照着点就能跑通一次完整流程；每一步都能直接跳到对应页面。</p>
+          </div>
+        </div>
+        <ol className="quickstart-list">
+          {quickStartSteps.map((step, index) => (
+            <li className="quickstart-step" key={`${step.title}-${index}`}>
+              <span className="quickstart-num">{index + 1}</span>
+              <div className="quickstart-body">
+                <strong>{step.title}</strong>
+                <p>{step.desc}</p>
+              </div>
+              <button type="button" className="quickstart-cta" onClick={() => setActiveTab(step.tab)}>
+                {step.cta}
+              </button>
+            </li>
+          ))}
+        </ol>
       </section>
 
       <section className="panel span-3">
