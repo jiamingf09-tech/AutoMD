@@ -60,6 +60,20 @@ import type {
 
 type TabId = "overview" | "workflow" | "run" | "remote" | "report" | "engines" | "build" | "plugins" | "guide";
 
+type NotificationSeverity = "error" | "warning" | "success" | "info";
+
+type AppNotification = {
+  id: string;
+  severity: NotificationSeverity;
+  title: string;
+  message: string;
+  /** Optional one-click fix the user can adopt (e.g. jump to the right page). */
+  action?: { label: string; run: () => void };
+  /** Show a "查看指引" link into the guide page. */
+  guide?: boolean;
+  createdAt: number;
+};
+
 type ThemeMode = "light" | "dark";
 
 type BackgroundTaskKind = "search" | "download" | "install" | "build" | "compile";
@@ -117,7 +131,7 @@ function DeleteModal({ titleText, bodyText, pathText, twoStage, stage, deleting,
   useEffect(() => { function h(e: KeyboardEvent) { if (e.key === 'Escape') { e.preventDefault(); onCancel(); } } window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, [onCancel]);
   const isSecond = twoStage && stage === 'confirm';
   return (
-    <div className="modal-overlay" role="presentation" onMouseDown={onCancel}>
+    <div className="modal-overlay modal-overlay-danger" role="presentation" onMouseDown={onCancel}>
       <div className="modal-dialog modal-danger" role="alertdialog" aria-modal="true" aria-labelledby="del-title" aria-describedby="del-body" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-icon" aria-hidden="true">⚠</div>
         {isSecond ? (<><h3 id="del-title">二次确认</h3><div id="del-body" className="modal-body"><p>请再次确认：确定要<strong>永久删除</strong>「<strong>{titleText}</strong>」吗？删除后<strong>无法恢复</strong>。</p></div></>) : (<><h3 id="del-title">{twoStage ? '永久删除项目？' : '删除结构？'}</h3><div id="del-body" className="modal-body"><p>{bodyText}</p>{pathText ? <p className="modal-path mono">{pathText}</p> : null}</div></>)}
@@ -505,7 +519,8 @@ function App() {
   const [deletingStructure, setDeletingStructure] = useState(false);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [renamingProjectDraft, setRenamingProjectDraft] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     void bootstrap();
@@ -699,6 +714,7 @@ function App() {
       setStructureImportResult(null);
       setStructures([]); setActiveStructureId(null);
       setActiveTab("workflow");
+      notifySuccess(`项目「${project.name}」已创建，默认流程已生成。`, "项目已创建");
     } catch (caught) {
       reportError(caught);
     }
@@ -763,6 +779,7 @@ function App() {
     setDeletingProject(true);
     try {
       await api.deleteProject(target.id);
+      notifySuccess(`项目「${target.name}」已永久删除。`, "已删除");
       setProjects((items) => items.filter((item) => item.id !== target.id));
       if (currentProject?.id === target.id) {
         setCurrentProject(null);
@@ -1675,8 +1692,57 @@ function App() {
     }));
   }
 
+  function pushNotification(input: Omit<AppNotification, "id" | "createdAt">) {
+    const id = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setNotifications((items) => [{ ...input, id, createdAt: Date.now() }, ...items].slice(0, 6));
+    // Errors stay until dismissed ("未处理"); other notices auto-fade.
+    if (input.severity !== "error") {
+      window.setTimeout(() => dismissNotification(id), 6000);
+    }
+    return id;
+  }
+
+  function dismissNotification(id: string) {
+    setNotifications((items) => items.filter((item) => item.id !== id));
+  }
+
+  /** Map a raw error message to a one-click fix (jump the user to where they can resolve it). */
+  function inferQuickFix(message: string): AppNotification["action"] | undefined {
+    if (/创建项目|尚未[^，。]*项目|先[^，。]*项目|选择项目/.test(message)) {
+      return { label: "去项目页", run: () => setActiveTab("overview") };
+    }
+    if (/引擎|可执行文件|executable|未检测到|不可用|未安装|安装/.test(message)) {
+      return { label: "去引擎页", run: () => setActiveTab("engines") };
+    }
+    if (/编译|构建|recipe|build/i.test(message)) {
+      return { label: "去编译页", run: () => setActiveTab("build") };
+    }
+    if (/远程|ssh|slurm|profile/i.test(message)) {
+      return { label: "去远程页", run: () => setActiveTab("remote") };
+    }
+    return undefined;
+  }
+
+  function notifyError(message: string) {
+    pushNotification({ severity: "error", title: "出错了", message, action: inferQuickFix(message), guide: true });
+  }
+
+  function notifySuccess(message: string, title = "完成") {
+    pushNotification({ severity: "success", title, message });
+  }
+
+  // Compatibility shim: existing `setError("…")` calls now surface as error toasts;
+  // `setError(null)` (old banner dismiss) becomes a no-op since toasts self-manage.
+  function setError(message: string | null) {
+    if (message) {
+      notifyError(message);
+    }
+  }
+
   function reportError(caught: unknown) {
-    setError(caught instanceof Error ? caught.message : String(caught));
+    notifyError(caught instanceof Error ? caught.message : String(caught));
   }
 
   return (
@@ -1714,8 +1780,15 @@ function App() {
             <small>软件配置、引擎、插件和部署</small>
           </button>
           <div className="sidebar-status-row">
-            <span className="status-dot ready" />
-            <span>{readyCount} 个本地能力已检测可用</span>
+            <button
+              type="button"
+              className="sidebar-icon-btn"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="设置"
+              title="设置"
+            >
+              ⚙
+            </button>
             <button
               type="button"
               className="theme-toggle"
@@ -1766,16 +1839,6 @@ function App() {
             </div>
           )}
         </header>
-
-        {error ? (
-          <div className="error-banner">
-            <strong>执行错误</strong>
-            <span>{error}</span>
-            <button type="button" onClick={() => setError(null)}>
-              关闭
-            </button>
-          </div>
-        ) : null}
 
         {showProjectBanner ? (
           <CurrentProjectBanner
@@ -1989,7 +2052,19 @@ function App() {
         )}
       </section>
       </main>
-      <AppStatusBar diagnostics={diagnostics} backgroundTasks={backgroundTasks} />
+      <AppStatusBar
+        diagnostics={diagnostics}
+        backgroundTasks={backgroundTasks}
+        notifications={notifications}
+      />
+      <NotificationStack
+        notifications={notifications}
+        onDismiss={dismissNotification}
+        onGuide={() => setActiveTab("guide")}
+      />
+      {settingsOpen ? (
+        <SettingsModal theme={theme} setTheme={setTheme} onClose={() => setSettingsOpen(false)} />
+      ) : null}
       {deleteTarget ? (
         <DeleteProjectModal
           project={deleteTarget}
@@ -2474,12 +2549,18 @@ function CurrentProjectBanner({
 
 function AppStatusBar({
   diagnostics,
-  backgroundTasks
+  backgroundTasks,
+  notifications
 }: {
   diagnostics: RuntimeDiagnostics | null;
   backgroundTasks: BackgroundTask[];
+  notifications: AppNotification[];
 }) {
   const gpu = diagnostics?.gpu;
+  const errorItems = notifications.filter((item) => item.severity === "error");
+  const errorTitle = errorItems.length
+    ? errorItems.map((item) => `• ${item.message}`).join("\n")
+    : "";
   const runningTasks = backgroundTasks.filter((task) => task.status === "running");
   const taskProgress = runningTasks.length
     ? Math.round(runningTasks.reduce((sum, task) => sum + task.progress, 0) / runningTasks.length)
@@ -2497,6 +2578,12 @@ function AppStatusBar({
     <footer className="app-statusbar">
       <span>AutoMD</span>
       <div className="statusbar-right">
+        {errorItems.length ? (
+          <div className="statusbar-errors" title={errorTitle}>
+            <span className="statusbar-error-dot" />
+            <span>{errorItems.length} 个未处理报错</span>
+          </div>
+        ) : null}
         {runningTasks.length ? (
           <div className="background-task-status" title={taskTitle}>
             <span className="task-spinner" />
@@ -2511,6 +2598,136 @@ function AppStatusBar({
         </div>
       </div>
     </footer>
+  );
+}
+
+/**
+ * macOS-style toast stack (bottom-right). Errors persist until dismissed; other
+ * notices auto-fade. Each toast can carry a one-click fix and a guide link.
+ */
+function NotificationStack({
+  notifications,
+  onDismiss,
+  onGuide
+}: {
+  notifications: AppNotification[];
+  onDismiss: (id: string) => void;
+  onGuide: () => void;
+}) {
+  if (!notifications.length) {
+    return null;
+  }
+  const icon: Record<NotificationSeverity, string> = {
+    error: "✕",
+    warning: "!",
+    success: "✓",
+    info: "i"
+  };
+  return (
+    <div className="toast-stack" role="region" aria-label="通知">
+      {notifications.map((item) => (
+        <div className={`toast toast-${item.severity}`} key={item.id} role="alert">
+          <span className="toast-icon" aria-hidden="true">{icon[item.severity]}</span>
+          <div className="toast-body">
+            <strong>{item.title}</strong>
+            <p>{item.message}</p>
+            {item.action || item.guide ? (
+              <div className="toast-actions">
+                {item.action ? (
+                  <button
+                    type="button"
+                    className="toast-fix"
+                    onClick={() => {
+                      item.action?.run();
+                      onDismiss(item.id);
+                    }}
+                  >
+                    {item.action.label}
+                  </button>
+                ) : null}
+                {item.guide ? (
+                  <button
+                    type="button"
+                    className="toast-link"
+                    onClick={() => {
+                      onGuide();
+                      onDismiss(item.id);
+                    }}
+                  >
+                    查看指引
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="toast-close"
+            onClick={() => onDismiss(item.id)}
+            aria-label="关闭通知"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsModal({
+  theme,
+  setTheme,
+  onClose
+}: {
+  theme: ThemeMode;
+  setTheme: (value: ThemeMode) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-overlay" role="presentation" onMouseDown={onClose}>
+      <div
+        className="modal-dialog settings-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="settings-head">
+          <h3 id="settings-title">设置</h3>
+          <button type="button" className="toast-close" onClick={onClose} aria-label="关闭设置">×</button>
+        </div>
+        <div className="settings-section">
+          <label>
+            外观主题
+            <select value={theme} onChange={(event) => setTheme(event.target.value as ThemeMode)}>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+          <p className="settings-hint">主题偏好会被记住，下次启动自动应用。</p>
+        </div>
+        <div className="settings-section">
+          <dl className="settings-meta">
+            <div><dt>应用</dt><dd>AutoMD</dd></div>
+            <div><dt>版本</dt><dd>0.1.0</dd></div>
+          </dl>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="primary" onClick={onClose}>完成</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
