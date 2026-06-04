@@ -566,6 +566,82 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_display_names_import_with_unique_paths() {
+        let root = std::env::temp_dir().join(format!("automd-import-dupe-{}", Uuid::new_v4()));
+        let source = root.join("source.pdb");
+        fs::create_dir_all(&root).expect("root");
+        fs::write(
+            &source,
+            "ATOM      1  N   ALA A   1      11.104  13.207   9.010  1.00 20.00           N\n",
+        )
+        .expect("pdb");
+
+        let first = import_structure(StructureImportRequest {
+            project_path: root.display().to_string(),
+            source_kind: StructureSourceKind::Pdb,
+            source_path: Some(source.display().to_string()),
+            smiles: None,
+            display_name: Some("Same name".to_string()),
+            overwrite: false,
+        })
+        .expect("first import");
+        let second = import_structure(StructureImportRequest {
+            project_path: root.display().to_string(),
+            source_kind: StructureSourceKind::Pdb,
+            source_path: Some(source.display().to_string()),
+            smiles: None,
+            display_name: Some("Same name".to_string()),
+            overwrite: false,
+        })
+        .expect("second import");
+
+        assert_eq!(first.imported_path, "inputs/same-name.pdb");
+        assert_eq!(second.imported_path, "inputs/same-name-2.pdb");
+        assert!(root.join("inputs/same-name.pdb").exists());
+        assert!(root.join("inputs/same-name-2.pdb").exists());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn lists_and_deletes_imported_structures() {
+        let root = std::env::temp_dir().join(format!("automd-import-list-{}", Uuid::new_v4()));
+        let source = root.join("source.pdb");
+        fs::create_dir_all(&root).expect("root");
+        fs::write(
+            &source,
+            "ATOM      1  N   ALA A   1      11.104  13.207   9.010  1.00 20.00           N\n",
+        )
+        .expect("pdb");
+
+        let imported = import_structure(StructureImportRequest {
+            project_path: root.display().to_string(),
+            source_kind: StructureSourceKind::Pdb,
+            source_path: Some(source.display().to_string()),
+            smiles: None,
+            display_name: Some("Persist me".to_string()),
+            overwrite: false,
+        })
+        .expect("import");
+
+        let listed = list_imported_structures(root.display().to_string()).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Persist me");
+        assert_eq!(listed[0].imported_path, imported.imported_path);
+
+        delete_imported_structure(DeleteImportedStructureRequest {
+            project_path: root.display().to_string(),
+            imported_path: imported.imported_path.clone(),
+        })
+        .expect("delete");
+
+        assert!(!root.join(&imported.imported_path).exists());
+        assert!(list_imported_structures(root.display().to_string()).expect("list after delete").is_empty());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn reads_imported_pdb_for_viewer() {
         let root = std::env::temp_dir().join(format!("automd-viewer-pdb-{}", Uuid::new_v4()));
         let source = root.join("source.pdb");

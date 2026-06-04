@@ -999,15 +999,28 @@ function App() {
         projectPath: activeProject.path,
         importedPath: target.importedPath
       });
-      setStructures((previous) => {
-        const next = previous.filter((structure) => structure.importedPath !== target.importedPath);
-        if (activeStructureId === target.id) {
-          const nextActive = next[0] ?? null;
-          setActiveStructureId(nextActive?.id ?? null);
-          setPlan((current) => current && nextActive ? { ...current, system: systemFromStructure(nextActive) } : current);
-        }
-        return next;
-      });
+      const nextStructures = structures.filter((structure) => structure.importedPath !== target.importedPath);
+      setStructures(nextStructures);
+      if (activeStructureId === target.id) {
+        const nextActive = nextStructures[0] ?? null;
+        setActiveStructureId(nextActive?.id ?? null);
+        setPlan((current) => {
+          if (!current) {
+            return current;
+          }
+          if (nextActive) {
+            return { ...current, system: systemFromStructure(nextActive) };
+          }
+          return {
+            ...current,
+            system: {
+              ...current.system,
+              sourcePath: null,
+              name: activeProject.name
+            }
+          };
+        });
+      }
       setDeleteStructureTarget(null);
       notifySuccess(`结构「${target.name}」已删除。`, "结构已删除");
     } catch (caught) {
@@ -2045,7 +2058,6 @@ function App() {
       <section className="workspace" ref={workspaceRef}>
         <header className="topbar">
           <div>
-            <p className="eyebrow">跨平台生物分子 MD 首版</p>
             <h2>{activeView.label}</h2>
           </div>
           {activeTab === "guide" ? (
