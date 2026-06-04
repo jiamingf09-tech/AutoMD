@@ -71,7 +71,19 @@ type AppNotification = {
   action?: { label: string; run: () => void };
   /** Show a "查看指引" link into the guide page. */
   guide?: boolean;
+  /** Errors/warnings are tracked as unresolved "问题": closing minimizes (stays counted) instead of deleting. */
+  persistent: boolean;
+  /** Whether the toast is currently shown in the stack (minimized problems have visible=false). */
+  visible: boolean;
   createdAt: number;
+};
+
+/** Fixed per-severity glyph + label (no colloquial wording). */
+const NOTIFICATION_ICON: Record<NotificationSeverity, string> = {
+  error: "❌",
+  warning: "⚠️",
+  info: "⏰",
+  success: "✅"
 };
 
 type ThemeMode = "light" | "dark";
@@ -521,6 +533,7 @@ function App() {
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [renamingProjectDraft, setRenamingProjectDraft] = useState('');
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [flashProblems, setFlashProblems] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
@@ -1725,20 +1738,51 @@ function App() {
     }));
   }
 
-  function pushNotification(input: Omit<AppNotification, "id" | "createdAt">) {
+  function pushNotification(input: Omit<AppNotification, "id" | "createdAt" | "persistent" | "visible">) {
     const id = typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setNotifications((items) => [{ ...input, id, createdAt: Date.now() }, ...items].slice(0, 6));
-    // Errors stay until dismissed ("未处理"); other notices auto-fade.
-    if (input.severity !== "error") {
-      window.setTimeout(() => dismissNotification(id), 6000);
+    // Errors/warnings are "问题": they persist (minimize on close, stay counted).
+    const persistent = input.severity === "error" || input.severity === "warning";
+    setNotifications((items) => [{ ...input, id, persistent, visible: true, createdAt: Date.now() }, ...items].slice(0, 8));
+    if (!persistent) {
+      window.setTimeout(() => removeNotification(id), 6000);
     }
     return id;
   }
 
-  function dismissNotification(id: string) {
+  function removeNotification(id: string) {
     setNotifications((items) => items.filter((item) => item.id !== id));
+  }
+
+  // Close (×): minimize a persistent problem (stays counted in the status bar); drop ephemeral notices.
+  function dismissNotification(id: string) {
+    setNotifications((items) =>
+      items.flatMap((item) => {
+        if (item.id !== id) return [item];
+        return item.persistent ? [{ ...item, visible: false }] : [];
+      })
+    );
+  }
+
+  // "忽略问题": resolve and remove entirely (no longer counted).
+  function ignoreNotification(id: string) {
+    removeNotification(id);
+  }
+
+  // Status-bar click: re-pop minimized problems, or briefly flash the stack if all are already shown.
+  function reviewProblems() {
+    setNotifications((items) => {
+      const hasHidden = items.some((item) => item.persistent && !item.visible);
+      if (hasHidden) {
+        return items.map((item) => (item.persistent ? { ...item, visible: true } : item));
+      }
+      return items;
+    });
+    if (!notifications.some((item) => item.persistent && !item.visible)) {
+      setFlashProblems(true);
+      window.setTimeout(() => setFlashProblems(false), 750);
+    }
   }
 
   /** Map a raw error message to a one-click fix (jump the user to where they can resolve it). */
@@ -1759,7 +1803,7 @@ function App() {
   }
 
   function notifyError(message: string) {
-    pushNotification({ severity: "error", title: "出错了", message, action: inferQuickFix(message), guide: true });
+    pushNotification({ severity: "error", title: "错误", message, action: inferQuickFix(message), guide: true });
   }
 
   function notifySuccess(message: string, title = "完成") {
@@ -1779,11 +1823,12 @@ function App() {
       schedulerFailure: { label: "去远程页", run: () => setActiveTab("remote") }
     };
     const suggestion = failure.suggestions[0];
-    const message = suggestion ? `${suggestion.title}：${suggestion.detail}` : failure.message;
+    const detail = suggestion ? `${suggestion.title}：${suggestion.detail}` : failure.message;
+    const isError = failure.severity === "error";
     pushNotification({
-      severity: failure.severity === "error" ? "error" : "warning",
-      title: `运行问题 · ${failureCategoryText[failure.category]}`,
-      message,
+      severity: isError ? "error" : "warning",
+      title: isError ? "错误" : "警告",
+      message: `${failureCategoryText[failure.category]}：${detail}`,
       action: fixes[failure.category],
       guide: true
     });
@@ -2113,10 +2158,13 @@ function App() {
         diagnostics={diagnostics}
         backgroundTasks={backgroundTasks}
         notifications={notifications}
+        onReviewProblems={reviewProblems}
       />
       <NotificationStack
         notifications={notifications}
+        flash={flashProblems}
         onDismiss={dismissNotification}
+        onIgnore={ignoreNotification}
         onGuide={() => setActiveTab("guide")}
       />
       {settingsOpen ? (
@@ -2607,16 +2655,19 @@ function CurrentProjectBanner({
 function AppStatusBar({
   diagnostics,
   backgroundTasks,
-  notifications
+  notifications,
+  onReviewProblems
 }: {
   diagnostics: RuntimeDiagnostics | null;
   backgroundTasks: BackgroundTask[];
   notifications: AppNotification[];
+  onReviewProblems: () => void;
 }) {
   const gpu = diagnostics?.gpu;
-  const errorItems = notifications.filter((item) => item.severity === "error");
-  const errorTitle = errorItems.length
-    ? errorItems.map((item) => `• ${item.message}`).join("\n")
+  const problems = notifications.filter((item) => item.persistent);
+  const hasError = problems.some((item) => item.severity === "error");
+  const problemTitle = problems.length
+    ? `${problems.map((item) => `${NOTIFICATION_ICON[item.severity]} ${item.message}`).join("\n")}\n\n点击重新显示或定位这些问题`
     : "";
   const runningTasks = backgroundTasks.filter((task) => task.status === "running");
   const taskProgress = runningTasks.length
@@ -2635,11 +2686,16 @@ function AppStatusBar({
     <footer className="app-statusbar">
       <span>AutoMD</span>
       <div className="statusbar-right">
-        {errorItems.length ? (
-          <div className="statusbar-errors" title={errorTitle}>
-            <span className="statusbar-error-dot" />
-            <span>{errorItems.length} 个未处理报错</span>
-          </div>
+        {problems.length ? (
+          <button
+            type="button"
+            className={`statusbar-problems ${hasError ? "" : "warn-only"}`}
+            title={problemTitle}
+            onClick={onReviewProblems}
+          >
+            <span className="statusbar-problem-dot" />
+            <span>{problems.length} 个未处理问题</span>
+          </button>
         ) : null}
         {runningTasks.length ? (
           <div className="background-task-status" title={taskTitle}>
@@ -2659,36 +2715,36 @@ function AppStatusBar({
 }
 
 /**
- * macOS-style toast stack (bottom-right). Errors persist until dismissed; other
- * notices auto-fade. Each toast can carry a one-click fix and a guide link.
+ * macOS-style toast stack (bottom-right). Errors/warnings persist as tracked
+ * "问题" (close minimizes them into the status bar); success/reminders auto-fade.
+ * Fixed per-severity glyph + label, one-click fix, guide link, and 忽略问题.
  */
 function NotificationStack({
   notifications,
+  flash,
   onDismiss,
+  onIgnore,
   onGuide
 }: {
   notifications: AppNotification[];
+  flash: boolean;
   onDismiss: (id: string) => void;
+  onIgnore: (id: string) => void;
   onGuide: () => void;
 }) {
-  if (!notifications.length) {
+  const visible = notifications.filter((item) => item.visible);
+  if (!visible.length) {
     return null;
   }
-  const icon: Record<NotificationSeverity, string> = {
-    error: "✕",
-    warning: "!",
-    success: "✓",
-    info: "i"
-  };
   return (
-    <div className="toast-stack" role="region" aria-label="通知">
-      {notifications.map((item) => (
+    <div className={`toast-stack ${flash ? "flash" : ""}`} role="region" aria-label="通知">
+      {visible.map((item) => (
         <div className={`toast toast-${item.severity}`} key={item.id} role="alert">
-          <span className="toast-icon" aria-hidden="true">{icon[item.severity]}</span>
+          <span className="toast-icon" aria-hidden="true">{NOTIFICATION_ICON[item.severity]}</span>
           <div className="toast-body">
             <strong>{item.title}</strong>
             <p>{item.message}</p>
-            {item.action || item.guide ? (
+            {item.action || item.guide || item.persistent ? (
               <div className="toast-actions">
                 {item.action ? (
                   <button
@@ -2696,7 +2752,7 @@ function NotificationStack({
                     className="toast-fix"
                     onClick={() => {
                       item.action?.run();
-                      onDismiss(item.id);
+                      onIgnore(item.id);
                     }}
                   >
                     {item.action.label}
@@ -2714,6 +2770,11 @@ function NotificationStack({
                     查看指引
                   </button>
                 ) : null}
+                {item.persistent ? (
+                  <button type="button" className="toast-ignore" onClick={() => onIgnore(item.id)}>
+                    忽略问题
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -2721,7 +2782,8 @@ function NotificationStack({
             type="button"
             className="toast-close"
             onClick={() => onDismiss(item.id)}
-            aria-label="关闭通知"
+            aria-label="关闭"
+            title="关闭（仍计入未处理问题）"
           >
             ×
           </button>

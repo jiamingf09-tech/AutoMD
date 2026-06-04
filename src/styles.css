@@ -2764,11 +2764,9 @@ ul {
 .toast-icon {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--r-pill);
-  font-size: 12px;
-  font-weight: 800;
+  width: 18px;
+  margin-top: 1px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -2846,32 +2844,74 @@ ul {
   color: var(--text);
 }
 
-.toast-error { border-left-color: #d9483b; }
-.toast-error .toast-icon { background: var(--bad-bg); color: #d9483b; }
-.toast-warning { border-left-color: var(--warn-border); }
-.toast-warning .toast-icon { background: var(--warn-bg); color: var(--warn-fg); }
-.toast-success { border-left-color: var(--ok-border); }
-.toast-success .toast-icon { background: var(--ok-bg); color: var(--ok-fg); }
-.toast-info { border-left-color: var(--info-border); }
-.toast-info .toast-icon { background: var(--info-bg); color: var(--info-fg); }
+.toast-error { border-left-color: var(--bad-fg); }
+.toast-warning { border-left-color: var(--warn-fg); }
+.toast-success { border-left-color: var(--ok-fg); }
+.toast-info { border-left-color: var(--info-fg); }
+
+.toast-ignore {
+  margin-left: auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-4);
+}
+
+.toast-ignore:hover {
+  border-color: var(--border-strong);
+  color: var(--text-2);
+}
+
+/* Momentary highlight when the user clicks the status-bar problem count
+   while the toasts are already on screen. */
+.toast-stack.flash .toast-error,
+.toast-stack.flash .toast-warning {
+  animation: toast-flash 0.75s ease;
+}
+
+@keyframes toast-flash {
+  0%, 100% { box-shadow: var(--shadow-2); }
+  35% { box-shadow: 0 0 0 3px var(--bad-fg), var(--shadow-2); }
+}
 
 /* ============================================================
    Status-bar unhandled-error indicator
    ============================================================ */
-.statusbar-errors {
+/* Mirrors .gpu-status: neutral text + a haloed status dot. The dot carries the
+   severity color so both status-bar lights share one visual language. */
+.statusbar-problems {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #d9483b;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text-3);
   font-weight: 800;
-  cursor: help;
+  cursor: pointer;
 }
 
-.statusbar-error-dot {
+.statusbar-problems:hover {
+  border-color: transparent;
+  color: var(--text);
+}
+
+.statusbar-problems:active {
+  transform: none;
+}
+
+.statusbar-problem-dot {
+  flex: 0 0 auto;
   width: 8px;
   height: 8px;
   border-radius: var(--r-pill);
-  background: #d9483b;
+  background: var(--bad-fg);
+  box-shadow: 0 0 0 3px var(--bad-bg);
+}
+
+.statusbar-problems.warn-only .statusbar-problem-dot {
+  background: var(--warn-fg);
+  box-shadow: 0 0 0 3px var(--warn-bg);
 }
 
 /* ============================================================

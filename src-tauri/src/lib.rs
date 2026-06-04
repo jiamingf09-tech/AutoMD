@@ -175,12 +175,13 @@ fn delete_engine_installation(
         .map_err(|error| error.to_string())
 }
 
-/// Engine ids that AutoMD can install with one click via conda-forge.
+/// Engine ids that AutoMD can install with one click via conda-forge
+/// (kept in sync with `engine_conda_package`).
 #[tauri::command]
 fn list_installable_engines() -> Vec<String> {
-    engine_registry::known_engine_ids()
-        .into_iter()
-        .filter(|id| engine_conda_package(id).is_some())
+    ["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]
+        .iter()
+        .map(|id| id.to_string())
         .collect()
 }
 
