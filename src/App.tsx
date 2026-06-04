@@ -467,6 +467,7 @@ function App() {
   });
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([]);
+  const [showBgTasks, setShowBgTasks] = useState(false);
   const [scienceDiagnostics, setScienceDiagnostics] = useState<ScienceSidecarDiagnostics | null>(null);
   const [preparationPackage, setPreparationPackage] = useState<StructurePreparationPackage | null>(null);
   const [pluginRegistry, setPluginRegistry] = useState<PluginRegistrySnapshot | null>(null);
@@ -1115,6 +1116,7 @@ function App() {
     // Conda-installable tools (MPI, PLUMED) install for real, no compilation.
     if (installableTools.includes(tool.id)) {
       const taskId = startBackgroundTask(`安装 ${tool.label}`, "install", "通过 conda-forge 下载并安装（可能需要几分钟）");
+      notifyInstalling(tool.label);
       try {
         updateBackgroundTask(taskId, { progress: 40, detail: "创建隔离环境并解析依赖…" });
         const path = await api.installTool(tool.id);
@@ -1198,6 +1200,7 @@ function App() {
 
   async function autoInstallScienceSidecar() {
     const taskId = startBackgroundTask("安装 Python 科学侧车", "install", "准备 conda-forge automd-science 环境");
+    notifyInstalling("Python 科学侧车");
     try {
       updateBackgroundTask(taskId, { progress: 25, detail: "检查 Conda/Mamba；缺失时自动安装 Miniforge" });
       const diagnostics = await api.installScienceSidecar();
@@ -1266,6 +1269,7 @@ function App() {
     // or compilation). Commercial / licensed engines fall back to build recipes.
     if (installableEngines.includes(engine.id)) {
       const taskId = startBackgroundTask(`安装 ${engine.name}`, "install", "通过 conda-forge 下载并安装（可能需要几分钟）");
+      notifyInstalling(engine.name);
       try {
         setSelectedEngineId(engine.id);
         updateBackgroundTask(taskId, { progress: 35, detail: "创建隔离环境并解析依赖…" });
@@ -2095,6 +2099,15 @@ function App() {
     pushNotification({ severity: "success", title, message });
   }
 
+  /** Bottom-right reminder shown the moment a background install starts. */
+  function notifyInstalling(label: string) {
+    pushNotification({
+      severity: "info",
+      title: "正在安装",
+      message: `${label} 正在后台安装（可能需要几分钟）。安装期间软件可正常使用，进度见左下角「后台任务」。`
+    });
+  }
+
   /** Surface a diagnosed run/build failure as a toast with a category-aware one-click fix. */
   function notifyFailure(failure: FailureAnalysis) {
     const fixes: Partial<Record<FailureAnalysis["category"], { label: string; run: () => void }>> = {
@@ -2460,7 +2473,12 @@ function App() {
         backgroundTasks={backgroundTasks}
         notifications={notifications}
         onReviewProblems={reviewProblems}
+        bgTasksOpen={showBgTasks}
+        onToggleBgTasks={() => setShowBgTasks((open) => !open)}
       />
+      {showBgTasks ? (
+        <BackgroundTaskPanel tasks={backgroundTasks} onClose={() => setShowBgTasks(false)} />
+      ) : null}
       <NotificationStack
         notifications={notifications}
         flash={flashProblems}
@@ -3221,12 +3239,16 @@ function AppStatusBar({
   diagnostics,
   backgroundTasks,
   notifications,
-  onReviewProblems
+  onReviewProblems,
+  bgTasksOpen,
+  onToggleBgTasks
 }: {
   diagnostics: RuntimeDiagnostics | null;
   backgroundTasks: BackgroundTask[];
   notifications: AppNotification[];
   onReviewProblems: () => void;
+  bgTasksOpen: boolean;
+  onToggleBgTasks: () => void;
 }) {
   const gpu = diagnostics?.gpu;
   const problems = notifications.filter((item) => item.persistent);
@@ -3249,7 +3271,25 @@ function AppStatusBar({
 
   return (
     <footer className="app-statusbar">
-      <span>AutoMD</span>
+      <div className="statusbar-left">
+        <span>AutoMD</span>
+        {backgroundTasks.length ? (
+          <button
+            type="button"
+            className={`background-task-status ${bgTasksOpen ? "active" : ""}`}
+            title={taskTitle}
+            onClick={onToggleBgTasks}
+          >
+            {runningTasks.length ? (
+              <span className="task-spinner" />
+            ) : (
+              <span className="bgtask-done-dot" />
+            )}
+            <span>后台任务 {runningTasks.length || backgroundTasks.length} 个</span>
+            {runningTasks.length ? <small>{taskProgress}%</small> : null}
+          </button>
+        ) : null}
+      </div>
       <div className="statusbar-right">
         {problems.length ? (
           <button
@@ -3262,13 +3302,6 @@ function AppStatusBar({
             <span>{problems.length} 个未处理问题</span>
           </button>
         ) : null}
-        {runningTasks.length ? (
-          <div className="background-task-status" title={taskTitle}>
-            <span className="task-spinner" />
-            <span>后台任务 {runningTasks.length} 个</span>
-            <small>{taskProgress}%</small>
-          </div>
-        ) : null}
         <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
           <span className="gpu-status-dot" />
           <span>{gpu?.label ?? "GPU 状态检测中"}</span>
@@ -3278,6 +3311,63 @@ function AppStatusBar({
         </div>
       </div>
     </footer>
+  );
+}
+
+const BACKGROUND_TASK_STATUS_TEXT: Record<BackgroundTaskStatus, string> = {
+  running: "进行中",
+  completed: "已完成",
+  failed: "失败"
+};
+
+/** Popover (above the status bar) listing the background-task queue + progress. */
+function BackgroundTaskPanel({
+  tasks,
+  onClose
+}: {
+  tasks: BackgroundTask[];
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="bgtask-popover" role="dialog" aria-label="后台任务">
+      <div className="bgtask-head">
+        <strong>后台任务</strong>
+        <button type="button" className="toast-close" onClick={onClose} aria-label="关闭">×</button>
+      </div>
+      {tasks.length === 0 ? (
+        <p className="bgtask-empty">当前没有后台任务。</p>
+      ) : (
+        <ul className="bgtask-list">
+          {tasks.map((task) => (
+            <li className={`bgtask-item ${task.status}`} key={task.id}>
+              <div className="bgtask-item-head">
+                <span className="bgtask-item-label">{task.label}</span>
+                <span className="bgtask-item-status">
+                  {BACKGROUND_TASK_STATUS_TEXT[task.status]}
+                  {task.status === "running" ? ` · ${Math.round(task.progress)}%` : ""}
+                </span>
+              </div>
+              {task.status === "running" ? (
+                <div className="bgtask-bar">
+                  <div className="bgtask-bar-fill" style={{ width: `${Math.min(100, Math.max(4, task.progress))}%` }} />
+                </div>
+              ) : null}
+              <small>{task.detail}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -4118,24 +4208,31 @@ function WorkflowPanel({
                     一键安装/修复科学环境
                   </button>
                 </div>
-                {scienceTools.map(({ tool, usage, status }) => (
-                  <div className={`tool-row ${status !== "ready" && status !== "notApplicable" ? "needs-action" : ""}`} key={tool.id}>
-                    <div>
-                      <strong>{tool.label}</strong>
-                      <small>{usage.label} · {tool.importName ?? tool.command ?? tool.id}</small>
-                    </div>
-                    <StatusPill status={status} />
-                    {status !== "ready" && status !== "notApplicable" ? (
-                      <div className="tool-action-row">
-                        <button type="button" onClick={() => autoFindScienceTool(tool)}>自动查找</button>
-                        <button type="button" onClick={() => manualFindScienceTool(tool)}>手动查找</button>
-                        <button type="button" className="primary" onClick={autoInstallScienceSidecar}>一键安装</button>
+                {scienceTools.map(({ tool, usage, status }) => {
+                  const needsAction = status !== "ready" && status !== "notApplicable";
+                  return (
+                    <div className={`science-tool-card ${needsAction ? "needs-action" : ""}`} key={tool.id}>
+                      <div className="science-tool-head">
+                        <div className="science-tool-meta">
+                          <strong>{tool.label}</strong>
+                          <small>{usage.label} · {tool.importName ?? tool.command ?? tool.id}</small>
+                        </div>
+                        <StatusPill status={status} />
                       </div>
-                    ) : (
-                      <small className="mono">{status === "notApplicable" ? usage.detail : tool.detail}</small>
-                    )}
-                  </div>
-                ))}
+                      {needsAction ? (
+                        <div className="science-tool-actions">
+                          <button type="button" onClick={() => autoFindScienceTool(tool)}>自动查找</button>
+                          <button type="button" onClick={() => manualFindScienceTool(tool)}>手动查找</button>
+                          <button type="button" className="primary" onClick={autoInstallScienceSidecar}>一键安装</button>
+                        </div>
+                      ) : (
+                        <p className={`science-tool-detail ${status === "notApplicable" ? "" : "mono"}`}>
+                          {status === "notApplicable" ? usage.detail : tool.detail}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <EmptyState title="等待诊断" text="启动后会检测 OpenMM、PDBFixer、MDAnalysis、RDKit、Open Babel 和 AmberTools。" />

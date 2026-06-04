@@ -294,47 +294,56 @@ fn get_science_sidecar_diagnostics(state: tauri::State<'_, AppState>) -> Science
 }
 
 #[tauri::command]
-fn install_science_sidecar(state: tauri::State<'_, AppState>) -> Result<ScienceSidecarDiagnostics, String> {
-    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
-    let manager = ensure_conda_manager(&state.engines_root)?;
-    let prefix = state.engines_root.join("_tools").join("automd-science");
-    let python = if cfg!(target_os = "windows") {
-        prefix.join("Scripts").join("python.exe")
-    } else {
-        prefix.join("bin").join("python")
-    };
-    let mut command = Command::new(&manager);
-    if python.is_file() {
-        command.arg("install");
-    } else {
-        command.arg("create");
-    }
-    let output = command
-        .arg("-y")
-        .arg("-p")
-        .arg(&prefix)
-        .arg("-c")
-        .arg("conda-forge")
-        .args([
-            "python=3.11",
-            "openmm",
-            "pdbfixer",
-            "mdanalysis",
-            "mdtraj",
-            "rdkit",
-            "openbabel",
-            "ambertools",
-            "numpy",
-            "pandas",
-        ])
-        .output()
-        .map_err(|error| format!("启动科学侧车安装器失败：{error}"))?;
+async fn install_science_sidecar(
+    state: tauri::State<'_, AppState>,
+) -> Result<ScienceSidecarDiagnostics, String> {
+    let engines_root = state.engines_root.clone();
+    // The science env is large; run the whole install on the blocking pool so the
+    // UI never freezes.
+    tauri::async_runtime::spawn_blocking(move || -> Result<ScienceSidecarDiagnostics, String> {
+        std::fs::create_dir_all(&engines_root).map_err(|error| error.to_string())?;
+        let manager = ensure_conda_manager(&engines_root)?;
+        let prefix = engines_root.join("_tools").join("automd-science");
+        let python = if cfg!(target_os = "windows") {
+            prefix.join("Scripts").join("python.exe")
+        } else {
+            prefix.join("bin").join("python")
+        };
+        let mut command = Command::new(&manager);
+        if python.is_file() {
+            command.arg("install");
+        } else {
+            command.arg("create");
+        }
+        let output = command
+            .arg("-y")
+            .arg("-p")
+            .arg(&prefix)
+            .arg("-c")
+            .arg("conda-forge")
+            .args([
+                "python=3.11",
+                "openmm",
+                "pdbfixer",
+                "mdanalysis",
+                "mdtraj",
+                "rdkit",
+                "openbabel",
+                "ambertools",
+                "numpy",
+                "pandas",
+            ])
+            .output()
+            .map_err(|error| format!("启动科学侧车安装器失败：{error}"))?;
 
-    if !output.status.success() {
-        return Err(format!("科学侧车环境安装失败：\n{}", command_tail(&output.stderr)));
-    }
+        if !output.status.success() {
+            return Err(format!("科学侧车环境安装失败：\n{}", command_tail(&output.stderr)));
+        }
 
-    Ok(science_sidecar::diagnostics(Some(&state.engines_root)))
+        Ok(science_sidecar::diagnostics(Some(&engines_root)))
+    })
+    .await
+    .map_err(|error| format!("安装任务执行失败：{error}"))?
 }
 
 #[tauri::command]
@@ -467,54 +476,51 @@ fn list_installable_engines() -> Vec<String> {
 /// (no manual download or compilation), then record the resulting binary as a
 /// ready installation. Requires micromamba/mamba/conda on PATH.
 #[tauri::command]
-fn install_engine(
+async fn install_engine(
     engine_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<EngineInstallationRecord, String> {
     let package = engine_conda_package(&engine_id).ok_or_else(|| {
         format!("{engine_id} 暂不支持一键安装（通常需要许可或手动编译），请在指引页查看安装方式。")
     })?;
-    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
-    let manager = ensure_conda_manager(&state.engines_root)?;
-    let prefix = state.engines_root.join(&engine_id);
-
-    let output = Command::new(&manager)
-        .arg("create")
-        .arg("-y")
-        .arg("-p")
-        .arg(&prefix)
-        .arg("-c")
-        .arg("conda-forge")
-        .arg(package)
-        .output()
-        .map_err(|error| format!("启动安装器失败：{error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail = stderr
-            .lines()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!("{engine_id} 安装失败：\n{}", tail.trim()));
-    }
-
-    let binary = locate_installed_binary(&prefix, &engine_id).ok_or_else(|| {
-        format!("{engine_id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
-    })?;
+    let engines_root = state.engines_root.clone();
+    let id = engine_id.clone();
+    // The download + conda create can take minutes. Run it on the blocking pool
+    // so the UI thread is never blocked (the install stays fully async).
+    let (location, version) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(String, Option<String>), String> {
+            std::fs::create_dir_all(&engines_root).map_err(|error| error.to_string())?;
+            let manager = ensure_conda_manager(&engines_root)?;
+            let prefix = engines_root.join(&id);
+            let output = Command::new(&manager)
+                .arg("create")
+                .arg("-y")
+                .arg("-p")
+                .arg(&prefix)
+                .arg("-c")
+                .arg("conda-forge")
+                .arg(package)
+                .output()
+                .map_err(|error| format!("启动安装器失败：{error}"))?;
+            if !output.status.success() {
+                return Err(format!("{id} 安装失败：\n{}", command_tail(&output.stderr)));
+            }
+            let binary = locate_installed_binary(&prefix, &id).ok_or_else(|| {
+                format!("{id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
+            })?;
+            let version = detect_installed_version(&binary);
+            Ok((binary.display().to_string(), version))
+        })
+        .await
+        .map_err(|error| format!("安装任务执行失败：{error}"))??;
 
     let record = EngineInstallationRecord {
-        engine_id: engine_id.clone(),
-        location: binary.display().to_string(),
-        version: detect_installed_version(&binary),
+        engine_id,
+        location,
+        version,
         authorization_status: DetectionStatus::Ready,
         checked_at: chrono::Utc::now(),
     };
-
     let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
     db.save_engine_installation(record.clone())
         .map_err(|error| error.to_string())?;
@@ -543,52 +549,48 @@ fn list_installable_tools() -> Vec<String> {
 /// One-click install for a runtime tool via conda-forge. Returns the absolute
 /// path of the installed binary (the UI marks the tool ready with it).
 #[tauri::command]
-fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+async fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let engines_root = state.engines_root.clone();
+    // Blocking conda/download work runs off the UI thread (fully async).
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        std::fs::create_dir_all(&engines_root).map_err(|error| error.to_string())?;
 
-    if tool_id == "conda" {
-        return install_miniforge(&state.engines_root).map(|path| path.display().to_string());
-    }
-    if tool_id == "mamba" {
-        return install_internal_mamba(&state.engines_root).map(|path| path.display().to_string());
-    }
+        if tool_id == "conda" {
+            return install_miniforge(&engines_root).map(|path| path.display().to_string());
+        }
+        if tool_id == "mamba" {
+            return install_internal_mamba(&engines_root).map(|path| path.display().to_string());
+        }
 
-    let (package, exe) = tool_conda_spec(&tool_id).ok_or_else(|| {
-        format!("{tool_id} 暂不支持一键安装（通常由系统、GPU 驱动或集群提供）。")
-    })?;
-    let manager = ensure_conda_manager(&state.engines_root)?;
-    let prefix = state.engines_root.join("_tools").join(&tool_id);
+        let (package, exe) = tool_conda_spec(&tool_id).ok_or_else(|| {
+            format!("{tool_id} 暂不支持一键安装（通常由系统、GPU 驱动或集群提供）。")
+        })?;
+        let manager = ensure_conda_manager(&engines_root)?;
+        let prefix = engines_root.join("_tools").join(&tool_id);
 
-    let output = Command::new(&manager)
-        .arg("create")
-        .arg("-y")
-        .arg("-p")
-        .arg(&prefix)
-        .arg("-c")
-        .arg("conda-forge")
-        .arg(package)
-        .output()
-        .map_err(|error| format!("启动安装器失败：{error}"))?;
+        let output = Command::new(&manager)
+            .arg("create")
+            .arg("-y")
+            .arg("-p")
+            .arg(&prefix)
+            .arg("-c")
+            .arg("conda-forge")
+            .arg(package)
+            .output()
+            .map_err(|error| format!("启动安装器失败：{error}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail = stderr
-            .lines()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!("{tool_id} 安装失败：\n{}", tail.trim()));
-    }
+        if !output.status.success() {
+            return Err(format!("{tool_id} 安装失败：\n{}", command_tail(&output.stderr)));
+        }
 
-    let binary = prefix.join("bin").join(exe);
-    if !binary.is_file() {
-        return Err(format!("{tool_id} 安装完成，但未找到 {}。", binary.display()));
-    }
-    Ok(binary.display().to_string())
+        let binary = prefix.join("bin").join(exe);
+        if !binary.is_file() {
+            return Err(format!("{tool_id} 安装完成，但未找到 {}。", binary.display()));
+        }
+        Ok(binary.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("安装任务执行失败：{error}"))?
 }
 
 #[tauri::command]

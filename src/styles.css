@@ -665,6 +665,7 @@ ul {
 
 .engine-reminder strong {
   flex: 0 0 auto;
+  line-height: 1.5;
 }
 
 .engine-reminder span {
@@ -2529,8 +2530,22 @@ ul {
   align-items: center;
   min-width: 0;
   gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
   color: var(--text-3);
-  cursor: help;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.background-task-status:hover,
+.background-task-status.active {
+  border-color: transparent;
+  color: var(--text);
+}
+
+.background-task-status:active {
+  transform: none;
 }
 
 .background-task-status span:not(.task-spinner) {
@@ -3124,4 +3139,189 @@ ul {
 .analysis-toggle-grid {
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px 16px;
+}
+
+/* Analysis-module panel: don't stretch to match the taller SimulationPlan panel
+   in the same grid row (that left a big empty gutter under the checkboxes). */
+.panel:has(.analysis-toggle-grid) {
+  align-self: start;
+}
+
+/* ============================================================
+   Science-sidecar tool cards (env check). Long labels + long
+   "不适用" descriptions need a vertical card, not the cramped
+   3-column .tool-row used for short runtime tools.
+   ============================================================ */
+.science-tool-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.science-tool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.science-tool-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.science-tool-meta strong {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.science-tool-meta small {
+  color: var(--text-4);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.science-tool-head .status-pill {
+  flex: 0 0 auto;
+}
+
+.science-tool-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.science-tool-actions button {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.science-tool-detail {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   Status-bar left group + background-task popover
+   ============================================================ */
+.statusbar-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 14px;
+}
+
+.bgtask-done-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--ok-fg);
+  box-shadow: 0 0 0 3px var(--ok-bg);
+}
+
+.bgtask-popover {
+  position: fixed;
+  left: 12px;
+  bottom: calc(var(--statusbar-height) + 8px);
+  z-index: 1300;
+  width: min(360px, calc(100vw - 24px));
+  max-height: 52vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  padding: 12px;
+}
+
+.bgtask-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bgtask-head strong {
+  font-size: 14px;
+}
+
+.bgtask-empty {
+  margin: 0;
+  color: var(--text-4);
+  font-size: 13px;
+}
+
+.bgtask-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bgtask-item {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  padding: 8px 10px;
+}
+
+.bgtask-item.completed { border-left-color: var(--ok-fg); }
+.bgtask-item.failed { border-left-color: var(--bad-fg); }
+
+.bgtask-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bgtask-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.bgtask-item-status {
+  flex: 0 0 auto;
+  color: var(--text-4);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.bgtask-bar {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.bgtask-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--brand);
+  transition: width 0.2s ease;
+}
+
+.bgtask-item small {
+  color: var(--text-4);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
