@@ -2482,6 +2482,13 @@ ul {
   gap: 3px;
 }
 
+/* The detail/path cell (e.g. an installed engine binary path) must wrap inside
+   its column instead of overflowing past the card border. */
+.tool-row > small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .recipe-buttons {
   display: flex;
   flex-wrap: wrap;
