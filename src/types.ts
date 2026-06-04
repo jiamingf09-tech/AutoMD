@@ -176,6 +176,21 @@ export interface StructureImportResult {
   importedAt: string;
 }
 
+export interface ImportedStructureEntry {
+  id: string;
+  name: string;
+  sourcePath?: string | null;
+  importedPath: string;
+  sourceKind: StructureSourceKind;
+  importedAt: string;
+  summary?: StructureSummary | null;
+}
+
+export interface DeleteImportedStructureRequest {
+  projectPath: string;
+  importedPath: string;
+}
+
 export interface StructureFileRequest {
   projectPath: string;
   sourcePath: string;

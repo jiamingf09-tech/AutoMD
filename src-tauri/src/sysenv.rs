@@ -98,8 +98,46 @@ pub fn search_dirs() -> Vec<PathBuf> {
                 }
             }
         }
+
+        for app_dir in automd_app_data_dirs(&home) {
+            let engines = app_dir.join("engines");
+            let miniforge = engines.join("_tools").join("miniforge3");
+            for suffix in ["bin", "condabin", "Scripts"] {
+                add(&mut dirs, &mut seen, miniforge.join(suffix));
+            }
+            if let Ok(read) = std::fs::read_dir(&engines) {
+                for entry in read.flatten() {
+                    add(&mut dirs, &mut seen, entry.path().join("bin"));
+                    add(&mut dirs, &mut seen, entry.path().join("Scripts"));
+                }
+            }
+            if let Ok(read) = std::fs::read_dir(engines.join("_tools")) {
+                for entry in read.flatten() {
+                    add(&mut dirs, &mut seen, entry.path().join("bin"));
+                    add(&mut dirs, &mut seen, entry.path().join("Scripts"));
+                }
+            }
+        }
     }
 
+    dirs
+}
+
+fn automd_app_data_dirs(home: &str) -> Vec<PathBuf> {
+    let home = PathBuf::from(home);
+    let mut dirs = Vec::new();
+    if cfg!(target_os = "macos") {
+        dirs.push(home.join("Library").join("Application Support").join("com.noir.automd"));
+    } else if cfg!(target_os = "windows") {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("com.noir.automd"));
+        }
+        if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local_appdata).join("com.noir.automd"));
+        }
+    } else {
+        dirs.push(home.join(".local").join("share").join("com.noir.automd"));
+    }
     dirs
 }
 

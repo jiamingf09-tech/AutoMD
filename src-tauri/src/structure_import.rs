@@ -24,6 +24,7 @@ pub enum StructureImportError {
 }
 
 const VIEWER_STRUCTURE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const STRUCTURE_INDEX_FILE: &str = ".automd-structures.json";
 
 pub fn import_structure(request: StructureImportRequest) -> Result<StructureImportResult, StructureImportError> {
     let project_root = PathBuf::from(&request.project_path);
@@ -42,7 +43,7 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
         .unwrap_or_else(|| default_display_name(&request));
     let slug = slugify(&display_name);
     let extension = extension_for(&request);
-    let destination = inputs_dir.join(format!("{slug}.{extension}"));
+    let destination = unique_destination(&inputs_dir, &slug, extension, request.overwrite);
 
     if destination.exists() && !request.overwrite {
         return Err(StructureImportError::DestinationExists(relative_path(&project_root, &destination)));
@@ -82,13 +83,27 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
     };
 
     fs::write(&destination, &contents)?;
-    let summary = summarize_contents(&request.source_kind, &contents);
+    let source_kind = request.source_kind.clone();
+    let summary = summarize_contents(&source_kind, &contents);
     let relative = relative_path(&project_root, &destination);
-    let warnings = import_warnings(&request.source_kind, &summary);
+    let warnings = import_warnings(&source_kind, &summary);
+    let imported_at = Utc::now();
+    upsert_imported_structure(
+        &project_root,
+        ImportedStructureEntry {
+            id: relative.clone(),
+            name: display_name.clone(),
+            source_path: request.source_path.clone().or_else(|| request.smiles.clone()),
+            imported_path: relative.clone(),
+            source_kind: source_kind.clone(),
+            imported_at,
+            summary: Some(summary.clone()),
+        },
+    )?;
 
     Ok(StructureImportResult {
         system: SystemSpec {
-            source_kind: request.source_kind,
+            source_kind,
             source_path: Some(relative.clone()),
             name: display_name,
             molecule_count: summary.molecule_count.or(summary.residue_count),
@@ -99,8 +114,78 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
         imported_path: relative,
         summary,
         warnings,
-        imported_at: Utc::now(),
+        imported_at,
     })
+}
+
+pub fn list_imported_structures(project_path: String) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
+    let project_root = PathBuf::from(&project_path);
+    if !project_root.exists() {
+        return Err(StructureImportError::MissingProjectPath(project_path));
+    }
+    let mut entries = read_structure_index(&project_root)?;
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    entries.retain(|entry| {
+        let exists = safe_project_path(&project_root, &entry.imported_path).is_file();
+        exists && seen.insert(entry.imported_path.clone())
+    });
+
+    let inputs_dir = project_root.join("inputs");
+    if let Ok(read) = fs::read_dir(&inputs_dir) {
+        for item in read.flatten() {
+            let path = item.path();
+            if !path.is_file() {
+                continue;
+            }
+            let relative = relative_path(&project_root, &path);
+            if seen.contains(&relative) {
+                continue;
+            }
+            if let Some(source_kind) = source_kind_from_path(&relative) {
+                let contents = fs::read_to_string(&path).unwrap_or_default();
+                let summary = (!contents.is_empty()).then(|| summarize_contents(&source_kind, &contents));
+                let imported_at = item
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .map(chrono::DateTime::<Utc>::from)
+                    .unwrap_or_else(Utc::now);
+                entries.push(ImportedStructureEntry {
+                    id: relative.clone(),
+                    name: display_name_from_imported_path(&relative),
+                    source_path: None,
+                    imported_path: relative.clone(),
+                    source_kind,
+                    imported_at,
+                    summary,
+                });
+                seen.insert(relative);
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| b.imported_at.cmp(&a.imported_at).then_with(|| a.imported_path.cmp(&b.imported_path)));
+    write_structure_index(&project_root, &entries)?;
+    Ok(entries)
+}
+
+pub fn delete_imported_structure(request: DeleteImportedStructureRequest) -> Result<bool, StructureImportError> {
+    let project_root = PathBuf::from(&request.project_path);
+    if !project_root.exists() {
+        return Err(StructureImportError::MissingProjectPath(request.project_path));
+    }
+    let relative = request.imported_path.trim();
+    if !relative.starts_with("inputs/") {
+        return Err(StructureImportError::MissingSourcePath);
+    }
+    let target = safe_project_path(&project_root, relative);
+    if target.is_file() {
+        fs::remove_file(&target)?;
+    }
+    let mut entries = read_structure_index(&project_root)?;
+    entries.retain(|entry| entry.imported_path != relative);
+    write_structure_index(&project_root, &entries)?;
+    Ok(true)
 }
 
 pub fn read_structure_file(request: StructureFileRequest) -> Result<StructureFilePayload, StructureImportError> {
@@ -307,6 +392,25 @@ fn viewer_format(path: &str) -> Option<&'static str> {
     }
 }
 
+fn source_kind_from_path(path: &str) -> Option<StructureSourceKind> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".pdb") || lower.ends_with(".ent") {
+        Some(StructureSourceKind::Pdb)
+    } else if lower.ends_with(".cif") || lower.ends_with(".mmcif") {
+        Some(StructureSourceKind::Mmcif)
+    } else if lower.ends_with(".sdf") {
+        Some(StructureSourceKind::Sdf)
+    } else if lower.ends_with(".mol2") {
+        Some(StructureSourceKind::Mol2)
+    } else if lower.ends_with(".smi") || lower.ends_with(".smiles") {
+        Some(StructureSourceKind::Smiles)
+    } else if lower.ends_with(".manifest.txt") {
+        Some(StructureSourceKind::EngineProject)
+    } else {
+        None
+    }
+}
+
 fn safe_project_path(root: &Path, relative: &str) -> PathBuf {
     let mut destination = root.to_path_buf();
     for component in Path::new(relative).components() {
@@ -315,6 +419,32 @@ fn safe_project_path(root: &Path, relative: &str) -> PathBuf {
         }
     }
     destination
+}
+
+fn structure_index_path(project_root: &Path) -> PathBuf {
+    project_root.join(STRUCTURE_INDEX_FILE)
+}
+
+fn read_structure_index(project_root: &Path) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
+    let path = structure_index_path(project_root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let contents = fs::read_to_string(path)?;
+    Ok(serde_json::from_str::<Vec<ImportedStructureEntry>>(&contents).unwrap_or_default())
+}
+
+fn write_structure_index(project_root: &Path, entries: &[ImportedStructureEntry]) -> Result<(), StructureImportError> {
+    let contents = serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string());
+    fs::write(structure_index_path(project_root), contents)?;
+    Ok(())
+}
+
+fn upsert_imported_structure(project_root: &Path, entry: ImportedStructureEntry) -> Result<(), StructureImportError> {
+    let mut entries = read_structure_index(project_root)?;
+    entries.retain(|existing| existing.imported_path != entry.imported_path);
+    entries.push(entry);
+    write_structure_index(project_root, &entries)
 }
 
 fn field(line: &str, start: usize, end: usize) -> &str {
@@ -347,6 +477,44 @@ fn slugify(value: &str) -> String {
         "imported-system".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn unique_destination(inputs_dir: &Path, slug: &str, extension: &str, overwrite: bool) -> PathBuf {
+    let first = inputs_dir.join(format!("{slug}.{extension}"));
+    if overwrite || !first.exists() {
+        return first;
+    }
+    for index in 2..10_000 {
+        let candidate = inputs_dir.join(format!("{slug}-{index}.{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
+}
+
+fn display_name_from_imported_path(relative: &str) -> String {
+    let filename = relative.rsplit('/').next().unwrap_or(relative);
+    let stem = filename
+        .strip_suffix(".manifest.txt")
+        .or_else(|| filename.rsplit_once('.').map(|(head, _)| head))
+        .unwrap_or(filename);
+    let mut name = String::new();
+    for part in stem.split(['-', '_']).filter(|part| !part.is_empty()) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            name.push(first.to_ascii_uppercase());
+            name.push_str(chars.as_str());
+        }
+    }
+    if name.is_empty() {
+        filename.to_string()
+    } else {
+        name
     }
 }
 

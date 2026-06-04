@@ -22,6 +22,8 @@ import type {
   FailureAnalysis,
   FailureAnalysisRequest,
   FilePickRequest,
+  DeleteImportedStructureRequest,
+  ImportedStructureEntry,
   ArtifactIndex,
   ArtifactIndexRequest,
   ArtifactRecord,
@@ -140,7 +142,7 @@ export const api = {
       checkedAt: new Date().toISOString()
     })),
   listInstallableTools: () =>
-    call<string[]>("list_installable_tools", undefined, () => ["mpirun", "plumed"]),
+    call<string[]>("list_installable_tools", undefined, () => ["conda", "mamba", "mpirun", "plumed"]),
   installTool: (toolId: string) =>
     call<string>("install_tool", { toolId }, () => `/mock/tools/${toolId}/bin/${toolId}`),
   runtimeDiagnostics: () =>
@@ -187,6 +189,10 @@ export const api = {
     call<SimulationTask>("create_mock_task", { plan }, () => mockTask(plan)),
   importStructure: (request: StructureImportRequest) =>
     call<StructureImportResult>("import_structure", { request }, () => mockStructureImport(request)),
+  listImportedStructures: (projectPath: string) =>
+    call<ImportedStructureEntry[]>("list_imported_structures", { projectPath }, () => []),
+  deleteImportedStructure: (request: DeleteImportedStructureRequest) =>
+    call<boolean>("delete_imported_structure", { request }, () => true),
   readStructureFile: (request: StructureFileRequest) =>
     call<StructureFilePayload>("read_structure_file", { request }, () => mockStructureFile(request)),
   slurmScript: (plan: SimulationPlan) =>

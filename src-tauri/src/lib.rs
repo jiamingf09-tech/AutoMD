@@ -51,6 +51,178 @@ fn engine_conda_package(engine_id: &str) -> Option<&'static str> {
     }
 }
 
+fn miniforge_prefix(engines_root: &Path) -> PathBuf {
+    engines_root.join("_tools").join("miniforge3")
+}
+
+fn conda_binary(prefix: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        prefix.join("Scripts").join("conda.exe")
+    } else {
+        prefix.join("bin").join("conda")
+    }
+}
+
+fn mamba_binary(prefix: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        prefix.join("Scripts").join("mamba.exe")
+    } else {
+        prefix.join("bin").join("mamba")
+    }
+}
+
+fn ensure_conda_manager(engines_root: &Path) -> Result<PathBuf, String> {
+    if let Some(manager) = sysenv::resolve_conda_manager() {
+        return Ok(manager);
+    }
+    install_miniforge(engines_root)
+}
+
+fn install_miniforge(engines_root: &Path) -> Result<PathBuf, String> {
+    let prefix = miniforge_prefix(engines_root);
+    let conda = conda_binary(&prefix);
+    if conda.is_file() {
+        return Ok(conda);
+    }
+
+    std::fs::create_dir_all(prefix.parent().unwrap_or(engines_root)).map_err(|error| error.to_string())?;
+    let downloads = engines_root.join("_downloads");
+    std::fs::create_dir_all(&downloads).map_err(|error| error.to_string())?;
+    let (url, file_name) = miniforge_installer_url()?;
+    let installer = downloads.join(file_name);
+    if !installer.is_file() {
+        download_file(&url, &installer)?;
+    }
+
+    let output = if cfg!(target_os = "windows") {
+        Command::new(&installer)
+            .arg("/InstallationType=JustMe")
+            .arg("/AddToPath=0")
+            .arg("/RegisterPython=0")
+            .arg("/S")
+            .arg(format!("/D={}", prefix.display()))
+            .output()
+    } else {
+        Command::new("bash")
+            .arg(&installer)
+            .arg("-b")
+            .arg("-p")
+            .arg(&prefix)
+            .output()
+    }
+    .map_err(|error| format!("启动 Miniforge 安装器失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!("Miniforge 安装失败：\n{}", command_tail(&output.stderr)));
+    }
+    if !conda.is_file() {
+        return Err(format!("Miniforge 安装完成，但未找到 {}。", conda.display()));
+    }
+    Ok(conda)
+}
+
+fn install_internal_mamba(engines_root: &Path) -> Result<PathBuf, String> {
+    let prefix = miniforge_prefix(engines_root);
+    let conda = install_miniforge(engines_root)?;
+    let mamba = mamba_binary(&prefix);
+    if mamba.is_file() {
+        return Ok(mamba);
+    }
+
+    let output = Command::new(&conda)
+        .arg("install")
+        .arg("-y")
+        .arg("-n")
+        .arg("base")
+        .arg("-c")
+        .arg("conda-forge")
+        .arg("mamba")
+        .output()
+        .map_err(|error| format!("启动 mamba 安装器失败：{error}"))?;
+
+    if !output.status.success() {
+        return Err(format!("mamba 安装失败：\n{}", command_tail(&output.stderr)));
+    }
+    if !mamba.is_file() {
+        return Err(format!("mamba 安装完成，但未找到 {}。", mamba.display()));
+    }
+    Ok(mamba)
+}
+
+fn miniforge_installer_url() -> Result<(String, String), String> {
+    let platform = match std::env::consts::OS {
+        "macos" => "MacOSX",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        other => return Err(format!("{other} 暂不支持自动安装 Miniforge。")),
+    };
+    let arch = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "arm64",
+        (_, "x86_64") => "x86_64",
+        ("linux", "aarch64") => "aarch64",
+        (os, arch) => return Err(format!("{os}/{arch} 暂不支持自动安装 Miniforge。")),
+    };
+    let extension = if cfg!(target_os = "windows") { "exe" } else { "sh" };
+    let file_name = format!("Miniforge3-{platform}-{arch}.{extension}");
+    Ok((
+        format!("https://github.com/conda-forge/miniforge/releases/latest/download/{file_name}"),
+        file_name,
+    ))
+}
+
+fn download_file(url: &str, destination: &Path) -> Result<(), String> {
+    let output = if cfg!(target_os = "windows") {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '{}' -OutFile '{}'",
+                    url.replace('\'', "''"),
+                    destination.display().to_string().replace('\'', "''")
+                ),
+            ])
+            .output()
+    } else if let Some(curl) = sysenv::resolve_command("curl") {
+        Command::new(curl)
+            .arg("-L")
+            .arg("--fail")
+            .arg(url)
+            .arg("-o")
+            .arg(destination)
+            .output()
+    } else if let Some(wget) = sysenv::resolve_command("wget") {
+        Command::new(wget)
+            .arg("-O")
+            .arg(destination)
+            .arg(url)
+            .output()
+    } else {
+        return Err("未找到 curl/wget，无法自动下载 Miniforge 安装器。".to_string());
+    }
+    .map_err(|error| format!("下载 Miniforge 失败：{error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!("下载 Miniforge 失败：\n{}", command_tail(&output.stderr)))
+    }
+}
+
+fn command_tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let tail = text
+        .lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    tail.trim().to_string()
+}
+
 fn locate_installed_binary(prefix: &Path, engine_id: &str) -> Option<PathBuf> {
     let bin = prefix.join("bin");
     let mut candidates: Vec<String> = engine_registry::detect_engine_by_id(engine_id)
@@ -198,11 +370,8 @@ fn install_engine(
     let package = engine_conda_package(&engine_id).ok_or_else(|| {
         format!("{engine_id} 暂不支持一键安装（通常需要许可或手动编译），请在指引页查看安装方式。")
     })?;
-    let manager = sysenv::resolve_conda_manager().ok_or_else(|| {
-        "未检测到 conda / mamba / micromamba。请先安装 Miniforge（https://conda-forge.org/download/）后重试，或在指引页查看说明。".to_string()
-    })?;
-
     std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+    let manager = ensure_conda_manager(&state.engines_root)?;
     let prefix = state.engines_root.join(&engine_id);
 
     let output = Command::new(&manager)
@@ -261,20 +430,29 @@ fn tool_conda_spec(tool_id: &str) -> Option<(&'static str, &'static str)> {
 
 #[tauri::command]
 fn list_installable_tools() -> Vec<String> {
-    ["mpirun", "plumed"].iter().map(|id| id.to_string()).collect()
+    ["conda", "mamba", "mpirun", "plumed"]
+        .iter()
+        .map(|id| id.to_string())
+        .collect()
 }
 
 /// One-click install for a runtime tool via conda-forge. Returns the absolute
 /// path of the installed binary (the UI marks the tool ready with it).
 #[tauri::command]
 fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let (package, exe) = tool_conda_spec(&tool_id).ok_or_else(|| {
-        format!("{tool_id} 暂不支持一键安装（通常由系统、GPU 驱动或集群提供），请在指引页查看说明。")
-    })?;
-    let manager = sysenv::resolve_conda_manager()
-        .ok_or_else(|| "未检测到 conda / mamba / micromamba，无法一键安装该工具。".to_string())?;
-
     std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+
+    if tool_id == "conda" {
+        return install_miniforge(&state.engines_root).map(|path| path.display().to_string());
+    }
+    if tool_id == "mamba" {
+        return install_internal_mamba(&state.engines_root).map(|path| path.display().to_string());
+    }
+
+    let (package, exe) = tool_conda_spec(&tool_id).ok_or_else(|| {
+        format!("{tool_id} 暂不支持一键安装（通常由系统、GPU 驱动或集群提供）。")
+    })?;
+    let manager = ensure_conda_manager(&state.engines_root)?;
     let prefix = state.engines_root.join("_tools").join(&tool_id);
 
     let output = Command::new(&manager)
@@ -533,6 +711,16 @@ fn create_mock_task(plan: SimulationPlan) -> SimulationTask {
 #[tauri::command]
 fn import_structure(request: StructureImportRequest) -> Result<StructureImportResult, String> {
     structure_import::import_structure(request).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_imported_structures(project_path: String) -> Result<Vec<ImportedStructureEntry>, String> {
+    structure_import::list_imported_structures(project_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_imported_structure(request: DeleteImportedStructureRequest) -> Result<bool, String> {
+    structure_import::delete_imported_structure(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -875,6 +1063,8 @@ pub fn run() {
             map_engine_parameters,
             create_mock_task,
             import_structure,
+            list_imported_structures,
+            delete_imported_structure,
             read_structure_file,
             generate_slurm_script,
             generate_remote_execution_package,

@@ -46,7 +46,9 @@ import type {
   SimulationPlan,
   SimulationStage,
   SimulationTask,
+  ImportedStructureEntry,
   StructurePreparationPackage,
+  StructureSummary,
   TaskRecord,
   TrajectoryAnalysisPackage,
   TrajectoryChunk,
@@ -158,6 +160,21 @@ function DeleteModal({ titleText, bodyText, pathText, twoStage, stage, deleting,
 
 function DeleteProjectModal({ project, stage, deleting, onCancel, onConfirm }: { project: ProjectSummary; stage: 'warn' | 'confirm'; deleting: boolean; onCancel: () => void; onConfirm: () => void; }) {
   return <DeleteModal titleText={project.name} bodyText={`即将删除「${project.name}」。此操作不可撤销。项目目录将被整体永久删除，包括所有数据（inputs、generated、runs、trajectories、analysis、reports 等）。`} pathText={project.path} twoStage={true} stage={stage} deleting={deleting} onCancel={onCancel} onConfirm={onConfirm} />;
+}
+
+function DeleteStructureModal({ structure, deleting, onCancel, onConfirm }: { structure: StructureEntry; deleting: boolean; onCancel: () => void; onConfirm: () => void; }) {
+  return (
+    <DeleteModal
+      titleText={structure.name}
+      bodyText={`即将删除结构「${structure.name}」。此操作会移除项目 inputs/ 中对应的导入文件，并从结构索引中删除。`}
+      pathText={structure.importedPath}
+      twoStage={false}
+      stage="warn"
+      deleting={deleting}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
 }
 
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
@@ -419,10 +436,11 @@ function isNativeEditablePath(path: string) {
 interface StructureEntry {
   id: string;
   name: string;
-  sourcePath: string;
+  sourcePath: string | null;
   importedPath: string;
-  sourceKind: string;
+  sourceKind: StructureSourceKind;
   importedAt: string;
+  summary?: StructureSummary | null;
 }
 
 function App() {
@@ -698,6 +716,30 @@ function App() {
     return path.split(/[\\/]/).pop() ?? path;
   }
 
+  function importedStructureToEntry(entry: ImportedStructureEntry): StructureEntry {
+    return {
+      id: entry.id || entry.importedPath,
+      name: entry.name,
+      sourcePath: entry.sourcePath ?? null,
+      importedPath: entry.importedPath,
+      sourceKind: entry.sourceKind,
+      importedAt: entry.importedAt,
+      summary: entry.summary ?? null
+    };
+  }
+
+  function systemFromStructure(entry: StructureEntry) {
+    return {
+      sourceKind: entry.sourceKind,
+      sourcePath: entry.importedPath,
+      name: entry.name,
+      moleculeCount: entry.summary?.moleculeCount ?? entry.summary?.residueCount ?? null,
+      hasLigand: false,
+      hasMembrane: false,
+      notes: entry.summary ? [entry.summary.formatNote] : []
+    };
+  }
+
   async function bootstrap() {
     try {
       const [capabilities, installations, runtime, science, plugins, profiles, storedProjects, storedTasks] = await Promise.all([
@@ -724,8 +766,9 @@ function App() {
       setSelectedRemoteProfileId((current) => current ?? profiles[0]?.id ?? null);
       setProjects(storedProjects);
       setTaskRecords(storedTasks);
+      let restoredStructures: StructureEntry[] = [];
       if (storedProjects[0]) {
-        await refreshCachedMetadata(storedProjects[0].path);
+        restoredStructures = await refreshCachedMetadata(storedProjects[0].path);
       }
       if (capabilities.length > 0 && !capabilities.some((engine) => engine.id === selectedEngineId)) {
         setSelectedEngineId(capabilities[0].id);
@@ -737,7 +780,7 @@ function App() {
           engineId: "gromacs",
           domain: "biomolecular"
         });
-        setPlan(initialPlan);
+        setPlan(restoredStructures[0] ? { ...initialPlan, system: systemFromStructure(restoredStructures[0]) } : initialPlan);
       }
     } catch (caught) {
       reportError(caught);
@@ -776,8 +819,8 @@ function App() {
       setExportedReport(null);
       setManualResumePlan(null);
       setStructureImportResult(null);
-      setStructures([]); setActiveStructureId(null);
-      setActiveTab("workflow");
+      setStructures([]);
+      setActiveStructureId(null);
       notifySuccess(`项目「${project.name}」已创建，默认流程已生成。`, "项目已创建");
     } catch (caught) {
       reportError(caught);
@@ -787,7 +830,6 @@ function App() {
   async function selectProject(project: ProjectSummary) {
     try {
       setCurrentProject(project);
-      setProjects((items) => [project, ...items.filter((item) => item.id !== project.id)]);
       if (project.preferredEngineId) {
         setSelectedEngineId(project.preferredEngineId);
       }
@@ -801,7 +843,10 @@ function App() {
       setTask(null);
       setRunPackage(null);
       setLocalSnapshot(null);
-      await refreshCachedMetadata(project.path);
+      const loadedStructures = await refreshCachedMetadata(project.path);
+      if (loadedStructures[0]) {
+        setPlan((current) => current ? { ...current, system: systemFromStructure(loadedStructures[0]) } : current);
+      }
       const records = await api.listTaskRecords(project.id);
       setTaskRecords(records);
     } catch (caught) {
@@ -903,20 +948,25 @@ function App() {
         sourcePath: importSourceKind === "smiles" ? null : importSourcePath || null,
         smiles: importSourceKind === "smiles" ? importSmiles : null,
         displayName: importDisplayName || null,
-        overwrite: true
+        overwrite: false
       });
       setStructureImportResult(result);
       setPlan((current) => current ? { ...current, system: result.system } : current);
       const newEntry: StructureEntry = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: result.importedPath,
         name: result.system.name,
-        sourcePath: importSourcePath || importSmiles || '',
+        sourcePath: importSourceKind === "smiles" ? importSmiles || null : importSourcePath || null,
         importedPath: result.importedPath,
         sourceKind: importSourceKind,
-        importedAt: result.importedAt
+        importedAt: result.importedAt,
+        summary: result.summary
       };
-      setStructures((prev) => { const f = prev.filter((s) => s.importedPath !== newEntry.importedPath); return [newEntry, ...f]; });
+      setStructures((prev) => {
+        const withoutSamePath = prev.filter((structure) => structure.importedPath !== newEntry.importedPath);
+        return [newEntry, ...withoutSamePath];
+      });
       setActiveStructureId(newEntry.id);
+      setImportDisplayName("");
       const index = await api.collectArtifactIndex({
         projectPath: activeProject.path,
         runDirectory: null
@@ -931,16 +981,40 @@ function App() {
 
   function selectStructure(entry: StructureEntry) {
     setActiveStructureId(entry.id);
-    setPlan((c) => c ? { ...c, system: { ...c.system, name: entry.name, sourcePath: entry.importedPath } } : c);
+    setPlan((current) => current ? { ...current, system: systemFromStructure(entry) } : current);
   }
   function requestDeleteStructure(entry: StructureEntry) { setDeleteStructureTarget(entry); }
   function cancelDeleteStructure() { if (deletingStructure) return; setDeleteStructureTarget(null); }
   async function confirmDeleteStructure() {
     if (!deleteStructureTarget || deletingStructure) return;
     const target = deleteStructureTarget;
+    const activeProject = currentProject ?? projects[0] ?? null;
+    if (!activeProject) {
+      setError("需要先选择项目，才能删除结构。");
+      return;
+    }
     setDeletingStructure(true);
-    try { setStructures((p) => p.filter((s) => s.id !== target.id)); if (activeStructureId === target.id) setActiveStructureId(null); setDeleteStructureTarget(null); }
-    finally { setDeletingStructure(false); }
+    try {
+      await api.deleteImportedStructure({
+        projectPath: activeProject.path,
+        importedPath: target.importedPath
+      });
+      setStructures((previous) => {
+        const next = previous.filter((structure) => structure.importedPath !== target.importedPath);
+        if (activeStructureId === target.id) {
+          const nextActive = next[0] ?? null;
+          setActiveStructureId(nextActive?.id ?? null);
+          setPlan((current) => current && nextActive ? { ...current, system: systemFromStructure(nextActive) } : current);
+        }
+        return next;
+      });
+      setDeleteStructureTarget(null);
+      notifySuccess(`结构「${target.name}」已删除。`, "结构已删除");
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setDeletingStructure(false);
+    }
   }
   function startRenameStructure(entry: StructureEntry) { setRenamingStructureId(entry.id); setRenamingStructureDraft(entry.name); }
   function commitRenameStructure(id: string) {
@@ -1357,21 +1431,29 @@ function App() {
     }
   }
 
-  async function refreshCachedMetadata(projectPath = (currentProject ?? projects[0] ?? null)?.path) {
+  async function refreshCachedMetadata(projectPath = (currentProject ?? projects[0] ?? null)?.path): Promise<StructureEntry[]> {
     if (!projectPath) {
       setArtifactRecords([]);
       setAnalysisCacheRecords([]);
-      return;
+      setStructures([]);
+      setActiveStructureId(null);
+      return [];
     }
     try {
-      const [artifacts, analysisCache] = await Promise.all([
+      const [artifacts, analysisCache, importedStructures] = await Promise.all([
         api.listArtifactRecords(projectPath),
-        api.listAnalysisCacheRecords(projectPath)
+        api.listAnalysisCacheRecords(projectPath),
+        api.listImportedStructures(projectPath)
       ]);
+      const mappedStructures = importedStructures.map(importedStructureToEntry);
       setArtifactRecords(artifacts);
       setAnalysisCacheRecords(analysisCache);
+      setStructures(mappedStructures);
+      setActiveStructureId(mappedStructures[0]?.id ?? null);
+      return mappedStructures;
     } catch (caught) {
       reportError(caught);
+      return [];
     }
   }
 
@@ -2237,6 +2319,14 @@ function App() {
           onConfirm={confirmDeleteProject}
         />
       ) : null}
+      {deleteStructureTarget ? (
+        <DeleteStructureModal
+          structure={deleteStructureTarget}
+          deleting={deletingStructure}
+          onCancel={cancelDeleteStructure}
+          onConfirm={confirmDeleteStructure}
+        />
+      ) : null}
     </>
   );
 }
@@ -2275,7 +2365,7 @@ function GuidePanel({
     {
       step: "3. 配置 GROMACS 或 OpenMM",
       action: "进入“引擎”页，选择要跑的引擎并保存路径。",
-      details: "状态不是 ready 时，优先点“自动查找”；找不到再点“手动查找”选择可执行文件；需要安装时点“自动安装”，软件会进入编译页生成源码拉取、容器 recipe 和一站式编译脚本。商业/受限引擎仍需要你已有授权。",
+      details: "状态不是 ready 时，优先点“自动查找”；找不到再点“手动查找”选择可执行文件；GROMACS、OpenMM、AmberTools、LAMMPS、CP2K、HOOMD-blue 等可安装引擎点“一键安装”会直接通过 conda-forge 安装到 AutoMD 应用数据目录。没有 conda 时会先自动安装内置 Miniforge。商业/受限引擎仍需要你已有授权。",
       done: "引擎卡片显示可用版本、平台、GPU/MPI/PLUMED 能力和授权状态。"
     },
     {
@@ -2330,7 +2420,7 @@ function GuidePanel({
       title: "引擎",
       target: "engines",
       use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
-      fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；需要安装时点“自动安装”进入编译页生成源码拉取和一站式编译脚本。",
+      fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；可通过 conda-forge 安装的引擎点“一键安装”会真实下载并安装。需要许可或复杂平台构建的引擎会生成编译脚本或要求手动配置授权路径。",
       check: "ready 表示可直接调用；需要安装表示先用自动安装或去“编译”；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
       next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
     },
@@ -2527,7 +2617,7 @@ function GuidePanel({
         <div className="panel-title-row">
           <div>
             <h3>引擎安装、部署和编译</h3>
-            <p className="muted">软件内的“一键部署”会先生成可检查脚本，不会默认静默改系统目录。</p>
+            <p className="muted">能自动安装的会直接装到 AutoMD 应用数据目录；需要源码/GPU/MPI/许可细节的才生成可检查脚本。</p>
           </div>
           <button type="button" onClick={() => setActiveTab("build")}>打开编译页</button>
         </div>
@@ -2535,8 +2625,9 @@ function GuidePanel({
           <h4>推荐操作顺序</h4>
           <ol className="guide-steps compact">
             <li>在“远程/本机运行环境”和“引擎”页，真正需要安装的项目会显示“自动查找 / 手动查找 / 自动安装”三个按钮；与当前显卡无关的 CUDA/ROCm 会显示“不适用”。</li>
-            <li>如果引擎缺失，先自动查找常见路径；仍找不到时手动选择可执行文件；需要安装时由“自动安装”进入编译页生成容器 recipe、源码脚本和 build manifest。</li>
-            <li>先 Dry run，确认命令、下载源、写入目录、权限、prefix、GPU/MPI/PLUMED 选项。</li>
+            <li>Conda/Mamba、MPI、PLUMED、GROMACS、OpenMM、AmberTools、LAMMPS、CP2K 和 HOOMD-blue 的“一键安装”会实际执行：没有 conda 时先下载 Miniforge，再用 conda-forge 创建隔离环境。</li>
+            <li>Docker/Podman/Apptainer、CUDA/ROCm 驱动、SLURM/PBS/LSF 客户端通常涉及系统权限、厂商驱动或集群策略，AutoMD 不会伪装成已安装；会保留明确说明和手动配置入口。</li>
+            <li>需要源码/GPU/MPI/PLUMED 特殊构建时，先 Dry run，确认命令、下载源、写入目录、权限、prefix、GPU/MPI/PLUMED 选项。</li>
             <li>选择“只写脚本”时，脚本会落盘；你可以拿到 WSL2、Linux 服务器或 HPC 登录节点上再运行。</li>
             <li>只有在本机环境明确可控时才选择“执行构建”。执行后看日志路径、失败分类和生成的可执行文件。</li>
           </ol>
@@ -2547,6 +2638,16 @@ function GuidePanel({
             <div><dt>PLUMED</dt><dd>增强采样常见于 GROMACS/LAMMPS/CP2K 等，必须匹配引擎版本重新编译或动态链接。</dd></div>
             <div><dt>Prefix</dt><dd>优先使用用户目录、Conda 环境或容器路径。系统目录需要管理员权限，不建议默认写入。</dd></div>
             <div><dt>容器</dt><dd>开源引擎可生成 Docker/Podman recipe；商业/受限引擎只能在用户已有授权环境中配置路径。</dd></div>
+          </dl>
+          <h4>自动安装覆盖范围</h4>
+          <dl className="definition-list">
+            <div><dt>Conda / Mamba</dt><dd>自动下载 Miniforge 并安装到 AutoMD 应用数据目录的 engines/_tools/miniforge3，不写系统目录。Mamba 会在这个内置 Miniforge 中额外安装 mamba 包。</dd></div>
+            <div><dt>MPI / PLUMED</dt><dd>通过 conda-forge 创建 AutoMD 管理的隔离环境，安装 openmpi 或 plumed，并把生成的可执行文件路径回填到本机运行环境。</dd></div>
+            <div><dt>开源引擎</dt><dd>GROMACS、OpenMM、AmberTools、LAMMPS、CP2K、HOOMD-blue 走 conda-forge 一键安装；安装后自动保存引擎路径并重新检测能力。</dd></div>
+            <div><dt>容器工具</dt><dd>Docker Desktop、Podman、Apptainer 通常涉及系统服务、管理员权限或虚拟机初始化。AutoMD 可以生成 recipe，但不会假装能静默完成系统级安装。</dd></div>
+            <div><dt>GPU 驱动</dt><dd>CUDA/NVIDIA 驱动、ROCm/HIP 驱动必须匹配显卡、系统版本和内核/驱动。AutoMD 只在显卡相关时提示需安装；无关时显示“不适用”。</dd></div>
+            <div><dt>HPC 调度器</dt><dd>SLURM/PBS/LSF 客户端通常由集群 module 或登录节点提供。桌面端缺失时应配置远程 profile，而不是在本机强行安装调度器。</dd></div>
+            <div><dt>商业/受限引擎</dt><dd>NAMD、AMBER pmemd、CHARMM、Desmond、ACEMD 等需要用户已有许可或授权环境。AutoMD 只保存路径、检测授权状态并生成运行入口。</dd></div>
           </dl>
         </div>
       </section>

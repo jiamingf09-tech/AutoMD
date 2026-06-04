@@ -271,6 +271,25 @@ pub struct StructureImportResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportedStructureEntry {
+    pub id: String,
+    pub name: String,
+    pub source_path: Option<String>,
+    pub imported_path: String,
+    pub source_kind: StructureSourceKind,
+    pub imported_at: DateTime<Utc>,
+    pub summary: Option<StructureSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteImportedStructureRequest {
+    pub project_path: String,
+    pub imported_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StructureFileRequest {
     pub project_path: String,
     pub source_path: String,
