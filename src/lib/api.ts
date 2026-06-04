@@ -129,6 +129,16 @@ export const api = {
     call<EngineInstallationRecord>("save_engine_installation", { record }, () => record),
   deleteEngineInstallation: (engineId: string, location: string) =>
     call<boolean>("delete_engine_installation", { engineId, location }, () => true),
+  listInstallableEngines: () =>
+    call<string[]>("list_installable_engines", undefined, () => ["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]),
+  installEngine: (engineId: string) =>
+    call<EngineInstallationRecord>("install_engine", { engineId }, () => ({
+      engineId,
+      location: `/mock/engines/${engineId}/bin/${engineId}`,
+      version: "conda-forge (mock)",
+      authorizationStatus: "ready",
+      checkedAt: new Date().toISOString()
+    })),
   runtimeDiagnostics: () =>
     call<RuntimeDiagnostics>("get_runtime_diagnostics", undefined, () => mockDiagnostics),
   scienceSidecarDiagnostics: () =>

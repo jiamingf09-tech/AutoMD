@@ -433,6 +433,7 @@ function App() {
   }, [activeTab]);
   const [engines, setEngines] = useState<EngineCapability[]>([]);
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallationRecord[]>([]);
+  const [installableEngines, setInstallableEngines] = useState<string[]>(["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]);
   const [engineInstallationDraft, setEngineInstallationDraft] = useState<EngineInstallationRecord>({
     engineId: "gromacs",
     location: "",
@@ -650,6 +651,7 @@ function App() {
       ]);
       setEngines(capabilities);
       setEngineInstallations(installations);
+      void api.listInstallableEngines().then(setInstallableEngines).catch(() => undefined);
       if (capabilities[0]) {
         setEngineInstallationDraft((current) => ({ ...current, engineId: capabilities[0].id }));
       }
@@ -1001,7 +1003,32 @@ function App() {
   }
 
   async function autoInstallEngine(engine: EngineCapability) {
-    const taskId = startBackgroundTask(`自动安装 ${engine.name}`, "build", "准备源码拉取和一站式编译脚本");
+    // One-click install for engines available on conda-forge (no manual download
+    // or compilation). Commercial / licensed engines fall back to build recipes.
+    if (installableEngines.includes(engine.id)) {
+      const taskId = startBackgroundTask(`安装 ${engine.name}`, "install", "通过 conda-forge 下载并安装（可能需要几分钟）");
+      try {
+        setSelectedEngineId(engine.id);
+        updateBackgroundTask(taskId, { progress: 35, detail: "创建隔离环境并解析依赖…" });
+        await api.installEngine(engine.id);
+        updateBackgroundTask(taskId, { progress: 85, detail: "重新检测引擎可用性…" });
+        const capabilities = await api.engineCapabilities();
+        setEngines(capabilities);
+        const installations = await api.listEngineInstallations();
+        setEngineInstallations(installations);
+        finishBackgroundTask(taskId, `${engine.name} 已安装并标记可用。`);
+        notifySuccess(`${engine.name} 已通过 conda-forge 安装完成，可直接使用。`, "引擎已安装");
+      } catch (caught) {
+        finishBackgroundTask(taskId, `${engine.name} 安装失败`, "failed");
+        reportError(caught);
+      }
+      return;
+    }
+    return prepareEngineBuild(engine);
+  }
+
+  async function prepareEngineBuild(engine: EngineCapability) {
+    const taskId = startBackgroundTask(`生成 ${engine.name} 编译脚本`, "build", "准备源码拉取和一站式编译脚本");
     const activeProject = currentProject ?? projects[0] ?? null;
     try {
       setSelectedEngineId(engine.id);
@@ -1905,6 +1932,7 @@ function App() {
             autoFindEngine={autoFindEngine}
             manualFindEngine={manualFindEngine}
             autoInstallEngine={autoInstallEngine}
+            installableEngines={installableEngines}
           />
         )}
 
@@ -3028,7 +3056,8 @@ function EnginesPanel({
   generateRecipes,
   autoFindEngine,
   manualFindEngine,
-  autoInstallEngine
+  autoInstallEngine,
+  installableEngines
 }: {
   engines: EngineCapability[];
   selectedEngineId: string;
@@ -3042,6 +3071,7 @@ function EnginesPanel({
   autoFindEngine: (engine: EngineCapability) => void;
   manualFindEngine: (engine: EngineCapability) => void;
   autoInstallEngine: (engine: EngineCapability) => void;
+  installableEngines: string[];
 }) {
   const selectedEngine = engines.find((engine) => engine.id === selectedEngineId) ?? engines[0];
   const selectedRecords = engineInstallations.filter((record) => record.engineId === selectedEngineId);
@@ -3086,7 +3116,9 @@ function EnginesPanel({
                 <div className="engine-card-actions" onClick={(event) => event.stopPropagation()}>
                   <button type="button" onClick={() => autoFindEngine(engine)}>自动查找</button>
                   <button type="button" onClick={() => manualFindEngine(engine)}>手动查找</button>
-                  <button type="button" className="primary" onClick={() => autoInstallEngine(engine)}>自动安装</button>
+                  <button type="button" className="primary" onClick={() => autoInstallEngine(engine)}>
+                    {installableEngines.includes(engine.id) ? "一键安装" : "生成编译脚本"}
+                  </button>
                 </div>
               ) : null}
             </article>

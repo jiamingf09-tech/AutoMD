@@ -31,7 +31,46 @@ struct AppState {
     db: Mutex<ProjectDatabase>,
     project_root: PathBuf,
     plugin_root: PathBuf,
+    engines_root: PathBuf,
     task_manager: TaskManager,
+}
+
+/// conda-forge package name for engines that can be installed with one click.
+/// Engines absent here are commercial/licensed or need manual builds.
+fn engine_conda_package(engine_id: &str) -> Option<&'static str> {
+    match engine_id {
+        "gromacs" => Some("gromacs"),
+        "openmm" => Some("openmm"),
+        "ambertools" => Some("ambertools"),
+        "lammps" => Some("lammps"),
+        "cp2k" => Some("cp2k"),
+        "hoomd" => Some("hoomd"),
+        _ => None,
+    }
+}
+
+fn locate_installed_binary(prefix: &Path, engine_id: &str) -> Option<PathBuf> {
+    let bin = prefix.join("bin");
+    let mut candidates: Vec<String> = engine_registry::detect_engine_by_id(engine_id)
+        .map(|capability| capability.executable_names)
+        .unwrap_or_default();
+    if candidates.is_empty() {
+        // Python-library engines (e.g. OpenMM) ship no CLI; point at the env python.
+        candidates.push("python".to_string());
+    }
+    candidates
+        .into_iter()
+        .map(|name| bin.join(name))
+        .find(|path| path.exists())
+}
+
+fn detect_installed_version(binary: &Path) -> Option<String> {
+    let output = Command::new(binary).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .next()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
 }
 
 #[tauri::command]
@@ -134,6 +173,79 @@ fn delete_engine_installation(
     let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
     db.delete_engine_installation(engine_id, location)
         .map_err(|error| error.to_string())
+}
+
+/// Engine ids that AutoMD can install with one click via conda-forge.
+#[tauri::command]
+fn list_installable_engines() -> Vec<String> {
+    engine_registry::known_engine_ids()
+        .into_iter()
+        .filter(|id| engine_conda_package(id).is_some())
+        .collect()
+}
+
+/// One-click install: create an isolated conda-forge environment for the engine
+/// (no manual download or compilation), then record the resulting binary as a
+/// ready installation. Requires micromamba/mamba/conda on PATH.
+#[tauri::command]
+fn install_engine(
+    engine_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<EngineInstallationRecord, String> {
+    let package = engine_conda_package(&engine_id).ok_or_else(|| {
+        format!("{engine_id} 暂不支持一键安装（通常需要许可或手动编译），请在指引页查看安装方式。")
+    })?;
+    let manager = ["micromamba", "mamba", "conda"]
+        .iter()
+        .find_map(|candidate| which::which(candidate).ok())
+        .ok_or_else(|| {
+            "未检测到 conda / mamba / micromamba。请先安装 Miniforge（https://conda-forge.org/download/）后重试，或在指引页查看说明。".to_string()
+        })?;
+
+    std::fs::create_dir_all(&state.engines_root).map_err(|error| error.to_string())?;
+    let prefix = state.engines_root.join(&engine_id);
+
+    let output = Command::new(&manager)
+        .arg("create")
+        .arg("-y")
+        .arg("-p")
+        .arg(&prefix)
+        .arg("-c")
+        .arg("conda-forge")
+        .arg(package)
+        .output()
+        .map_err(|error| format!("启动安装器失败：{error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr
+            .lines()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!("{engine_id} 安装失败：\n{}", tail.trim()));
+    }
+
+    let binary = locate_installed_binary(&prefix, &engine_id).ok_or_else(|| {
+        format!("{engine_id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
+    })?;
+
+    let record = EngineInstallationRecord {
+        engine_id: engine_id.clone(),
+        location: binary.display().to_string(),
+        version: detect_installed_version(&binary),
+        authorization_status: DetectionStatus::Ready,
+        checked_at: chrono::Utc::now(),
+    };
+
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_engine_installation(record.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(record)
 }
 
 #[tauri::command]
@@ -629,6 +741,8 @@ pub fn run() {
             std::fs::create_dir_all(&project_root)?;
             let plugin_root = app_dir.join("plugins");
             std::fs::create_dir_all(&plugin_root)?;
+            let engines_root = app_dir.join("engines");
+            std::fs::create_dir_all(&engines_root)?;
             let db = ProjectDatabase::open(app_dir.join("automd.sqlite"))
                 .map_err(|error| Box::<dyn std::error::Error>::from(error))?;
             let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -640,6 +754,7 @@ pub fn run() {
                 db: Mutex::new(db),
                 project_root,
                 plugin_root,
+                engines_root,
                 task_manager: TaskManager::new(task_resource_root),
             });
             Ok(())
@@ -656,6 +771,8 @@ pub fn run() {
             list_engine_installations,
             save_engine_installation,
             delete_engine_installation,
+            list_installable_engines,
+            install_engine,
             list_plugin_manifests,
             open_plugin_folder,
             open_path_in_system,
