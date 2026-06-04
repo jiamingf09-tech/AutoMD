@@ -481,7 +481,7 @@ ul {
   gap: 10px;
 }
 
-.current-project-main div {
+.current-project-main > div {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -872,12 +872,14 @@ ul {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .current-structure-badge {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
+  max-width: 100%;
   padding: 3px 10px;
   border-radius: var(--r-pill);
   border: 1px solid var(--brand);
@@ -886,6 +888,8 @@ ul {
   font-size: 12px;
   font-weight: 650;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ============================================================
@@ -1512,7 +1516,7 @@ ul {
 
 .stage-row {
   display: grid;
-  grid-template-columns: minmax(140px, 180px) minmax(0, 1fr) minmax(150px, 220px);
+  grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
   gap: 12px;
   align-items: start;
   border: 1px solid var(--border);
@@ -1532,7 +1536,39 @@ ul {
 }
 
 .compact-tools .tool-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(220px, auto);
+}
+
+.sidecar-summary,
+.sidecar-explain {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.sidecar-summary small,
+.sidecar-explain p {
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.sidecar-explain details {
+  display: grid;
+  gap: 10px;
+}
+
+.advanced-panel {
+  display: block;
+}
+
+.advanced-panel > summary {
+  cursor: pointer;
+  font-weight: 900;
+  color: var(--text);
 }
 
 .tool-row small {
@@ -1567,7 +1603,7 @@ ul {
 
 .parameter-mapping-summary {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr;
   align-items: center;
   gap: 10px;
   color: var(--text-2);
