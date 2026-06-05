@@ -17,10 +17,11 @@ const lib = read("src-tauri/src/lib.rs");
 const index = read("dist/index.html");
 const ci = read(".github/workflows/ci.yml");
 
-const requiredTabs = ["项目", "流程", "运行", "远程", "报告", "引擎", "编译", "插件"];
+const requiredTabs = ["项目", "流程", "运行", "远程", "报告", "引擎", "插件"];
 for (const label of requiredTabs) {
   check(app.includes(`label: "${label}"`), `missing tab label: ${label}`);
 }
+check(app.includes(`activeTab === "pluginDetail"`), "missing dynamic plugin detail view");
 check(!app.includes(`label: "总览"`), "old 总览 tab should not be present");
 
 const requiredUiText = [
@@ -32,7 +33,9 @@ const requiredUiText = [
   "导入到 inputs/",
   "等待结构导入",
   "自动查找",
+  "自动扫描",
   "手动查找",
+  "手动登记",
   "自动安装",
   "不适用",
   "生成结构准备文件",
@@ -45,12 +48,24 @@ const requiredUiText = [
   "取消任务",
   "刷新 artifact",
   "生成远程执行包",
-  "运行构建向导",
+  "运行高级部署",
+  "目标设备",
+  "AutoMD 远程助手",
+  "安装/更新 helper",
   "生成分析包",
   "导出 MD",
   "导出 HTML",
   "导出 PDF",
   "打开插件目录",
+  "导入插件",
+  "快速创建并启用",
+  "用户插件",
+  "插件详情",
+  "沙盒运行",
+  "直接运行",
+  "直接运行插件？",
+  "插件构建与接入指引",
+  "内置插件只读",
   "插件目录由当前系统的应用数据目录动态生成",
   "后台任务",
   "GPU 状态检测中",
@@ -125,4 +140,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`AutoMD frontend smoke passed: ${commandNames.length} Tauri commands, ${requiredTabs.length} tabs, ${requiredUiText.length} UI feature labels, CI matrix present.`);
+console.log(`AutoMD frontend smoke passed: ${commandNames.length} Tauri commands, ${requiredTabs.length + 1} tab/views, ${requiredUiText.length} UI feature labels, CI matrix present.`);

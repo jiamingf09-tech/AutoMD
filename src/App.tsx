@@ -15,7 +15,10 @@ import type {
   ContainerRecipe,
   DetectionStatus,
   EngineCapability,
+  EngineDeployResult,
+  EngineDeployStrategy,
   EngineInstallationRecord,
+  EngineTarget,
   EngineLogReport,
   EngineRunPackage,
   ExecutionMode,
@@ -27,12 +30,21 @@ import type {
   ParameterMappingStatus,
   ProjectDomain,
   PluginKind,
+  PluginAction,
+  PluginConfigRequest,
+  PluginImportRequest,
+  PluginManifest,
   PluginRegistrySnapshot,
+  PluginRunMode,
+  PluginRunRequest,
+  PluginRunResult,
+  PluginTemplateRequest,
   ProjectTextFilePayload,
   ProjectSummary,
   ReportFormat,
   ExportedReport,
   RemoteExecutionPackage,
+  RemoteHelperStatus,
   RemoteJobSnapshot,
   RemoteProfile,
   RemoteWorkflowMode,
@@ -60,7 +72,7 @@ import type {
   ValidationSeverity
 } from "./types";
 
-type TabId = "overview" | "workflow" | "run" | "remote" | "report" | "engines" | "build" | "plugins" | "guide";
+type TabId = "overview" | "workflow" | "run" | "remote" | "report" | "engines" | "plugins" | "pluginDetail" | "guide";
 
 type NotificationSeverity = "error" | "warning" | "success" | "info";
 
@@ -243,17 +255,66 @@ function DeleteStructureModal({ structure, deleting, onCancel, onConfirm }: { st
   );
 }
 
+function DirectPluginRunModal({
+  manifest,
+  action,
+  running,
+  onCancel,
+  onConfirm
+}: {
+  manifest: PluginManifest;
+  action: PluginAction;
+  running: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { cancelRef.current?.focus(); }, []);
+  useEffect(() => {
+    function h(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    }
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-overlay modal-overlay-danger" role="presentation" onMouseDown={onCancel}>
+      <div className="modal-dialog modal-danger" role="alertdialog" aria-modal="true" aria-labelledby="plugin-run-title" aria-describedby="plugin-run-body" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-icon" aria-hidden="true">⚠</div>
+        <h3 id="plugin-run-title">直接运行插件？</h3>
+        <div id="plugin-run-body" className="modal-body">
+          <p>
+            请再次确认：确定要以<strong>直接运行模式</strong>执行「<strong>{manifest.name}</strong>」的「<strong>{action.label}</strong>」吗？
+            这会跳过 AutoMD 的轻量沙盒限制。
+          </p>
+          <p className="modal-path mono">
+            entrypoint={manifest.entrypoint}; command={action.command ?? "按入口类型推断"}; args={action.args.join(" ") || "无"}
+          </p>
+          <p>只有确认插件来源可信、入口脚本和写入目录都安全时才建议直接运行。</p>
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="modal-cancel" ref={cancelRef} onClick={onCancel} disabled={running}>取消</button>
+          <button type="button" className="modal-delete" onClick={onConfirm} disabled={running}>{running ? "运行中…" : "确认直接运行"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Ordered to match the actual beginner workflow (top → bottom): create a
 // project & import a structure, configure, run, then view results. Advanced
-// infrastructure tabs (remote / build / engines / plugins) follow the separator.
+// infrastructure tabs (remote / engines / plugins) follow the separator.
 const tabs: Array<{ id: TabId; label: string; description: string }> = [
   { id: "overview", label: "项目", description: "创建项目并导入结构" },
   { id: "workflow", label: "流程", description: "参数、阶段和分析模块" },
   { id: "run", label: "运行", description: "本地运行与任务监控" },
   { id: "report", label: "报告", description: "可复现实验输出" },
   { id: "remote", label: "远程", description: "SSH / HPC 集群执行" },
-  { id: "build", label: "编译", description: "源码构建和容器 recipe" },
-  { id: "engines", label: "引擎", description: "安装 / 检测模拟引擎" },
+  { id: "engines", label: "引擎", description: "本机/远程部署与检测" },
   { id: "plugins", label: "插件", description: "扩展 manifest 和能力" }
 ];
 
@@ -303,7 +364,7 @@ const engineGuideRows = [
     id: "cp2k",
     category: "QM/MM 和材料计算",
     install: "推荐 toolchain/source build 或 HPC module；BLAS/LAPACK、MPI、libxc、ELPA、CUDA 支持需按集群环境决定。",
-    configure: "保存 cp2k/CP2K module 信息；在“编译”页生成 recipe，在“远程”页生成 SLURM/PBS/LSF 脚本。",
+    configure: "保存 cp2k/CP2K module 信息；在“引擎”页的高级部署/编译区生成 recipe，在“远程”页生成 SLURM/PBS/LSF 脚本。",
     notes: "桌面一键编译风险高，建议优先 dry-run、写脚本、远程执行。"
   },
   {
@@ -388,6 +449,14 @@ const statusText: Record<DetectionStatus, string> = {
   platformUnsupported: "平台不支持",
   remoteRecommended: "建议远程",
   notApplicable: "不适用"
+};
+
+const remoteHelperStateText: Record<RemoteHelperStatus["status"], string> = {
+  missing: "未安装 helper",
+  ready: "已安装",
+  outdated: "版本过旧",
+  unreachable: "远程不可达",
+  permissionDenied: "权限不足"
 };
 
 function isEnginePlatformBlocked(engine: EngineCapability): boolean {
@@ -530,14 +599,21 @@ function App() {
     workspaceRef.current?.scrollTo({ top: 0 });
   }, [activeTab]);
   const [engines, setEngines] = useState<EngineCapability[]>([]);
+  const [engineTargets, setEngineTargets] = useState<EngineTarget[]>([]);
+  const [selectedEngineTargetId, setSelectedEngineTargetId] = useState("local");
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallationRecord[]>([]);
   const [installableEngines, setInstallableEngines] = useState<string[]>(["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]);
   const [installableTools, setInstallableTools] = useState<string[]>(["mpirun", "plumed"]);
   const [engineInstallationDraft, setEngineInstallationDraft] = useState<EngineInstallationRecord>({
+    targetKind: "local",
+    targetId: "local",
+    targetLabel: "本机",
     engineId: "gromacs",
     location: "",
     version: null,
     authorizationStatus: "ready",
+    platform: null,
+    arch: null,
     checkedAt: new Date().toISOString()
   });
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
@@ -547,6 +623,21 @@ function App() {
   const [scienceDiagnostics, setScienceDiagnostics] = useState<ScienceSidecarDiagnostics | null>(null);
   const [preparationPackage, setPreparationPackage] = useState<StructurePreparationPackage | null>(null);
   const [pluginRegistry, setPluginRegistry] = useState<PluginRegistrySnapshot | null>(null);
+  const [selectedPluginId, setSelectedPluginId] = useState<string | null>(null);
+  const [pluginImportPath, setPluginImportPath] = useState("");
+  const [pluginImportOverwrite, setPluginImportOverwrite] = useState(false);
+  const [pluginTemplateDraft, setPluginTemplateDraft] = useState<PluginTemplateRequest>({
+    id: "my-analysis-plugin",
+    name: "My Analysis Plugin",
+    kind: "analysisModule",
+    target: "workflow",
+    language: "python",
+    description: "读取当前 AutoMD 上下文并生成一个示例分析 artifact。"
+  });
+  const [pluginConfigDrafts, setPluginConfigDrafts] = useState<Record<string, string>>({});
+  const [pluginRunResult, setPluginRunResult] = useState<PluginRunResult | null>(null);
+  const [directPluginRunTarget, setDirectPluginRunTarget] = useState<{ manifest: PluginManifest; action: PluginAction } | null>(null);
+  const [pluginBusy, setPluginBusy] = useState(false);
   const [remoteProfiles, setRemoteProfiles] = useState<RemoteProfile[]>([]);
   const [selectedRemoteProfileId, setSelectedRemoteProfileId] = useState<string | null>(null);
   const [remotePackage, setRemotePackage] = useState<RemoteExecutionPackage | null>(null);
@@ -605,6 +696,7 @@ function App() {
   const [buildWorkflowMode, setBuildWorkflowMode] = useState<BuildWorkflowMode>("dryRun");
   const [buildWorkflowTimeout, setBuildWorkflowTimeout] = useState(600);
   const [buildWorkflowResult, setBuildWorkflowResult] = useState<BuildWorkflowResult | null>(null);
+  const [engineDeployResult, setEngineDeployResult] = useState<EngineDeployResult | null>(null);
   const [projectName, setProjectName] = useState("Demo protein-ligand MD");
   const [domain, setDomain] = useState<ProjectDomain>("biomolecular");
   const [selectedEngineId, setSelectedEngineId] = useState("gromacs");
@@ -628,6 +720,28 @@ function App() {
   useEffect(() => {
     void bootstrap();
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void api.engineCapabilitiesForTarget(selectedEngineTargetId)
+      .then((capabilities) => {
+        if (!active) return;
+        setEngines(capabilities);
+        if (capabilities.length > 0 && !capabilities.some((engine) => engine.id === selectedEngineId)) {
+          setSelectedEngineId(capabilities[0].id);
+        }
+      })
+      .catch(reportError);
+    return () => {
+      active = false;
+    };
+  }, [selectedEngineTargetId]);
+
+  useEffect(() => {
+    if (engineTargets.length > 0 && !engineTargets.some((target) => target.id === selectedEngineTargetId)) {
+      setSelectedEngineTargetId(engineTargets[0].id);
+    }
+  }, [engineTargets, selectedEngineTargetId]);
 
   // Native macOS menu -> frontend actions (only inside Tauri).
   useEffect(() => {
@@ -715,14 +829,22 @@ function App() {
     () => engines.find((engine) => engine.id === selectedEngineId) ?? engines[0],
     [engines, selectedEngineId]
   );
+  const selectedEngineTarget = useMemo(
+    () => engineTargets.find((target) => target.id === selectedEngineTargetId) ?? engineTargets[0] ?? null,
+    [engineTargets, selectedEngineTargetId]
+  );
+  const selectedPlugin = pluginRegistry?.manifests.find((manifest) => manifest.id === selectedPluginId) ?? null;
+  const enabledUserPlugins = pluginRegistry?.manifests.filter((manifest) => manifest.origin === "user" && manifest.enabled) ?? [];
 
   const readyCount = engines.filter((engine) => engine.detection.status === "ready").length;
   const activeView = activeTab === "guide"
     ? guideTab
+    : activeTab === "pluginDetail"
+      ? { id: "pluginDetail" as const, label: selectedPlugin?.name ?? "插件详情", description: "用户插件配置和运行" }
     : tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
   const activeProject = currentProject ?? projects[0] ?? null;
   const activeStructure = structures.find((s) => s.id === activeStructureId) ?? null;
-  const showProjectBanner = !["engines", "build", "plugins", "guide"].includes(activeTab);
+  const showProjectBanner = !["engines", "plugins", "pluginDetail", "guide"].includes(activeTab);
   const showStructureRequiredWarning = showProjectBanner && Boolean(activeProject) && !activeStructure;
 
   useEffect(() => {
@@ -858,8 +980,9 @@ function App() {
 
   async function bootstrap() {
     try {
-      const [capabilities, installations, runtime, science, plugins, profiles, storedProjects, storedTasks] = await Promise.all([
+      const [capabilities, targets, installations, runtime, science, plugins, profiles, storedProjects, storedTasks] = await Promise.all([
         api.engineCapabilities(),
+        api.engineTargets(),
         api.listEngineInstallations(),
         api.runtimeDiagnostics(),
         api.scienceSidecarDiagnostics(),
@@ -869,6 +992,7 @@ function App() {
         api.listTaskRecords(null)
       ]);
       setEngines(capabilities);
+      setEngineTargets(targets);
       setEngineInstallations(installations);
       void api.listInstallableEngines().then(setInstallableEngines).catch(() => undefined);
       void api.listInstallableTools().then(setInstallableTools).catch(() => undefined);
@@ -1043,6 +1167,167 @@ function App() {
 
   function openPluginFolder() {
     void api.openPluginFolder().catch(reportError);
+  }
+
+  async function refreshPluginRegistry() {
+    try {
+      const snapshot = await api.pluginManifests();
+      setPluginRegistry(snapshot);
+      if (selectedPluginId && !snapshot.manifests.some((manifest) => manifest.id === selectedPluginId)) {
+        setSelectedPluginId(null);
+        if (activeTab === "pluginDetail") {
+          setActiveTab("plugins");
+        }
+      }
+      notifySuccess("插件注册表已刷新。", "插件已刷新");
+    } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  async function browsePluginManifest() {
+    try {
+      const picked = await api.pickFile({ title: "选择插件 manifest", extensions: ["json"] });
+      if (picked) {
+        setPluginImportPath(picked);
+      }
+    } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  async function importPlugin() {
+    if (!pluginImportPath.trim()) {
+      notifyError("请先填写插件目录或选择 .automd-plugin.json。");
+      return;
+    }
+    setPluginBusy(true);
+    try {
+      const snapshot = await api.importPlugin({ sourcePath: pluginImportPath.trim(), overwrite: pluginImportOverwrite });
+      setPluginRegistry(snapshot);
+      const imported = snapshot.manifests.find((manifest) => manifest.sourcePath?.includes(pluginImportPath.trim()) || manifest.installPath?.includes(pluginImportPath.trim()));
+      if (imported) {
+        setSelectedPluginId(imported.id);
+      }
+      setPluginImportPath("");
+      notifySuccess("插件已导入并启用。", "导入完成");
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function createPluginTemplate() {
+    setPluginBusy(true);
+    try {
+      const snapshot = await api.createPluginTemplate(pluginTemplateDraft);
+      setPluginRegistry(snapshot);
+      const created = snapshot.manifests.find((manifest) => manifest.id === pluginTemplateDraft.id || manifest.name === pluginTemplateDraft.name);
+      if (created) {
+        setSelectedPluginId(created.id);
+        setActiveTab("pluginDetail");
+      }
+      notifySuccess("插件模板已创建并启用。", "插件已创建");
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function setUserPluginEnabled(pluginId: string, enabled: boolean) {
+    setPluginBusy(true);
+    try {
+      const snapshot = await api.setPluginEnabled(pluginId, enabled);
+      setPluginRegistry(snapshot);
+      notifySuccess(enabled ? "插件已启用。" : "插件已停用。", enabled ? "已启用" : "已停用");
+      if (!enabled && selectedPluginId === pluginId && activeTab === "pluginDetail") {
+        setActiveTab("plugins");
+      }
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function deleteUserPlugin(pluginId: string) {
+    setPluginBusy(true);
+    try {
+      const snapshot = await api.deletePlugin(pluginId);
+      setPluginRegistry(snapshot);
+      notifySuccess("用户插件已删除。", "插件已删除");
+      if (selectedPluginId === pluginId) {
+        setSelectedPluginId(null);
+        setActiveTab("plugins");
+      }
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setPluginBusy(false);
+    }
+  }
+
+  async function savePluginConfig(manifest: PluginManifest) {
+    const draft = pluginConfigDrafts[manifest.id] ?? JSON.stringify(manifest.config ?? manifest.defaultConfig ?? {}, null, 2);
+    try {
+      const parsed = draft.trim() ? JSON.parse(draft) : null;
+      const snapshot = await api.savePluginConfig({ pluginId: manifest.id, config: parsed });
+      setPluginRegistry(snapshot);
+      notifySuccess("插件配置已保存。", "配置已保存");
+    } catch (caught) {
+      reportError(caught instanceof SyntaxError ? new Error("插件配置必须是合法 JSON。") : caught);
+    }
+  }
+
+  function pluginRunContext() {
+    return {
+      projectId: activeProject?.id ?? null,
+      projectPath: activeProject?.path ?? null,
+      structureId: activeStructure?.id ?? null,
+      structurePath: activeStructure?.importedPath ?? null,
+      plan,
+      allowedOutputDirs: [
+        activeProject?.path ? `${activeProject.path}/analysis` : null,
+        activeProject?.path ? `${activeProject.path}/reports` : null,
+        activeProject?.path ? `${activeProject.path}/generated` : null
+      ].filter(Boolean)
+    };
+  }
+
+  async function runPluginAction(manifest: PluginManifest, action: PluginAction, mode: PluginRunMode, confirmedDirect = false) {
+    if (mode === "direct" && !confirmedDirect) {
+      setDirectPluginRunTarget({ manifest, action });
+      return;
+    }
+    setPluginBusy(true);
+    try {
+      const request: PluginRunRequest = {
+        pluginId: manifest.id,
+        actionId: action.id,
+        mode,
+        confirmedDirect,
+        context: pluginRunContext()
+      };
+      const result = await api.runPluginAction(request);
+      setPluginRunResult(result);
+      if (result.record.status === "failed") {
+        notifyError(result.stderr || "插件运行失败。");
+      } else {
+        notifySuccess("插件动作已运行完成。", "插件已运行");
+      }
+      void api.pluginManifests().then(setPluginRegistry).catch(() => undefined);
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setPluginBusy(false);
+      setDirectPluginRunTarget(null);
+    }
+  }
+
+  function openPluginInstallFolder(pluginId: string) {
+    void api.openPluginInstallFolder(pluginId).catch(reportError);
   }
 
   async function browseStructureFile() {
@@ -1329,14 +1614,46 @@ function App() {
     });
   }
 
+  function warnRemoteHelperRequired(target: EngineTarget) {
+    pushNotification({
+      severity: "warning",
+      title: "远程 helper 未就绪",
+      message: `请先在远程页为 ${target.label} 安装或检测 AutoMD helper，然后再扫描、部署或编译远程引擎。`,
+      action: { label: "去远程页", run: () => setActiveTab("remote") },
+      guide: true
+    });
+  }
+
   async function autoFindEngine(engine: EngineCapability) {
     if (isEnginePlatformBlocked(engine)) {
       warnUnsupportedEnginePlatform(engine);
       return;
     }
-    const taskId = startBackgroundTask(`自动查找 ${engine.name}`, "search", "扫描 PATH 和常见引擎目录");
+    const target = selectedEngineTarget;
+    if (target?.kind === "remote" && target.status !== "ready" && target.status !== "outdated") {
+      warnRemoteHelperRequired(target);
+      return;
+    }
+    const taskId = startBackgroundTask(
+      `自动扫描 ${engine.name}`,
+      "search",
+      target?.kind === "remote" ? "通过远程 helper 扫描目标设备" : "扫描 PATH 和常见引擎目录"
+    );
     try {
       setSelectedEngineId(engine.id);
+      if (target?.kind === "remote") {
+        updateBackgroundTask(taskId, { progress: 45, detail: target.detail });
+        const capabilities = await api.scanEnginesOnTarget(target.id);
+        setEngines(capabilities);
+        const [targets, installations] = await Promise.all([
+          api.engineTargets(),
+          api.listEngineInstallations()
+        ]);
+        setEngineTargets(targets);
+        setEngineInstallations(installations);
+        finishBackgroundTask(taskId, `已扫描 ${target.label}`);
+        return;
+      }
       updateBackgroundTask(taskId, { progress: 40, detail: engine.executableNames.join(", ") });
       const result = await api.findExecutable({ commands: engine.executableNames, extraDirs: [] });
       if (!result.found || !result.path) {
@@ -1344,10 +1661,15 @@ function App() {
         return;
       }
       await saveEngineInstallation({
+        targetKind: "local",
+        targetId: "local",
+        targetLabel: "本机",
         engineId: engine.id,
         location: result.path,
         version: null,
         authorizationStatus: engine.license.requiresUserLicense ? "missingLicense" : "ready",
+        platform: diagnostics?.os === "macos" ? "macos" : diagnostics?.os === "windows" ? "windows" : diagnostics?.os === "linux" ? "linux" : null,
+        arch: diagnostics?.arch ?? null,
         checkedAt: new Date().toISOString()
       });
       finishBackgroundTask(taskId, `已找到 ${fileNameFromPath(result.path)}`);
@@ -1362,22 +1684,34 @@ function App() {
       warnUnsupportedEnginePlatform(engine);
       return;
     }
-    const taskId = startBackgroundTask(`手动选择 ${engine.name}`, "search", "等待用户选择引擎可执行文件");
+    const target = selectedEngineTarget;
+    const taskId = startBackgroundTask(
+      `手动登记 ${engine.name}`,
+      "search",
+      target?.kind === "remote" ? "登记远程目标上的可执行文件路径" : "等待用户选择引擎可执行文件"
+    );
     try {
       setSelectedEngineId(engine.id);
-      const selectedPath = await api.pickFile({
-        title: `选择 ${engine.name} 可执行文件`,
-        extensions: []
-      });
+      const selectedPath = target?.kind === "remote"
+        ? window.prompt(`请输入 ${target.label} 上的 ${engine.name} 可执行文件路径，例如 /opt/${engine.id}/bin/${engine.executableNames[0] ?? engine.id}`)
+        : await api.pickFile({
+            title: `选择 ${engine.name} 可执行文件`,
+            extensions: []
+          });
       if (!selectedPath) {
         finishBackgroundTask(taskId, "已取消手动选择");
         return;
       }
       await saveEngineInstallation({
+        targetKind: target?.kind ?? "local",
+        targetId: target?.id ?? "local",
+        targetLabel: target?.label ?? "本机",
         engineId: engine.id,
         location: selectedPath,
         version: null,
         authorizationStatus: engine.license.requiresUserLicense ? "missingLicense" : "ready",
+        platform: target?.platform ?? null,
+        arch: target?.arch ?? null,
         checkedAt: new Date().toISOString()
       });
       finishBackgroundTask(taskId, `已选择 ${fileNameFromPath(selectedPath)}`);
@@ -1392,29 +1726,47 @@ function App() {
       warnUnsupportedEnginePlatform(engine);
       return;
     }
-    // One-click install for engines available on conda-forge (no manual download
-    // or compilation). Commercial / licensed engines fall back to build recipes.
-    if (installableEngines.includes(engine.id)) {
-      const taskId = startBackgroundTask(`安装 ${engine.name}`, "install", "通过 conda-forge 下载并安装（可能需要几分钟）");
-      notifyInstalling(engine.name);
-      try {
-        setSelectedEngineId(engine.id);
-        updateBackgroundTask(taskId, { progress: 35, detail: "创建隔离环境并解析依赖…" });
-        await api.installEngine(engine.id);
-        updateBackgroundTask(taskId, { progress: 85, detail: "重新检测引擎可用性…" });
-        const capabilities = await api.engineCapabilities();
-        setEngines(capabilities);
-        const installations = await api.listEngineInstallations();
-        setEngineInstallations(installations);
-        finishBackgroundTask(taskId, `${engine.name} 已安装并标记可用。`);
-        notifySuccess(`${engine.name} 已通过 conda-forge 安装完成，可直接使用。`, "引擎已安装");
-      } catch (caught) {
-        finishBackgroundTask(taskId, `${engine.name} 安装失败`, "failed");
-        reportError(caught);
-      }
+    const target = selectedEngineTarget;
+    if (target?.kind === "remote" && target.status !== "ready" && target.status !== "outdated") {
+      warnRemoteHelperRequired(target);
       return;
     }
-    return prepareEngineBuild(engine);
+    const activeProject = currentProject ?? projects[0] ?? null;
+    const taskId = startBackgroundTask(`一键部署 ${engine.name}`, "install", `${target?.label ?? "本机"}：包管理安装或源码构建`);
+    notifyInstalling(engine.name);
+    try {
+      setSelectedEngineId(engine.id);
+      updateBackgroundTask(taskId, { progress: 25, detail: "解析部署策略…" });
+      const result = await api.installOrBuildEngine({
+        targetId: target?.id ?? "local",
+        engineId: engine.id,
+        strategy: "auto",
+        mode: installableEngines.includes(engine.id) ? "execute" : buildWorkflowMode,
+        buildOptions: defaultBuildRecipeOptions(engine.id),
+        projectPath: activeProject?.path ?? null,
+        timeoutSeconds: buildWorkflowTimeout
+      });
+      setEngineDeployResult(result);
+      if (result.buildResult) {
+        setBuildWorkflowResult(result.buildResult);
+      }
+      updateBackgroundTask(taskId, { progress: 85, detail: "刷新目标设备引擎状态…" });
+      const [capabilities, targets, installations] = await Promise.all([
+        api.engineCapabilitiesForTarget(target?.id ?? "local"),
+        api.engineTargets(),
+        api.listEngineInstallations()
+      ]);
+      setEngines(capabilities);
+      setEngineTargets(targets);
+      setEngineInstallations(installations);
+      finishBackgroundTask(taskId, result.status === "failed" ? `${engine.name} 部署失败` : `${engine.name} 部署完成`, result.status === "failed" ? "failed" : "completed");
+      if (result.record) {
+        notifySuccess(`${engine.name} 已在 ${result.record.targetLabel} 登记为可用。`, "引擎已部署");
+      }
+    } catch (caught) {
+      finishBackgroundTask(taskId, `${engine.name} 部署失败`, "failed");
+      reportError(caught);
+    }
   }
 
   async function prepareEngineBuild(engine: EngineCapability) {
@@ -1445,12 +1797,12 @@ function App() {
         });
         setBuildWorkflowResult(result);
         await refreshArtifacts();
-        finishBackgroundTask(taskId, "已生成源码拉取、容器 recipe 和编译脚本；进入编译页可执行。");
+        finishBackgroundTask(taskId, "已生成源码拉取、容器 recipe 和编译脚本；可在引擎卡片高级区执行。");
       } else {
         setBuildWorkflowResult(null);
         finishBackgroundTask(taskId, "已生成编译 recipe；创建项目后可写入脚本或执行构建。");
       }
-      setActiveTab("build");
+      setActiveTab("engines");
     } catch (caught) {
       finishBackgroundTask(taskId, "自动安装/编译入口失败", "failed");
       reportError(caught);
@@ -1890,7 +2242,8 @@ function App() {
       setContainerRecipe(container);
       setBuildRecipe(build);
       setBuildWorkflowResult(null);
-      setActiveTab("build");
+      setEngineDeployResult(null);
+      setActiveTab("engines");
     } catch (caught) {
       reportError(caught);
     }
@@ -1918,7 +2271,8 @@ function App() {
       setBuildRecipe(build);
       setRecipeExportResult(exported);
       setBuildWorkflowResult(null);
-      setActiveTab("build");
+      setEngineDeployResult(null);
+      setActiveTab("engines");
       await refreshArtifacts();
     } catch (caught) {
       reportError(caught);
@@ -1931,6 +2285,16 @@ function App() {
       setError("需要先创建项目，才能运行构建向导。");
       return;
     }
+    const engine = engines.find((item) => item.id === engineId);
+    if (engine && isEnginePlatformBlocked(engine)) {
+      warnUnsupportedEnginePlatform(engine);
+      return;
+    }
+    const target = selectedEngineTarget;
+    if (target?.kind === "remote" && target.status !== "ready" && target.status !== "outdated") {
+      warnRemoteHelperRequired(target);
+      return;
+    }
     const taskId = startBackgroundTask(`构建向导 ${engineLabel[engineId] ?? engineId}`, "build", "准备构建 recipe");
     try {
       const options = defaultBuildRecipeOptions(engineId);
@@ -1938,24 +2302,34 @@ function App() {
       const [container, build, result] = await Promise.all([
         api.containerRecipe(engineId),
         api.buildRecipe(options),
-        api.runBuildWorkflow({
-          projectPath: activeProject.path,
-          buildOptions: options,
-          includeContainer: true,
-          includeBuildScript: true,
+        api.installOrBuildEngine({
+          targetId: selectedEngineTarget?.id ?? "local",
+          engineId,
+          strategy: buildWorkflowMode === "dryRun" || buildWorkflowMode === "writeFiles" ? "recipeOnly" : "sourceBuild",
           mode: buildWorkflowMode,
+          buildOptions: options,
+          projectPath: activeProject.path,
           timeoutSeconds: buildWorkflowTimeout
         })
       ]);
       setContainerRecipe(container);
       setBuildRecipe(build);
-      setBuildWorkflowResult(result);
+      setEngineDeployResult(result);
+      setBuildWorkflowResult(result.buildResult ?? null);
       updateBackgroundTask(taskId, { progress: 85, detail: buildWorkflowModeText[result.mode] });
-      if (result.filesWritten.length || result.logPath) {
+      if ((result.buildResult?.filesWritten.length ?? 0) || result.buildResult?.logPath) {
         await refreshArtifacts();
       }
-      finishBackgroundTask(taskId, result.status === "failed" ? "构建向导失败，查看编译页日志" : "构建向导完成");
-      setActiveTab("build");
+      const [capabilities, targets, installations] = await Promise.all([
+        api.engineCapabilitiesForTarget(selectedEngineTarget?.id ?? "local"),
+        api.engineTargets(),
+        api.listEngineInstallations()
+      ]);
+      setEngines(capabilities);
+      setEngineTargets(targets);
+      setEngineInstallations(installations);
+      finishBackgroundTask(taskId, result.status === "failed" ? "构建向导失败，查看高级部署日志" : "构建向导完成");
+      setActiveTab("engines");
     } catch (caught) {
       finishBackgroundTask(taskId, "构建向导失败", "failed");
       reportError(caught);
@@ -1997,9 +2371,9 @@ function App() {
       });
       setEngineInstallations((items) => [
         saved,
-        ...items.filter((item) => !(item.engineId === saved.engineId && item.location === saved.location))
+        ...items.filter((item) => !(item.targetId === saved.targetId && item.engineId === saved.engineId && item.location === saved.location))
       ]);
-      const capabilities = await api.engineCapabilities();
+      const capabilities = await api.engineCapabilitiesForTarget(saved.targetId);
       setEngines(capabilities);
       setEngineInstallationDraft(saved);
     } catch (caught) {
@@ -2009,15 +2383,15 @@ function App() {
 
   async function deleteEngineInstallation(record: EngineInstallationRecord) {
     try {
-      const deleted = await api.deleteEngineInstallation(record.engineId, record.location);
+      const deleted = await api.deleteEngineInstallationForTarget(record.targetId, record.engineId, record.location);
       if (!deleted) {
         setError("未找到要删除的引擎安装记录。");
         return;
       }
       setEngineInstallations((items) =>
-        items.filter((item) => !(item.engineId === record.engineId && item.location === record.location))
+        items.filter((item) => !(item.targetId === record.targetId && item.engineId === record.engineId && item.location === record.location))
       );
-      const capabilities = await api.engineCapabilities();
+      const capabilities = await api.engineCapabilitiesForTarget(record.targetId);
       setEngines(capabilities);
     } catch (caught) {
       reportError(caught);
@@ -2046,6 +2420,8 @@ function App() {
         setRemoteJobSnapshot(null);
         setRemoteWorkflowResult(null);
       }
+      const targets = await api.engineTargets();
+      setEngineTargets(targets);
     } catch (caught) {
       reportError(caught);
     }
@@ -2064,7 +2440,59 @@ function App() {
       setRemotePackage(null);
       setRemoteJobSnapshot(null);
       setRemoteWorkflowResult(null);
+      const targets = await api.engineTargets();
+      setEngineTargets(targets);
     } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  async function installRemoteHelperForProfile(profileId: string) {
+    const profile = remoteProfiles.find((item) => item.id === profileId);
+    const taskId = startBackgroundTask(`安装远程 helper`, "install", profile ? `${profile.name} · ${profile.host}` : profileId);
+    try {
+      updateBackgroundTask(taskId, { progress: 35, detail: "通过 SSH 写入 helper 脚本…" });
+      const status = await api.installRemoteHelper(profileId);
+      updateBackgroundTask(taskId, { progress: 80, detail: "刷新远程设备状态…" });
+      const [targets, capabilities] = await Promise.all([
+        api.engineTargets(),
+        api.engineCapabilitiesForTarget(`remote:${profileId}`)
+      ]);
+      setEngineTargets(targets);
+      if (selectedEngineTargetId === `remote:${profileId}`) {
+        setEngines(capabilities);
+      }
+      finishBackgroundTask(taskId, status.status === "ready" ? "远程 helper 已安装" : "远程 helper 安装未完成", status.status === "ready" ? "completed" : "failed");
+      if (status.status === "ready") {
+        notifySuccess(`${profile?.name ?? profileId} helper 已就绪。`, "远程 helper 已安装");
+      } else if (status.lastError) {
+        setError(status.lastError);
+      }
+    } catch (caught) {
+      finishBackgroundTask(taskId, "远程 helper 安装失败", "failed");
+      reportError(caught);
+    }
+  }
+
+  async function checkRemoteHelperForProfile(profileId: string) {
+    const profile = remoteProfiles.find((item) => item.id === profileId);
+    const taskId = startBackgroundTask(`检测远程 helper`, "search", profile ? `${profile.name} · ${profile.host}` : profileId);
+    try {
+      const status = await api.checkRemoteHelper(profileId);
+      const [targets, capabilities] = await Promise.all([
+        api.engineTargets(),
+        api.engineCapabilitiesForTarget(`remote:${profileId}`)
+      ]);
+      setEngineTargets(targets);
+      if (selectedEngineTargetId === `remote:${profileId}`) {
+        setEngines(capabilities);
+      }
+      finishBackgroundTask(taskId, status.status === "ready" ? "远程 helper 已就绪" : "远程 helper 不可用", status.status === "ready" ? "completed" : "failed");
+      if (status.lastError) {
+        setError(status.lastError);
+      }
+    } catch (caught) {
+      finishBackgroundTask(taskId, "远程 helper 检测失败", "failed");
       reportError(caught);
     }
   }
@@ -2210,7 +2638,7 @@ function App() {
       return { label: "去引擎页", run: () => setActiveTab("engines") };
     }
     if (/编译|构建|recipe|build/i.test(message)) {
-      return { label: "去编译页", run: () => setActiveTab("build") };
+      return { label: "去引擎页", run: () => setActiveTab("engines") };
     }
     if (/远程|ssh|slurm|profile/i.test(message)) {
       return { label: "去远程页", run: () => setActiveTab("remote") };
@@ -2295,6 +2723,25 @@ function App() {
               <small>{tab.description}</small>
             </button>
           ))}
+          {enabledUserPlugins.length ? (
+            <div className="nav-plugin-group" aria-label="用户插件">
+              <span>用户插件</span>
+              {enabledUserPlugins.map((plugin) => (
+                <button
+                  className={`nav-item nav-plugin ${activeTab === "pluginDetail" && selectedPluginId === plugin.id ? "active" : ""}`}
+                  key={plugin.id}
+                  onClick={() => {
+                    setSelectedPluginId(plugin.id);
+                    setActiveTab("pluginDetail");
+                  }}
+                  type="button"
+                >
+                  <span>{plugin.name}</span>
+                  <small>{pluginKindText[plugin.kind]} · {plugin.integrationTargets.join(", ") || "通用"}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </nav>
         <div className="sidebar-footer">
           <button
@@ -2333,16 +2780,7 @@ function App() {
           <div>
             <h2>{activeView.label}</h2>
           </div>
-          {activeTab === "guide" ? (
-            <div className="topbar-actions">
-              <button type="button" onClick={() => setActiveTab("overview")}>
-                新建项目
-              </button>
-              <button type="button" className="primary" onClick={() => setActiveTab("engines")}>
-                配置引擎
-              </button>
-            </div>
-          ) : (
+          {activeTab !== "guide" ? (
             <div className="topbar-actions">
               <select
                 value={selectedEngineId}
@@ -2362,7 +2800,7 @@ function App() {
                 生成运行计划
               </button>
             </div>
-          )}
+          ) : null}
         </header>
 
         {showProjectBanner ? (
@@ -2432,6 +2870,9 @@ function App() {
         {activeTab === "engines" && (
           <EnginesPanel
             engines={engines}
+            engineTargets={engineTargets}
+            selectedEngineTargetId={selectedEngineTargetId}
+            setSelectedEngineTargetId={setSelectedEngineTargetId}
             selectedEngineId={selectedEngineId}
             setSelectedEngineId={setSelectedEngineId}
             engineInstallations={engineInstallations}
@@ -2444,6 +2885,17 @@ function App() {
             manualFindEngine={manualFindEngine}
             autoInstallEngine={autoInstallEngine}
             installableEngines={installableEngines}
+            containerRecipe={containerRecipe}
+            buildRecipe={buildRecipe}
+            recipeExportResult={recipeExportResult}
+            buildWorkflowMode={buildWorkflowMode}
+            setBuildWorkflowMode={setBuildWorkflowMode}
+            buildWorkflowTimeout={buildWorkflowTimeout}
+            setBuildWorkflowTimeout={setBuildWorkflowTimeout}
+            buildWorkflowResult={buildWorkflowResult}
+            engineDeployResult={engineDeployResult}
+            exportRecipes={exportRecipes}
+            runBuildWizard={runBuildWizard}
           />
         )}
 
@@ -2545,29 +2997,55 @@ function App() {
             manualFindTool={manualFindTool}
             autoInstallTool={autoInstallTool}
             installableTools={installableTools}
-          />
-        )}
-
-        {activeTab === "build" && (
-          <BuildPanel
-            engines={engines}
-            selectedEngineId={selectedEngineId}
-            containerRecipe={containerRecipe}
-            buildRecipe={buildRecipe}
-            recipeExportResult={recipeExportResult}
-            buildWorkflowMode={buildWorkflowMode}
-            setBuildWorkflowMode={setBuildWorkflowMode}
-            buildWorkflowTimeout={buildWorkflowTimeout}
-            setBuildWorkflowTimeout={setBuildWorkflowTimeout}
-            buildWorkflowResult={buildWorkflowResult}
-            generateRecipes={generateRecipes}
-            exportRecipes={exportRecipes}
-            runBuildWizard={runBuildWizard}
+            engineTargets={engineTargets}
+            installRemoteHelper={installRemoteHelperForProfile}
+            checkRemoteHelper={checkRemoteHelperForProfile}
           />
         )}
 
         {activeTab === "plugins" && (
-          <PluginsPanel pluginRegistry={pluginRegistry} openPluginFolder={openPluginFolder} />
+          <PluginsPanel
+            pluginRegistry={pluginRegistry}
+            selectedPluginId={selectedPluginId}
+            setSelectedPluginId={setSelectedPluginId}
+            setActiveTab={setActiveTab}
+            pluginImportPath={pluginImportPath}
+            setPluginImportPath={setPluginImportPath}
+            pluginImportOverwrite={pluginImportOverwrite}
+            setPluginImportOverwrite={setPluginImportOverwrite}
+            pluginTemplateDraft={pluginTemplateDraft}
+            setPluginTemplateDraft={setPluginTemplateDraft}
+            pluginConfigDrafts={pluginConfigDrafts}
+            setPluginConfigDrafts={setPluginConfigDrafts}
+            pluginRunResult={pluginRunResult}
+            pluginBusy={pluginBusy}
+            openPluginFolder={openPluginFolder}
+            refreshPluginRegistry={refreshPluginRegistry}
+            browsePluginManifest={browsePluginManifest}
+            importPlugin={importPlugin}
+            createPluginTemplate={createPluginTemplate}
+            setUserPluginEnabled={setUserPluginEnabled}
+            deleteUserPlugin={deleteUserPlugin}
+            savePluginConfig={savePluginConfig}
+            runPluginAction={runPluginAction}
+            openPluginInstallFolder={openPluginInstallFolder}
+          />
+        )}
+
+        {activeTab === "pluginDetail" && (
+          <PluginDetailPage
+            manifest={selectedPlugin}
+            pluginConfigDrafts={pluginConfigDrafts}
+            setPluginConfigDrafts={setPluginConfigDrafts}
+            pluginRunResult={pluginRunResult}
+            pluginBusy={pluginBusy}
+            setActiveTab={setActiveTab}
+            setUserPluginEnabled={setUserPluginEnabled}
+            deleteUserPlugin={deleteUserPlugin}
+            savePluginConfig={savePluginConfig}
+            runPluginAction={runPluginAction}
+            openPluginInstallFolder={openPluginInstallFolder}
+          />
         )}
 
         {activeTab === "report" && (
@@ -2589,7 +3067,6 @@ function App() {
         {activeTab === "guide" && (
           <GuidePanel
             engines={engines}
-            pluginRegistry={pluginRegistry}
             setActiveTab={setActiveTab}
           />
         )}
@@ -2641,20 +3118,26 @@ function App() {
           onConfirm={confirmDeleteStructure}
         />
       ) : null}
+      {directPluginRunTarget ? (
+        <DirectPluginRunModal
+          manifest={directPluginRunTarget.manifest}
+          action={directPluginRunTarget.action}
+          running={pluginBusy}
+          onCancel={() => setDirectPluginRunTarget(null)}
+          onConfirm={() => runPluginAction(directPluginRunTarget.manifest, directPluginRunTarget.action, "direct", true)}
+        />
+      ) : null}
     </>
   );
 }
 
 function GuidePanel({
   engines,
-  pluginRegistry,
   setActiveTab
 }: {
   engines: EngineCapability[];
-  pluginRegistry: PluginRegistrySnapshot | null;
   setActiveTab: (tab: TabId) => void;
 }) {
-  const pluginKinds = Object.keys(pluginKindText) as PluginKind[];
   const conceptRows: Array<{ term: string; meaning: string; where: string }> = [
     {
       term: "当前项目",
@@ -2793,39 +3276,6 @@ function GuidePanel({
     { tool: "AmberTools cpptraj", role: "Amber 轨迹后处理和分析。", needed: "AMBER 轨迹分析常用；其他引擎可选。" }
   ];
 
-  const pluginKindGuideRows: Array<{ kind: PluginKind; role: string; example: string; safety: string }> = [
-    {
-      kind: "engineAdapter",
-      role: "新增或增强一个 MD 引擎的接入能力，例如检测版本、生成输入、启动任务、解析日志、处理 checkpoint。",
-      example: "给 GENESIS、Tinker、实验室内部 runner 或某个商业引擎增加适配。",
-      safety: "会执行外部命令，必须确认 entrypoint、licensePolicy、sourcePath 和写入目录。"
-    },
-    {
-      kind: "analysisModule",
-      role: "增加新的分析指标、图表或轨迹处理流程。",
-      example: "新增接触图、MM/PBSA 摘要、自定义距离监控、膜厚度或材料 RDF 分析。",
-      safety: "通常读取轨迹和写 analysis 输出，注意大文件内存占用和脚本来源。"
-    },
-    {
-      kind: "remoteScheduler",
-      role: "增加新的远程调度器、队列脚本模板或文件同步策略。",
-      example: "适配实验室私有调度器、云主机提交脚本或特殊 SLURM 资源语法。",
-      safety: "会触发 ssh、rsync 或提交命令，先 Dry run 并检查远程工作目录。"
-    },
-    {
-      kind: "buildRecipe",
-      role: "增加引擎安装、源码编译、容器 recipe 或诊断脚本。",
-      example: "为带 PLUMED 的 GROMACS、带 KOKKOS 的 LAMMPS 或集群 CP2K 生成 recipe。",
-      safety: "可能下载源码和运行编译命令，必须确认下载源、prefix 和权限。"
-    },
-    {
-      kind: "reportTemplate",
-      role: "增加报告模板、章节组织或导出格式。",
-      example: "实验室标准报告、课程作业报告、商业项目审计报告。",
-      safety: "通常只读取项目 artifact 和分析缓存，但仍要避免模板泄露隐私路径或许可证信息。"
-    }
-  ];
-
   const moduleRows: Array<{
     title: string;
     target: TabId;
@@ -2875,20 +3325,12 @@ function GuidePanel({
       next: "脚本确认后执行提交；任务完成后回收结果，再到“运行/报告”分析。"
     },
     {
-      title: "编译",
-      target: "build",
-      use: "生成安装脚本、源码编译 recipe、容器 recipe 和构建日志。适合没有引擎、需要 MPI/GPU/PLUMED 或平台不支持时使用。",
-      fill: "选择引擎和构建模式，设置 prefix、MPI、GPU 后端、PLUMED、容器工具和超时。默认先 dry-run 或只写脚本。",
-      check: "读 build manifest，确认不会写入系统目录、不会绕过许可证、下载源可信、GPU/MPI 选项符合机器或集群环境。",
-      next: "编译成功后回“引擎”保存新路径；失败时看日志分类和缺失依赖。"
-    },
-    {
       title: "引擎",
       target: "engines",
       use: "配置本机或用户授权环境中的 MD 引擎。这里决定软件能不能调用 GROMACS、OpenMM、AmberTools、NAMD 等。",
       fill: "缺失时先点“自动查找”，找不到再点“手动查找”选择可执行文件；可通过 conda-forge 安装的引擎点“一键安装”会真实下载并安装。需要许可或复杂平台构建的引擎会生成编译脚本或要求手动配置授权路径。",
-      check: "ready 表示可直接调用；需要安装表示先用一键安装或去“编译”；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
-      next: "引擎 ready 后回“流程”映射参数；缺工具去“编译”；Linux-only 或大任务去“远程”。"
+      check: "ready 表示可直接调用；需要安装表示先用一键部署或打开该引擎卡片的高级部署/编译；需要许可证表示先完成外部授权；平台不支持时考虑 WSL2、容器或远程。",
+      next: "引擎 ready 后回“流程”映射参数；缺工具使用引擎卡片内的高级部署/编译；Linux-only 或大任务去“远程”。"
     },
     {
       title: "插件",
@@ -2896,30 +3338,12 @@ function GuidePanel({
       use: "查看和管理扩展 manifest。插件可以增加引擎适配器、分析模块、远程调度器、构建 recipe 或报告模板。",
       fill: "把 .automd-plugin.json 放入插件目录，声明 id、name、kind、version、entrypoint、capabilities、license 和支持平台。",
       check: "查看 warning、entrypoint、sourcePath 和 capabilities。未知来源插件不要启用执行命令，先读 manifest。",
-      next: "插件被识别后，对应能力会出现在引擎、分析、远程、编译或报告页面。"
+      next: "插件被识别后，对应能力会出现在引擎、分析、远程、报告或引擎高级部署区。"
     }
   ];
 
   return (
     <div className="guide-page">
-      <section className="panel span-3 guide-hero">
-        <div>
-          <p className="eyebrow">AutoMD 软件使用手册</p>
-          <h3>从零完成一次分子动力学模拟：创建项目、导入结构、配置引擎、准备体系、运行、分析和导出报告。</h3>
-        </div>
-        <div className="guide-actions">
-          <button type="button" className="primary" onClick={() => setActiveTab("overview")}>
-            从新建项目开始
-          </button>
-          <button type="button" onClick={() => setActiveTab("engines")}>
-            去配置引擎
-          </button>
-          <button type="button" onClick={() => setActiveTab("build")}>
-            查看编译部署
-          </button>
-        </div>
-      </section>
-
       <section className="panel span-3 guide-quickstart">
         <div className="panel-title-row">
           <div>
@@ -3082,7 +3506,7 @@ function GuidePanel({
         <div className="panel-title-row">
           <div>
             <h3>引擎配置</h3>
-            <p className="muted">先把引擎登记到“引擎”页；缺少依赖时去“编译”页生成安装或编译脚本；平台不合适时走远程。</p>
+            <p className="muted">先把引擎登记到“引擎”页；缺少依赖时在对应引擎卡片里打开高级部署/编译生成安装或构建脚本；平台不合适时走远程。</p>
           </div>
           <button type="button" onClick={() => setActiveTab("engines")}>打开引擎页</button>
         </div>
@@ -3094,7 +3518,7 @@ function GuidePanel({
             <div><dt>Amber 拓扑、配体参数、cpptraj 分析</dt><dd>装 AmberTools。它既可以独立做输入生态，也能给其他引擎准备配体和分析材料。</dd></div>
             <div><dt>材料、粗粒化或非生物分子模型</dt><dd>看 LAMMPS、CP2K、HOOMD-blue、DL_POLY。复杂模型通常需要保留原生 input 文件编辑。</dd></div>
             <div><dt>实验室已经有商业/受限引擎授权</dt><dd>使用 NAMD、AMBER pmemd、CHARMM、Desmond 或 ACEMD 入口。AutoMD 只保存路径和生成运行入口，不下载这些引擎。</dd></div>
-            <div><dt>桌面电脑跑不动或平台不支持</dt><dd>不要硬装。去“远程”页配置 SSH/HPC，或在“编译”页生成 Linux/容器/集群脚本。</dd></div>
+            <div><dt>桌面电脑跑不动或平台不支持</dt><dd>不要硬装。去“远程”页配置 SSH/HPC，或在“引擎”页对应卡片的高级部署/编译中生成 Linux、容器或集群脚本。</dd></div>
           </dl>
         </div>
         <div className="guide-engine-list">
@@ -3127,7 +3551,7 @@ function GuidePanel({
             <h3>引擎安装、部署和编译</h3>
             <p className="muted">能一键安装的会装到 AutoMD 管理的无空格目录；系统服务、GPU 驱动、容器虚拟机和 HPC 调度器会给出明确安装方式。</p>
           </div>
-          <button type="button" onClick={() => setActiveTab("build")}>打开编译页</button>
+          <button type="button" onClick={() => setActiveTab("engines")}>打开引擎页</button>
         </div>
         <div className="guide-section">
           <h4>推荐操作顺序</h4>
@@ -3217,97 +3641,6 @@ function GuidePanel({
       <section className="panel span-3">
         <div className="panel-title-row">
           <div>
-            <h3>插件系统使用</h3>
-            <p className="muted">插件用于扩展能力。安装前先看来源、入口命令和 warning。</p>
-          </div>
-          <button type="button" onClick={() => setActiveTab("plugins")}>打开插件页</button>
-        </div>
-        <div className="metric-grid plugin-metrics">
-          {pluginKinds.map((kind) => (
-            <Metric
-              key={kind}
-              label={pluginKindText[kind]}
-              value={pluginRegistry?.manifests.filter((manifest) => manifest.kind === kind).length ?? 0}
-            />
-          ))}
-        </div>
-        <div className="guide-section">
-          <h4>插件类型分别会影响哪里</h4>
-          <div className="guide-plugin-list">
-            {pluginKindGuideRows.map((row) => (
-              <article className="guide-plugin-row" key={row.kind}>
-                <div>
-                  <h4>{pluginKindText[row.kind]}</h4>
-                  <div className="chip-row">
-                    <span>{row.kind}</span>
-                    <span>{pluginRegistry?.manifests.filter((manifest) => manifest.kind === row.kind).length ?? 0} 个已识别</span>
-                  </div>
-                </div>
-                <dl className="compact-dl">
-                  <div><dt>作用</dt><dd>{row.role}</dd></div>
-                  <div><dt>例子</dt><dd>{row.example}</dd></div>
-                  <div><dt>安全检查</dt><dd>{row.safety}</dd></div>
-                </dl>
-              </article>
-            ))}
-          </div>
-          <h4>当前已识别插件</h4>
-          {pluginRegistry?.manifests.length ? (
-            <div className="guide-plugin-list">
-              {pluginRegistry.manifests.map((manifest) => (
-                <article className="guide-plugin-row" key={manifest.id}>
-                  <div>
-                    <h4>{manifest.name}</h4>
-                    <div className="chip-row">
-                      <span>{pluginKindText[manifest.kind]}</span>
-                      <span>v{manifest.version}</span>
-                      <span>{manifest.engineId ?? "通用"}</span>
-                    </div>
-                  </div>
-                  <dl className="compact-dl">
-                    <div><dt>ID</dt><dd className="mono">{manifest.id}</dd></div>
-                    <div><dt>入口</dt><dd className="mono truncate">{manifest.entrypoint}</dd></div>
-                    <div><dt>来源</dt><dd className="mono truncate">{manifest.sourcePath ?? "built-in"}</dd></div>
-                    <div><dt>能力</dt><dd>{manifest.capabilities.join(", ") || "未声明"}</dd></div>
-                    <div><dt>许可</dt><dd>{manifest.licensePolicy ?? "未声明特殊许可"}</dd></div>
-                    <div><dt>警告</dt><dd>{manifest.warnings.join("; ") || "无"}</dd></div>
-                  </dl>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <EmptyState title="尚未识别到插件" text="打开插件页确认插件目录，或放入 *.automd-plugin.json manifest 后重新扫描。" />
-          )}
-          <h4>安装插件</h4>
-          <ol className="guide-steps compact">
-            <li>把插件 manifest 放到插件目录，文件名建议以 <span className="mono">.automd-plugin.json</span> 结尾。</li>
-            <li>打开插件页，确认 manifest 数量、类型和警告信息。</li>
-            <li>插件提供的引擎适配器、分析模块、调度器或报告模板会进入对应页面。</li>
-            <li>来自未知来源的插件不要直接启用执行能力。先检查命令、脚本路径和写入目录。</li>
-          </ol>
-          <h4>manifest 至少应该说明</h4>
-          <div className="chip-row">
-            <span>id</span>
-            <span>name</span>
-            <span>kind</span>
-            <span>version</span>
-            <span>entry/command</span>
-            <span>capabilities</span>
-            <span>supportedPlatforms</span>
-            <span>license</span>
-          </div>
-          <p className="muted">
-            插件目录由当前系统的应用数据目录动态生成，不会写死某个用户名或某台电脑的绝对路径。插件页会显示本机实际目录，也可以一键打开。
-          </p>
-          <p className="muted">
-            本机当前插件目录：<span className="mono">{pluginRegistry?.pluginRoot ?? "尚未加载"}</span>
-          </p>
-        </div>
-      </section>
-
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <div>
             <h3>运行、分析和报告</h3>
             <p className="muted">建议每次真实执行前都先生成运行包；每次结束后都刷新 artifact，再做分析和报告。</p>
           </div>
@@ -3333,7 +3666,7 @@ function GuidePanel({
           </div>
         </div>
         <ol className="guide-steps compact">
-          <li>引擎显示缺失：回到引擎页保存可执行文件路径，或在“编译”页生成安装脚本。</li>
+          <li>引擎显示缺失：回到引擎页保存可执行文件路径，或在对应引擎卡片的高级部署/编译中生成安装脚本。</li>
           <li>许可证缺失：只在用户已有授权环境中配置，不在软件内下载商业引擎。</li>
           <li>拓扑/力场失败：回到流程页检查非标准残基、配体参数、力场和水模型。</li>
           <li>GPU 不可用：先看底部状态栏和本机运行环境中 CUDA/ROCm 是否“需安装”或“不适用”，再检查驱动、容器 runtime、HPC 分区和引擎编译选项。</li>
@@ -3896,7 +4229,7 @@ function ProjectPanel({
     <div className="content-grid project-grid">
       <section className="engine-reminder span-3" role="note">
         <strong>请先检查引擎配置</strong>
-        <span>开始导入和运行前，建议先到“引擎”页确认 GROMACS、OpenMM 或其他目标引擎是否可用；缺失时再到“编译”页生成安装脚本。</span>
+        <span>开始导入和运行前，建议先到“引擎”页确认 GROMACS、OpenMM 或其他目标引擎是否可用；缺失时在对应引擎卡片中使用一键部署或高级部署/编译。</span>
       </section>
       <section className="panel">
         <h3>创建项目</h3>
@@ -4100,6 +4433,9 @@ function ProjectPanel({
 
 function EnginesPanel({
   engines,
+  engineTargets,
+  selectedEngineTargetId,
+  setSelectedEngineTargetId,
   selectedEngineId,
   setSelectedEngineId,
   engineInstallations,
@@ -4111,9 +4447,23 @@ function EnginesPanel({
   autoFindEngine,
   manualFindEngine,
   autoInstallEngine,
-  installableEngines
+  installableEngines,
+  containerRecipe,
+  buildRecipe,
+  recipeExportResult,
+  buildWorkflowMode,
+  setBuildWorkflowMode,
+  buildWorkflowTimeout,
+  setBuildWorkflowTimeout,
+  buildWorkflowResult,
+  engineDeployResult,
+  exportRecipes,
+  runBuildWizard
 }: {
   engines: EngineCapability[];
+  engineTargets: EngineTarget[];
+  selectedEngineTargetId: string;
+  setSelectedEngineTargetId: (targetId: string) => void;
   selectedEngineId: string;
   setSelectedEngineId: (engineId: string) => void;
   engineInstallations: EngineInstallationRecord[];
@@ -4126,23 +4476,100 @@ function EnginesPanel({
   manualFindEngine: (engine: EngineCapability) => void;
   autoInstallEngine: (engine: EngineCapability) => void;
   installableEngines: string[];
+  containerRecipe: ContainerRecipe | null;
+  buildRecipe: BuildRecipe | null;
+  recipeExportResult: RecipeExportResult | null;
+  buildWorkflowMode: BuildWorkflowMode;
+  setBuildWorkflowMode: (value: BuildWorkflowMode) => void;
+  buildWorkflowTimeout: number;
+  setBuildWorkflowTimeout: (value: number) => void;
+  buildWorkflowResult: BuildWorkflowResult | null;
+  engineDeployResult: EngineDeployResult | null;
+  exportRecipes: (engineId?: string) => void;
+  runBuildWizard: (engineId?: string) => void;
 }) {
   const selectedEngine = engines.find((engine) => engine.id === selectedEngineId) ?? engines[0];
-  const selectedRecords = engineInstallations.filter((record) => record.engineId === selectedEngineId);
+  const selectedTarget = engineTargets.find((target) => target.id === selectedEngineTargetId) ?? engineTargets[0] ?? {
+    id: "local",
+    kind: "local" as const,
+    profileId: null,
+    label: "本机",
+    detail: "本机",
+    status: "ready" as const,
+    platform: null,
+    arch: null,
+    hostname: null
+  };
+  const selectedRecords = engineInstallations.filter(
+    (record) => record.targetId === selectedTarget.id && record.engineId === selectedEngineId
+  );
+  const targetDraft = {
+    ...engineInstallationDraft,
+    targetKind: selectedTarget.kind,
+    targetId: selectedTarget.id,
+    targetLabel: selectedTarget.label,
+    platform: selectedTarget.platform ?? null,
+    arch: selectedTarget.arch ?? null
+  };
+  const helperBlocked = selectedTarget.kind === "remote" && selectedTarget.status !== "ready" && selectedTarget.status !== "outdated";
   return (
     <div className="content-grid">
       <section className="panel span-3">
         <div className="panel-title-row">
-          <h3>引擎能力矩阵</h3>
+          <div>
+            <h3>目标设备</h3>
+            <p className="muted">先选择本机或远程 profile，再对该设备扫描、部署、编译和登记引擎。</p>
+          </div>
           <button type="button" onClick={() => generateRecipes(selectedEngineId)}>
-            生成当前引擎 recipe
+            预览当前引擎 recipe
           </button>
+        </div>
+        <div className="engine-target-switcher">
+          {engineTargets.map((target) => (
+            <button
+              type="button"
+              key={target.id}
+              className={`engine-target-card ${target.id === selectedTarget.id ? "selected" : ""}`}
+              onClick={() => {
+                setSelectedEngineTargetId(target.id);
+                setEngineInstallationDraft({
+                  ...targetDraft,
+                  targetKind: target.kind,
+                  targetId: target.id,
+                  targetLabel: target.label,
+                  platform: target.platform ?? null,
+                  arch: target.arch ?? null
+                });
+              }}
+            >
+              <span className={`status-dot ${target.status === "ready" ? "ready" : "warn"}`} />
+              <strong>{target.label}</strong>
+              <small>{target.detail}</small>
+            </button>
+          ))}
+        </div>
+        {helperBlocked ? (
+          <div className="warning-inline">
+            该远程设备的 AutoMD helper 未就绪。请先到“远程”页安装/检测 helper，然后再扫描或部署引擎。
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>引擎部署</h3>
+            <p className="muted">当前目标：{selectedTarget.label}。一键部署会自动选择包管理安装、源码构建或 recipe-only。</p>
+          </div>
         </div>
         <div className="engine-grid">
           {engines.map((engine) => {
-            const needsAction = engine.detection.status !== "ready";
             const platformBlocked = isEnginePlatformBlocked(engine);
             const platformBlockedTitle = platformBlocked ? enginePlatformMessage(engine) : undefined;
+            const blocked = platformBlocked || helperBlocked;
+            const deployLabel = installableEngines.includes(engine.id)
+              ? "一键部署"
+              : "高级部署/编译";
             return (
             <article
               key={engine.id}
@@ -4168,42 +4595,88 @@ function EnginesPanel({
                 <div><dt>平台</dt><dd>{engine.platformSupport.native.join(", ")}</dd></div>
                 <div><dt>路径</dt><dd className="mono">{engine.detection.path ?? "未配置"}</dd></div>
               </dl>
-              {needsAction ? (
-                <div className="engine-card-actions" onClick={(event) => event.stopPropagation()}>
+              <div className="engine-card-actions" onClick={(event) => event.stopPropagation()}>
                   <button
                     type="button"
-                    aria-disabled={platformBlocked}
                     title={platformBlockedTitle}
                     onClick={() => autoFindEngine(engine)}
                   >
-                    自动查找
+                    自动扫描
                   </button>
                   <button
                     type="button"
-                    aria-disabled={platformBlocked}
                     title={platformBlockedTitle}
                     onClick={() => manualFindEngine(engine)}
                   >
-                    手动查找
+                    手动登记
                   </button>
                   <button
                     type="button"
-                    className={platformBlocked ? "" : "primary"}
-                    aria-disabled={platformBlocked}
+                    className={blocked ? "" : "primary"}
                     title={platformBlockedTitle}
                     onClick={() => autoInstallEngine(engine)}
                   >
-                    {installableEngines.includes(engine.id) ? "一键安装" : "生成编译脚本"}
+                    {deployLabel}
                   </button>
                 </div>
-              ) : null}
+              <details className="engine-advanced" onClick={(event) => event.stopPropagation()}>
+                <summary>高级部署/编译</summary>
+                <div className="engine-advanced-grid">
+                  <div className="button-row">
+                    <button type="button" onClick={() => generateRecipes(engine.id)}>预览 recipe</button>
+                    <button type="button" onClick={() => exportRecipes(engine.id)}>导出到项目</button>
+                  </div>
+                  <label>
+                    构建模式
+                    <select value={buildWorkflowMode} onChange={(event) => setBuildWorkflowMode(event.target.value as BuildWorkflowMode)}>
+                      <option value="dryRun">Dry run：只预览命令</option>
+                      <option value="writeFiles">只写脚本：写入 build-recipes/</option>
+                      <option value="execute">执行：运行构建脚本</option>
+                    </select>
+                  </label>
+                  <label>
+                    超时 (秒)
+                    <input
+                      type="number"
+                      min={1}
+                      max={86400}
+                      value={buildWorkflowTimeout}
+                      onChange={(event) => setBuildWorkflowTimeout(Number(event.target.value))}
+                    />
+                  </label>
+                  <button type="button" className={blocked ? "fill" : "primary fill"} onClick={() => runBuildWizard(engine.id)}>
+                    运行高级部署
+                  </button>
+                  {selectedEngineId === engine.id && recipeExportResult ? (
+                    <div className="success-inline">已导出到 <span className="mono">{recipeExportResult.directory}</span></div>
+                  ) : null}
+                  {selectedEngineId === engine.id && engineDeployResult ? (
+                    <div className="build-runner-result compact">
+                      <dl className="definition-list">
+                        <div><dt>策略</dt><dd>{engineDeployResult.strategy}</dd></div>
+                        <div><dt>状态</dt><dd>{engineDeployResult.status}</dd></div>
+                        <div><dt>登记</dt><dd>{engineDeployResult.record?.location ?? "未登记"}</dd></div>
+                      </dl>
+                      {engineDeployResult.warnings.length ? (
+                        <div className="warning-stack">
+                          {engineDeployResult.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              </details>
             </article>
           );})}
         </div>
       </section>
       <section className="panel">
-        <h3>手动安装 / 授权记录</h3>
+        <h3>手动登记 / 授权记录</h3>
         <div className="engine-install-form">
+          <label>
+            目标设备
+            <input value={selectedTarget.label} readOnly />
+          </label>
           <label>
             引擎
             <select
@@ -4256,7 +4729,7 @@ function EnginesPanel({
             </select>
           </label>
         </div>
-        <button type="button" className="primary fill" onClick={() => saveEngineInstallation(engineInstallationDraft)}>
+        <button type="button" className="primary fill" onClick={() => saveEngineInstallation(targetDraft)}>
           保存安装记录
         </button>
         <p className="hint-text">
@@ -4264,14 +4737,14 @@ function EnginesPanel({
         </p>
       </section>
       <section className="panel span-2">
-        <h3>{selectedEngine?.name ?? selectedEngineId} 保存记录</h3>
+        <h3>{selectedTarget.label} · {selectedEngine?.name ?? selectedEngineId} 保存记录</h3>
         {selectedRecords.length ? (
           <div className="engine-install-list">
             {selectedRecords.map((record) => (
-              <div className="engine-install-row" key={`${record.engineId}-${record.location}`}>
+              <div className="engine-install-row" key={`${record.targetId}-${record.engineId}-${record.location}`}>
                 <div>
                   <strong className="mono">{record.location}</strong>
-                  <small>{record.version ?? "version unknown"} · {new Date(record.checkedAt).toLocaleString()}</small>
+                  <small>{record.targetLabel} · {record.version ?? "version unknown"} · {new Date(record.checkedAt).toLocaleString()}</small>
                 </div>
                 <StatusPill status={record.authorizationStatus} />
                 <button type="button" onClick={() => deleteEngineInstallation(record)}>删除</button>
@@ -4281,6 +4754,53 @@ function EnginesPanel({
         ) : (
           <EmptyState title="暂无保存记录" text="保存路径后，AutoMD 会在下一次能力检测中优先显示用户配置。" />
         )}
+      </section>
+      <section className="panel span-3">
+        <h3>{containerRecipe?.title ?? "当前 recipe 预览"}</h3>
+        <CodeBlock value={containerRecipe?.files[0]?.contents ?? "在任意引擎卡片的高级部署/编译中点击“预览 recipe”。"} />
+      </section>
+      <section className="panel span-3">
+        <h3>{buildRecipe?.title ?? "源码编译脚本"}</h3>
+        {buildRecipe ? (
+          <div className="split">
+            <div>
+              <h4>步骤</h4>
+              <ol>
+                {buildRecipe.steps.map((step) => <li key={step}>{step}</li>)}
+              </ol>
+              <h4>风险</h4>
+              <ul>
+                {buildRecipe.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+              </ul>
+            </div>
+            <CodeBlock value={buildRecipe.script} />
+          </div>
+        ) : (
+          <EmptyState title="尚未生成脚本" text="高级部署区可生成源码编译脚本、容器 recipe 和构建日志。" />
+        )}
+        {buildWorkflowResult ? (
+          <div className="build-runner-result">
+            <dl className="definition-list">
+              <div><dt>模式</dt><dd>{buildWorkflowModeText[buildWorkflowResult.mode]}</dd></div>
+              <div><dt>状态</dt><dd>{buildWorkflowResult.status}</dd></div>
+              <div><dt>退出码</dt><dd>{buildWorkflowResult.exitCode ?? "n/a"}</dd></div>
+              <div><dt>日志</dt><dd className="mono">{buildWorkflowResult.logPath ?? "未生成"}</dd></div>
+            </dl>
+            <FailureAnalysisCard analysis={buildWorkflowResult.failureAnalysis ?? null} />
+            <details>
+              <summary>构建命令</summary>
+              <CodeBlock value={buildWorkflowResult.command} />
+            </details>
+            <details open={Boolean(buildWorkflowResult.stdout)}>
+              <summary>stdout</summary>
+              <CodeBlock value={buildWorkflowResult.stdout || "(empty)"} />
+            </details>
+            <details open={Boolean(buildWorkflowResult.stderr)}>
+              <summary>stderr</summary>
+              <CodeBlock value={buildWorkflowResult.stderr || "(empty)"} />
+            </details>
+          </div>
+        ) : null}
       </section>
     </div>
   );
@@ -5200,7 +5720,10 @@ function RemotePanel({
   autoFindTool,
   manualFindTool,
   autoInstallTool,
-  installableTools
+  installableTools,
+  engineTargets,
+  installRemoteHelper,
+  checkRemoteHelper
 }: {
   diagnostics: RuntimeDiagnostics | null;
   plan: SimulationPlan | null;
@@ -5234,9 +5757,15 @@ function RemotePanel({
   manualFindTool: (tool: ToolDiagnostic) => void;
   autoInstallTool: (tool: ToolDiagnostic) => void;
   installableTools: string[];
+  engineTargets: EngineTarget[];
+  installRemoteHelper: (profileId: string) => void;
+  checkRemoteHelper: (profileId: string) => void;
 }) {
   const selectedProfile = remoteProfiles.find((profile) => profile.id === selectedRemoteProfileId) ?? remoteProfiles[0];
   const selectedIsTemplate = selectedProfile?.id.endsWith("-template") ?? true;
+  const selectedEngineTarget = selectedProfile
+    ? engineTargets.find((target) => target.id === `remote:${selectedProfile.id}`)
+    : null;
   return (
     <div className="content-grid">
       <section className="panel">
@@ -5245,7 +5774,7 @@ function RemotePanel({
           <div><dt>OS</dt><dd>{diagnostics?.os ?? "unknown"}</dd></div>
           <div><dt>Arch</dt><dd>{diagnostics?.arch ?? "unknown"}</dd></div>
         </dl>
-        <div className="tool-list">
+        <div className="tool-list local-runtime-tools">
           {diagnostics?.tools.map((tool) => {
             const showActions = tool.status === "missingInstall" || tool.status === "missingLicense";
             const canInstall = installableTools.includes(tool.id);
@@ -5356,6 +5885,33 @@ function RemotePanel({
           <p className="mono">workdir={remotePackage?.remoteWorkdir ?? selectedProfile?.workdir ?? "未生成"}</p>
           <p className="mono">sync=rsync --partial --append-verify</p>
         </div>
+      </section>
+      <section className="panel">
+        <h3>AutoMD 远程助手</h3>
+        {selectedProfile ? (
+          <>
+            <dl className="definition-list">
+              <div><dt>目标</dt><dd>{selectedProfile.name}</dd></div>
+              <div><dt>主机</dt><dd className="mono">{selectedProfile.host}</dd></div>
+              <div><dt>状态</dt><dd>{remoteHelperStateText[selectedEngineTarget?.status ?? "missing"]}</dd></div>
+              <div><dt>平台</dt><dd>{selectedEngineTarget?.platform ?? "未检测"}</dd></div>
+              <div><dt>架构</dt><dd>{selectedEngineTarget?.arch ?? "未检测"}</dd></div>
+            </dl>
+            <div className="button-row">
+              <button type="button" onClick={() => checkRemoteHelper(selectedProfile.id)}>
+                检测 SSH/helper
+              </button>
+              <button type="button" className="primary" onClick={() => installRemoteHelper(selectedProfile.id)}>
+                安装/更新 helper
+              </button>
+            </div>
+            <p className="hint-text">
+              helper 安装到远程 workdir 下的 .automd/helper，用于扫描远程引擎、检测硬件、执行包管理安装和源码构建。
+            </p>
+          </>
+        ) : (
+          <EmptyState title="未选择 profile" text="先选择或保存一个远程 profile，再安装 helper。" />
+        )}
       </section>
       <section className="panel span-3">
         <div className="panel-title-row">
@@ -5630,178 +6186,56 @@ function RemotePanel({
   );
 }
 
-function BuildPanel({
-  engines,
-  selectedEngineId,
-  containerRecipe,
-  buildRecipe,
-  recipeExportResult,
-  buildWorkflowMode,
-  setBuildWorkflowMode,
-  buildWorkflowTimeout,
-  setBuildWorkflowTimeout,
-  buildWorkflowResult,
-  generateRecipes,
-  exportRecipes,
-  runBuildWizard
-}: {
-  engines: EngineCapability[];
-  selectedEngineId: string;
-  containerRecipe: ContainerRecipe | null;
-  buildRecipe: BuildRecipe | null;
-  recipeExportResult: RecipeExportResult | null;
-  buildWorkflowMode: BuildWorkflowMode;
-  setBuildWorkflowMode: (value: BuildWorkflowMode) => void;
-  buildWorkflowTimeout: number;
-  setBuildWorkflowTimeout: (value: number) => void;
-  buildWorkflowResult: BuildWorkflowResult | null;
-  generateRecipes: (engineId?: string) => void;
-  exportRecipes: (engineId?: string) => void;
-  runBuildWizard: (engineId?: string) => void;
-}) {
-  return (
-    <div className="content-grid">
-      <section className="panel">
-        <h3>构建目标</h3>
-        <div className="recipe-buttons">
-          {engines.map((engine) => (
-            <button
-              type="button"
-              key={engine.id}
-              className={engine.id === selectedEngineId ? "selected-lite" : ""}
-              onClick={() => generateRecipes(engine.id)}
-            >
-              {engine.name}
-            </button>
-          ))}
-        </div>
-        <div className="button-row">
-          <button type="button" onClick={() => generateRecipes(selectedEngineId)}>
-            预览 recipe
-          </button>
-          <button type="button" onClick={() => exportRecipes(selectedEngineId)}>
-            导出到项目
-          </button>
-        </div>
-        <div className="build-runner-controls">
-          <label>
-            构建模式
-            <select value={buildWorkflowMode} onChange={(event) => setBuildWorkflowMode(event.target.value as BuildWorkflowMode)}>
-              <option value="dryRun">Dry run：只预览构建命令</option>
-              <option value="writeFiles">只写脚本：写入 build-recipes/</option>
-              <option value="execute">执行：运行本地构建脚本</option>
-            </select>
-          </label>
-          <label>
-            超时 (秒)
-            <input
-              type="number"
-              min={1}
-              max={86400}
-              value={buildWorkflowTimeout}
-              onChange={(event) => setBuildWorkflowTimeout(Number(event.target.value))}
-            />
-          </label>
-          <button type="button" className="primary fill" onClick={() => runBuildWizard(selectedEngineId)}>
-            运行构建向导
-          </button>
-        </div>
-        {recipeExportResult ? (
-          <div className="success-inline">
-            已导出到 <span className="mono">{recipeExportResult.directory}</span>
-          </div>
-        ) : null}
-      </section>
-      {recipeExportResult ? (
-        <section className="panel">
-          <h3>导出文件</h3>
-          <div className="file-list">
-            {recipeExportResult.files.map((file) => (
-              <span className="mono" key={file.path}>
-                {file.path}
-              </span>
-            ))}
-          </div>
-          {recipeExportResult.warnings.length ? (
-            <ul>
-              {recipeExportResult.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
-              ))}
-            </ul>
-          ) : null}
-        </section>
-      ) : null}
-      {buildWorkflowResult ? (
-        <section className="panel span-3">
-          <h3>构建向导结果</h3>
-          <div className="build-runner-result">
-            <dl className="definition-list">
-              <div><dt>引擎</dt><dd>{buildWorkflowResult.engineId}</dd></div>
-              <div><dt>模式</dt><dd>{buildWorkflowModeText[buildWorkflowResult.mode]}</dd></div>
-              <div><dt>状态</dt><dd>{buildWorkflowResult.status}</dd></div>
-              <div><dt>退出码</dt><dd>{buildWorkflowResult.exitCode ?? "n/a"}</dd></div>
-              <div><dt>日志</dt><dd className="mono">{buildWorkflowResult.logPath ?? "未生成"}</dd></div>
-              <div><dt>耗时</dt><dd>{buildWorkflowResult.durationMs ?? 0} ms</dd></div>
-            </dl>
-            {buildWorkflowResult.warnings.length ? (
-              <div className="warning-stack">
-                {buildWorkflowResult.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-              </div>
-            ) : null}
-            <FailureAnalysisCard analysis={buildWorkflowResult.failureAnalysis ?? null} />
-            <details>
-              <summary>构建命令</summary>
-              <CodeBlock value={buildWorkflowResult.command} />
-            </details>
-            <details open={Boolean(buildWorkflowResult.stdout)}>
-              <summary>stdout</summary>
-              <CodeBlock value={buildWorkflowResult.stdout || "(empty)"} />
-            </details>
-            <details open={Boolean(buildWorkflowResult.stderr)}>
-              <summary>stderr</summary>
-              <CodeBlock value={buildWorkflowResult.stderr || "(empty)"} />
-            </details>
-          </div>
-        </section>
-      ) : null}
-      <section className="panel span-2">
-        <h3>{containerRecipe?.title ?? "容器 recipe"}</h3>
-        <CodeBlock value={containerRecipe?.files[0]?.contents ?? "选择引擎后生成 Containerfile。"} />
-      </section>
-      <section className="panel span-3">
-        <h3>{buildRecipe?.title ?? "源码编译脚本"}</h3>
-        {buildRecipe ? (
-          <div className="split">
-            <div>
-              <h4>步骤</h4>
-              <ol>
-                {buildRecipe.steps.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </ol>
-              <h4>风险</h4>
-              <ul>
-                {buildRecipe.warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            </div>
-            <CodeBlock value={buildRecipe.script} />
-          </div>
-        ) : (
-          <EmptyState title="尚未生成脚本" text="开源引擎生成安装/编译 recipe；受限引擎仅生成本地授权环境接入清单。" />
-        )}
-      </section>
-    </div>
-  );
-}
-
 function PluginsPanel({
   pluginRegistry,
-  openPluginFolder
+  selectedPluginId,
+  setSelectedPluginId,
+  setActiveTab,
+  pluginImportPath,
+  setPluginImportPath,
+  pluginImportOverwrite,
+  setPluginImportOverwrite,
+  pluginTemplateDraft,
+  setPluginTemplateDraft,
+  pluginConfigDrafts,
+  setPluginConfigDrafts,
+  pluginRunResult,
+  pluginBusy,
+  openPluginFolder,
+  refreshPluginRegistry,
+  browsePluginManifest,
+  importPlugin,
+  createPluginTemplate,
+  setUserPluginEnabled,
+  deleteUserPlugin,
+  savePluginConfig,
+  runPluginAction,
+  openPluginInstallFolder
 }: {
   pluginRegistry: PluginRegistrySnapshot | null;
+  selectedPluginId: string | null;
+  setSelectedPluginId: (id: string | null) => void;
+  setActiveTab: (tab: TabId) => void;
+  pluginImportPath: string;
+  setPluginImportPath: (value: string) => void;
+  pluginImportOverwrite: boolean;
+  setPluginImportOverwrite: (value: boolean) => void;
+  pluginTemplateDraft: PluginTemplateRequest;
+  setPluginTemplateDraft: (value: PluginTemplateRequest) => void;
+  pluginConfigDrafts: Record<string, string>;
+  setPluginConfigDrafts: (value: Record<string, string>) => void;
+  pluginRunResult: PluginRunResult | null;
+  pluginBusy: boolean;
   openPluginFolder: () => void;
+  refreshPluginRegistry: () => void;
+  browsePluginManifest: () => void;
+  importPlugin: () => void;
+  createPluginTemplate: () => void;
+  setUserPluginEnabled: (pluginId: string, enabled: boolean) => void;
+  deleteUserPlugin: (pluginId: string) => void;
+  savePluginConfig: (manifest: PluginManifest) => void;
+  runPluginAction: (manifest: PluginManifest, action: PluginAction, mode: PluginRunMode) => void;
+  openPluginInstallFolder: (pluginId: string) => void;
 }) {
   if (!pluginRegistry) {
     return (
@@ -5817,23 +6251,25 @@ function PluginsPanel({
     );
   }
 
-  const kindCounts = pluginRegistry.manifests.reduce<Record<string, number>>((counts, manifest) => {
-    counts[manifest.kind] = (counts[manifest.kind] ?? 0) + 1;
-    return counts;
-  }, {});
+  const userPlugins = pluginRegistry.manifests.filter((manifest) => manifest.origin === "user");
+  const builtinPlugins = pluginRegistry.manifests.filter((manifest) => manifest.origin === "builtIn");
+  const selectedManifest = pluginRegistry.manifests.find((manifest) => manifest.id === selectedPluginId) ?? userPlugins[0] ?? null;
 
   return (
     <div className="content-grid">
       <section className="panel">
         <div className="panel-title-row">
           <h3>插件目录</h3>
-          <button type="button" onClick={openPluginFolder}>
-            打开插件目录
-          </button>
+          <div className="button-row">
+            <button type="button" onClick={refreshPluginRegistry}>刷新扫描</button>
+            <button type="button" onClick={openPluginFolder}>打开插件目录</button>
+          </div>
         </div>
         <dl className="definition-list">
           <div><dt>路径</dt><dd className="mono">{pluginRegistry.pluginRoot}</dd></div>
           <div><dt>manifest</dt><dd>{pluginRegistry.manifests.length}</dd></div>
+          <div><dt>用户插件</dt><dd>{userPlugins.length}</dd></div>
+          <div><dt>启用</dt><dd>{userPlugins.filter((plugin) => plugin.enabled).length}</dd></div>
           <div><dt>外部警告</dt><dd>{pluginRegistry.warnings.length}</dd></div>
         </dl>
         {pluginRegistry.warnings.length ? (
@@ -5842,47 +6278,365 @@ function PluginsPanel({
           </div>
         ) : null}
       </section>
+
       <section className="panel span-2">
-        <h3>扩展能力</h3>
-        <div className="metric-grid plugin-metrics">
-          {(Object.keys(pluginKindText) as PluginKind[]).map((kind) => (
-            <Metric key={kind} label={pluginKindText[kind]} value={kindCounts[kind] ?? 0} />
-          ))}
+        <div className="panel-title-row">
+          <div>
+            <h3>导入 / 新建插件</h3>
+            <p className="muted">导入已有插件目录或 manifest；也可以用高级模板快速创建一个用户插件并接入软件。</p>
+          </div>
+        </div>
+        <div className="plugin-builder-grid">
+          <div className="plugin-import-box">
+            <h4>导入插件</h4>
+            <label>
+              插件目录或 manifest
+              <div className="input-with-button">
+                <input value={pluginImportPath} onChange={(event) => setPluginImportPath(event.target.value)} placeholder="/path/to/plugin 或 *.automd-plugin.json" />
+                <button type="button" onClick={browsePluginManifest}>浏览</button>
+              </div>
+            </label>
+            <label className="check-row">
+              <input type="checkbox" checked={pluginImportOverwrite} onChange={(event) => setPluginImportOverwrite(event.target.checked)} />
+              <span>允许覆盖同 ID 的用户插件（不会覆盖 built-in）</span>
+            </label>
+            <button type="button" className="primary" onClick={importPlugin} disabled={pluginBusy}>导入插件</button>
+          </div>
+          <details className="plugin-import-box" open>
+            <summary>高级：快速创建插件</summary>
+            <div className="form-grid two plugin-template-grid">
+              <label>
+                插件名称
+                <input value={pluginTemplateDraft.name} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, name: event.target.value })} />
+              </label>
+              <label>
+                插件 ID
+                <input value={pluginTemplateDraft.id} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, id: event.target.value })} />
+              </label>
+              <label>
+                类型
+                <select value={pluginTemplateDraft.kind} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, kind: event.target.value as PluginKind })}>
+                  {(Object.keys(pluginKindText) as PluginKind[]).map((kind) => <option key={kind} value={kind}>{pluginKindText[kind]}</option>)}
+                </select>
+              </label>
+              <label>
+                入口语言
+                <select value={pluginTemplateDraft.language} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, language: event.target.value })}>
+                  <option value="python">Python</option>
+                  <option value="javascript">JavaScript / Node</option>
+                  <option value="bash">Bash</option>
+                </select>
+              </label>
+              <label>
+                联动目标
+                <input value={pluginTemplateDraft.target ?? ""} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, target: event.target.value })} placeholder="workflow / engines / report" />
+              </label>
+              <label>
+                描述
+                <input value={pluginTemplateDraft.description ?? ""} onChange={(event) => setPluginTemplateDraft({ ...pluginTemplateDraft, description: event.target.value })} />
+              </label>
+            </div>
+            <button type="button" className="primary" onClick={createPluginTemplate} disabled={pluginBusy}>快速创建并启用</button>
+          </details>
         </div>
       </section>
+
       <section className="panel span-3">
-        <h3>Manifest Registry</h3>
+        <h3>插件列表</h3>
+        <h4>用户插件</h4>
+        {userPlugins.length ? (
+          <div className="engine-grid plugin-grid">
+            {userPlugins.map((manifest) => (
+              <PluginCard
+                key={manifest.id}
+                manifest={manifest}
+                selected={selectedManifest?.id === manifest.id}
+                pluginBusy={pluginBusy}
+                onSelect={() => setSelectedPluginId(manifest.id)}
+                onOpenDetail={() => {
+                  setSelectedPluginId(manifest.id);
+                  setActiveTab("pluginDetail");
+                }}
+                onToggle={() => setUserPluginEnabled(manifest.id, !manifest.enabled)}
+                onDelete={() => {
+                  if (window.confirm(`确定删除用户插件「${manifest.name}」吗？此操作会移除插件目录和配置。`)) {
+                    deleteUserPlugin(manifest.id);
+                  }
+                }}
+                onOpenFolder={() => openPluginInstallFolder(manifest.id)}
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState title="暂无用户插件" text="可以导入插件目录，或用高级模板快速创建一个插件。" />
+        )}
+        <h4>内置插件</h4>
         <div className="engine-grid plugin-grid">
-          {pluginRegistry.manifests.map((manifest) => (
-            <article className="engine-card plugin-card" key={manifest.id}>
-              <div className="engine-card-head">
-                <strong>{manifest.name}</strong>
-                <span className="status-pill ready">{pluginKindText[manifest.kind]}</span>
-              </div>
-              <dl className="compact-dl">
-                <div><dt>ID</dt><dd className="mono">{manifest.id}</dd></div>
-                <div><dt>版本</dt><dd>{manifest.version}</dd></div>
-                <div><dt>入口</dt><dd className="mono truncate">{manifest.entrypoint}</dd></div>
-                <div><dt>引擎</dt><dd>{manifest.engineId ?? "n/a"}</dd></div>
-                <div><dt>来源</dt><dd className="mono truncate">{manifest.sourcePath ?? "built-in"}</dd></div>
-              </dl>
-              {manifest.licensePolicy ? (
-                <p>License: {manifest.licensePolicy}</p>
-              ) : null}
-              <div className="chip-row">
-                {manifest.capabilities.map((capability) => (
-                  <span key={capability}>{capability}</span>
-                ))}
-              </div>
-              {manifest.warnings.length ? (
-                <div className="warning-stack compact-warning">
-                  {manifest.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-                </div>
-              ) : null}
-            </article>
+          {builtinPlugins.map((manifest) => (
+            <PluginCard
+              key={manifest.id}
+              manifest={manifest}
+              selected={selectedManifest?.id === manifest.id}
+              pluginBusy={pluginBusy}
+              onSelect={() => setSelectedPluginId(manifest.id)}
+              onOpenDetail={() => setSelectedPluginId(manifest.id)}
+              onToggle={() => undefined}
+              onDelete={() => undefined}
+              onOpenFolder={() => undefined}
+            />
           ))}
         </div>
       </section>
+
+      <section className="panel span-3">
+        <PluginDetail
+          manifest={selectedManifest}
+          pluginConfigDrafts={pluginConfigDrafts}
+          setPluginConfigDrafts={setPluginConfigDrafts}
+          pluginRunResult={pluginRunResult}
+          pluginBusy={pluginBusy}
+          setUserPluginEnabled={setUserPluginEnabled}
+          deleteUserPlugin={deleteUserPlugin}
+          savePluginConfig={savePluginConfig}
+          runPluginAction={runPluginAction}
+          openPluginInstallFolder={openPluginInstallFolder}
+        />
+      </section>
+
+      <section className="panel span-3">
+        <details className="plugin-guide" open>
+          <summary>插件构建与接入指引</summary>
+          <div className="guide-section">
+            <p className="muted">插件目录由当前系统的应用数据目录动态生成，不会写死某个用户名或某台电脑的绝对路径。插件页会显示本机实际目录，也可以一键打开。</p>
+            <div className="guide-table">
+              <div className="guide-table-head"><span>字段</span><span>用途</span><span>注意</span></div>
+              <div><strong>id / name / kind / version</strong></div><div>标识插件、显示名称、类型和版本。</div><div>ID 只能使用小写 ASCII、数字、短横线或下划线。</div>
+              <div><strong>entrypoint</strong></div><div>插件入口脚本，相对插件目录。</div><div>沙盒模式禁止绝对路径和 .. 跳出目录。</div>
+              <div><strong>actions</strong></div><div>声明可运行动作、命令和参数。</div><div>不写 action 时会生成默认动作。</div>
+              <div><strong>integrationTargets</strong></div><div>声明联动页面，例如 workflow、engines、remote、build、report。</div><div>v1 只做声明式入口和统一详情页。</div>
+              <div><strong>configSchema / defaultConfig</strong></div><div>说明配置结构和默认值。</div><div>当前用 JSON 编辑，保存到 SQLite。</div>
+              <div><strong>permissions</strong></div><div>声明读取项目、写 sandbox、直接运行等权限。</div><div>直接运行必须二次确认。</div>
+            </div>
+            <p className="muted">沙盒运行会通过 JSON stdin 接收当前项目、当前结构、SimulationPlan 和允许输出目录；stdout 可返回 JSON：<span className="mono">{"{ artifacts: [], warnings: [], logs: [] }"}</span>。</p>
+          </div>
+        </details>
+      </section>
+    </div>
+  );
+}
+
+function PluginCard({
+  manifest,
+  selected,
+  pluginBusy,
+  onSelect,
+  onOpenDetail,
+  onToggle,
+  onDelete,
+  onOpenFolder
+}: {
+  manifest: PluginManifest;
+  selected: boolean;
+  pluginBusy: boolean;
+  onSelect: () => void;
+  onOpenDetail: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+  onOpenFolder: () => void;
+}) {
+  const isBuiltIn = manifest.origin === "builtIn";
+  return (
+    <article className={`engine-card plugin-card ${selected ? "selected" : ""}`} onClick={onSelect}>
+      <div className="engine-card-head">
+        <strong>{manifest.name}</strong>
+        <span className={`status-pill ${manifest.enabled ? "ready" : "missingInstall"}`}>{isBuiltIn ? "built-in" : manifest.enabled ? "已启用" : "已停用"}</span>
+      </div>
+      <dl className="compact-dl">
+        <div><dt>ID</dt><dd className="mono">{manifest.id}</dd></div>
+        <div><dt>类型</dt><dd>{pluginKindText[manifest.kind]}</dd></div>
+        <div><dt>入口</dt><dd className="mono truncate">{manifest.entrypoint}</dd></div>
+        <div><dt>联动</dt><dd>{manifest.integrationTargets.join(", ") || "通用详情"}</dd></div>
+        <div><dt>来源</dt><dd className="mono truncate">{manifest.installPath ?? manifest.sourcePath ?? "built-in"}</dd></div>
+      </dl>
+      <div className="chip-row">
+        {manifest.capabilities.slice(0, 6).map((capability) => <span key={capability}>{capability}</span>)}
+        {manifest.validationStatus !== "valid" ? <span>{manifest.validationStatus}</span> : null}
+      </div>
+      {manifest.warnings.length ? (
+        <div className="warning-stack compact-warning">
+          {manifest.warnings.slice(0, 2).map((warning) => <p key={warning}>{warning}</p>)}
+        </div>
+      ) : null}
+      <div className="plugin-card-actions" onClick={(event) => event.stopPropagation()}>
+        <button type="button" onClick={onOpenDetail}>详情</button>
+        {!isBuiltIn ? <button type="button" onClick={onOpenFolder}>打开目录</button> : null}
+        {!isBuiltIn ? <button type="button" onClick={onToggle} disabled={pluginBusy}>{manifest.enabled ? "停用" : "启用"}</button> : null}
+        {!isBuiltIn ? <button type="button" className="danger-lite" onClick={onDelete} disabled={pluginBusy}>删除</button> : <button type="button" disabled>内置只读</button>}
+      </div>
+    </article>
+  );
+}
+
+function PluginDetailPage({
+  manifest,
+  pluginConfigDrafts,
+  setPluginConfigDrafts,
+  pluginRunResult,
+  pluginBusy,
+  setActiveTab,
+  setUserPluginEnabled,
+  deleteUserPlugin,
+  savePluginConfig,
+  runPluginAction,
+  openPluginInstallFolder
+}: {
+  manifest: PluginManifest | null;
+  pluginConfigDrafts: Record<string, string>;
+  setPluginConfigDrafts: (value: Record<string, string>) => void;
+  pluginRunResult: PluginRunResult | null;
+  pluginBusy: boolean;
+  setActiveTab: (tab: TabId) => void;
+  setUserPluginEnabled: (pluginId: string, enabled: boolean) => void;
+  deleteUserPlugin: (pluginId: string) => void;
+  savePluginConfig: (manifest: PluginManifest) => void;
+  runPluginAction: (manifest: PluginManifest, action: PluginAction, mode: PluginRunMode) => void;
+  openPluginInstallFolder: (pluginId: string) => void;
+}) {
+  return (
+    <div className="content-grid">
+      <section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>{manifest?.name ?? "插件详情"}</h3>
+            <p className="muted">统一插件详情页：配置、能力、联动位置和安全运行都在这里完成。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("plugins")}>返回插件页</button>
+        </div>
+        <PluginDetail
+          manifest={manifest}
+          pluginConfigDrafts={pluginConfigDrafts}
+          setPluginConfigDrafts={setPluginConfigDrafts}
+          pluginRunResult={pluginRunResult}
+          pluginBusy={pluginBusy}
+          setUserPluginEnabled={setUserPluginEnabled}
+          deleteUserPlugin={deleteUserPlugin}
+          savePluginConfig={savePluginConfig}
+          runPluginAction={runPluginAction}
+          openPluginInstallFolder={openPluginInstallFolder}
+        />
+      </section>
+    </div>
+  );
+}
+
+function PluginDetail({
+  manifest,
+  pluginConfigDrafts,
+  setPluginConfigDrafts,
+  pluginRunResult,
+  pluginBusy,
+  setUserPluginEnabled,
+  deleteUserPlugin,
+  savePluginConfig,
+  runPluginAction,
+  openPluginInstallFolder
+}: {
+  manifest: PluginManifest | null;
+  pluginConfigDrafts: Record<string, string>;
+  setPluginConfigDrafts: (value: Record<string, string>) => void;
+  pluginRunResult: PluginRunResult | null;
+  pluginBusy: boolean;
+  setUserPluginEnabled: (pluginId: string, enabled: boolean) => void;
+  deleteUserPlugin: (pluginId: string) => void;
+  savePluginConfig: (manifest: PluginManifest) => void;
+  runPluginAction: (manifest: PluginManifest, action: PluginAction, mode: PluginRunMode) => void;
+  openPluginInstallFolder: (pluginId: string) => void;
+}) {
+  if (!manifest) {
+    return <EmptyState title="未选择插件" text="从插件列表或左侧用户插件入口选择一个插件。" />;
+  }
+  const isBuiltIn = manifest.origin === "builtIn";
+  const configText = pluginConfigDrafts[manifest.id] ?? JSON.stringify(manifest.config ?? manifest.defaultConfig ?? {}, null, 2);
+  return (
+    <div className="plugin-detail">
+      <div className="plugin-detail-grid">
+        <dl className="definition-list">
+          <div><dt>ID</dt><dd className="mono">{manifest.id}</dd></div>
+          <div><dt>类型</dt><dd>{pluginKindText[manifest.kind]}</dd></div>
+          <div><dt>来源</dt><dd>{isBuiltIn ? "built-in" : "user"}</dd></div>
+          <div><dt>状态</dt><dd>{manifest.enabled ? "已启用" : "已停用"}</dd></div>
+          <div><dt>入口</dt><dd className="mono">{manifest.entrypoint}</dd></div>
+          <div><dt>安装目录</dt><dd className="mono">{manifest.installPath ?? manifest.sourcePath ?? "内置能力"}</dd></div>
+          <div><dt>联动页面</dt><dd>{manifest.integrationTargets.join(", ") || "通用详情页"}</dd></div>
+          <div><dt>平台</dt><dd>{manifest.supportedPlatforms.join(", ") || "未声明"}</dd></div>
+        </dl>
+        <div className="plugin-detail-side">
+          <p>{manifest.description ?? "该插件未提供描述。"}</p>
+          <div className="chip-row">
+            {manifest.capabilities.map((capability) => <span key={capability}>{capability}</span>)}
+          </div>
+          {manifest.permissions.length ? <p className="muted">权限声明：{manifest.permissions.join(", ")}</p> : null}
+          {manifest.warnings.length ? (
+            <div className="warning-stack compact-warning">
+              {manifest.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+            </div>
+          ) : null}
+          <div className="button-row">
+            {!isBuiltIn ? <button type="button" onClick={() => openPluginInstallFolder(manifest.id)}>打开目录</button> : null}
+            {!isBuiltIn ? <button type="button" onClick={() => setUserPluginEnabled(manifest.id, !manifest.enabled)} disabled={pluginBusy}>{manifest.enabled ? "停用" : "启用"}</button> : null}
+            {!isBuiltIn ? <button type="button" className="danger-lite" onClick={() => {
+              if (window.confirm(`确定删除用户插件「${manifest.name}」吗？`)) deleteUserPlugin(manifest.id);
+            }} disabled={pluginBusy}>删除插件</button> : <button type="button" disabled>内置插件只读</button>}
+          </div>
+        </div>
+      </div>
+      {!isBuiltIn ? (
+        <div className="plugin-config-row">
+          <label>
+            插件配置 JSON
+            <textarea
+              value={configText}
+              onChange={(event) => setPluginConfigDrafts({ ...pluginConfigDrafts, [manifest.id]: event.target.value })}
+              rows={8}
+            />
+          </label>
+          <button type="button" className="primary" onClick={() => savePluginConfig(manifest)} disabled={pluginBusy}>保存配置</button>
+        </div>
+      ) : null}
+      <div className="plugin-actions-panel">
+        <h4>插件动作</h4>
+        {!isBuiltIn && manifest.actions.length ? (
+          <div className="plugin-action-list">
+            {manifest.actions.map((action) => (
+              <div className="plugin-action-row" key={action.id}>
+                <div>
+                  <strong>{action.label}</strong>
+                  <small>{action.description ?? action.id}</small>
+                  <code>{action.command ?? "按 entrypoint 推断"} {action.args.join(" ")}</code>
+                </div>
+                <div className="button-row">
+                  <button type="button" className="primary" onClick={() => runPluginAction(manifest, action, "sandbox")} disabled={pluginBusy || !manifest.enabled}>沙盒运行</button>
+                  <button type="button" className="danger-lite" onClick={() => runPluginAction(manifest, action, "direct")} disabled={pluginBusy || !manifest.enabled}>直接运行</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title={isBuiltIn ? "内置能力不可运行" : "暂无动作"} text={isBuiltIn ? "built-in 插件由 AutoMD 内部模块调用，不通过用户插件 runner 执行。" : "在 manifest.actions 中声明动作后可在这里运行。"} />
+        )}
+        {pluginRunResult ? (
+          <div className="plugin-run-result">
+            <h4>最近一次插件运行</h4>
+            <dl className="definition-list">
+              <div><dt>插件</dt><dd>{pluginRunResult.record.pluginId}</dd></div>
+              <div><dt>动作</dt><dd>{pluginRunResult.record.actionId}</dd></div>
+              <div><dt>模式</dt><dd>{pluginRunResult.record.mode}</dd></div>
+              <div><dt>状态</dt><dd>{pluginRunResult.record.status}</dd></div>
+            </dl>
+            <CodeBlock value={`STDOUT\n${pluginRunResult.stdout || "(empty)"}\n\nSTDERR\n${pluginRunResult.stderr || "(empty)"}`} />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

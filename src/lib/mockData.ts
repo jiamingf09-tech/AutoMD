@@ -26,6 +26,7 @@ import type {
   ParameterMappingReport,
   ParameterMappingRequest,
   PlanRequest,
+  PluginManifest,
   PluginRegistrySnapshot,
   ProjectTextFilePayload,
   ProjectTextFileRequest,
@@ -216,10 +217,15 @@ export const mockEngines: EngineCapability[] = [
 
 export const mockEngineInstallations: EngineInstallationRecord[] = [
   {
+    targetKind: "local",
+    targetId: "local",
+    targetLabel: "本机",
     engineId: "namd",
     location: "/opt/user-licensed/namd3",
     version: "NAMD 3.0 user configured",
     authorizationStatus: "missingLicense",
+    platform: "linux",
+    arch: "x86_64",
     checkedAt: now()
   }
 ];
@@ -317,69 +323,92 @@ export const mockRemoteProfiles: RemoteProfile[] = [
   }
 ];
 
+function pluginManifest(partial: Partial<PluginManifest> & Pick<PluginManifest, "id" | "name" | "kind" | "entrypoint" | "capabilities">): PluginManifest {
+  return {
+    version: "0.1.0",
+    description: null,
+    author: null,
+    homepage: null,
+    engineId: null,
+    licensePolicy: null,
+    warnings: [],
+    sourcePath: null,
+    supportedPlatforms: ["windows", "macos", "linux"],
+    integrationTargets: [],
+    actions: [],
+    configSchema: null,
+    defaultConfig: null,
+    permissions: [],
+    origin: "builtIn",
+    enabled: true,
+    installPath: null,
+    validationStatus: "valid",
+    config: null,
+    ...partial
+  };
+}
+
 export const mockPluginRegistry: PluginRegistrySnapshot = {
   pluginRoot: "/mock/AutoMD/plugins",
   manifests: [
-    {
+    pluginManifest({
       id: "automd-core-engines",
       name: "AutoMD Core Engine Adapters",
-      version: "0.1.0",
       kind: "engineAdapter",
       entrypoint: "builtin://engine_adapters",
       engineId: "gromacs/openmm/ambertools/namd",
       capabilities: ["prepare", "run", "parse_progress", "classify_failure", "resume"],
-      licensePolicy: null,
-      warnings: [],
-      sourcePath: null
-    },
-    {
+      integrationTargets: ["engines", "run"]
+    }),
+    pluginManifest({
       id: "automd-core-analysis",
       name: "AutoMD Core Analysis Parsers",
-      version: "0.1.0",
       kind: "analysisModule",
       entrypoint: "builtin://analysis",
-      engineId: null,
       capabilities: ["xvg", "csv", "chart_series"],
-      licensePolicy: null,
-      warnings: [],
-      sourcePath: null
-    },
-    {
+      integrationTargets: ["workflow", "run"]
+    }),
+    pluginManifest({
       id: "automd-core-schedulers",
       name: "AutoMD Core Remote Schedulers",
-      version: "0.1.0",
       kind: "remoteScheduler",
       entrypoint: "builtin://recipes/remote",
-      engineId: null,
       capabilities: ["ssh", "slurm", "pbs", "lsf", "rsync"],
-      licensePolicy: null,
-      warnings: [],
-      sourcePath: null
-    },
-    {
+      integrationTargets: ["remote"]
+    }),
+    pluginManifest({
       id: "automd-core-build-recipes",
       name: "AutoMD Core Build Recipes",
-      version: "0.1.0",
       kind: "buildRecipe",
       entrypoint: "builtin://recipes/build",
-      engineId: null,
       capabilities: ["container", "source_build", "plumed", "mpi", "gpu"],
-      licensePolicy: null,
-      warnings: [],
-      sourcePath: null
-    },
-    {
+      integrationTargets: ["build"]
+    }),
+    pluginManifest({
       id: "automd-core-report",
       name: "AutoMD Core Report Templates",
-      version: "0.1.0",
       kind: "reportTemplate",
       entrypoint: "builtin://artifacts/report",
-      engineId: null,
       capabilities: ["markdown", "html", "pdf", "reproducibility_bundle"],
-      licensePolicy: null,
-      warnings: [],
-      sourcePath: null
-    }
+      integrationTargets: ["report"]
+    }),
+    pluginManifest({
+      id: "demo-rmsd-plugin",
+      name: "Demo RMSD Plugin",
+      kind: "analysisModule",
+      entrypoint: "entrypoint.py",
+      description: "示例用户插件，用于展示左侧用户插件入口和沙盒运行。",
+      capabilities: ["trajectory", "rmsd", "run"],
+      integrationTargets: ["workflow", "run"],
+      actions: [{ id: "default", label: "运行默认动作", description: "读取当前项目上下文并返回示例 artifact。", command: "python3", args: ["$PLUGIN_DIR/entrypoint.py"], timeoutSeconds: 30 }],
+      permissions: ["projectRead", "sandboxWrite"],
+      origin: "user",
+      sourcePath: "/mock/AutoMD/plugins/demo-rmsd-plugin/demo-rmsd-plugin.automd-plugin.json",
+      installPath: "/mock/AutoMD/plugins/demo-rmsd-plugin",
+      config: { stride: 10 },
+      defaultConfig: { stride: 10 },
+      warnings: ["Web 预览示例插件。"]
+    })
   ],
   warnings: []
 };

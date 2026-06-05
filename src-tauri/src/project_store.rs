@@ -231,19 +231,31 @@ impl ProjectDatabase {
 
     pub fn list_engine_installations(&self) -> Result<Vec<EngineInstallationRecord>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT engine_id, location, version, authorization_status, checked_at
+            "SELECT target_kind, target_id, target_label, engine_id, location, version,
+                    authorization_status, platform, arch, checked_at
              FROM engine_installations
-             ORDER BY engine_id ASC, location ASC",
+             ORDER BY target_kind ASC, target_label ASC, engine_id ASC, location ASC",
         )?;
 
         let rows = statement.query_map([], |row| {
-            let authorization_status: String = row.get(3)?;
-            let checked_at: String = row.get(4)?;
+            let target_kind: String = row.get(0)?;
+            let authorization_status: String = row.get(6)?;
+            let platform: Option<String> = row.get(7)?;
+            let checked_at: String = row.get(9)?;
             Ok(EngineInstallationRecord {
-                engine_id: row.get(0)?,
-                location: row.get(1)?,
-                version: row.get(2)?,
+                target_kind: engine_target_kind_from_str(&target_kind).map_err(to_sql_conversion_error)?,
+                target_id: row.get(1)?,
+                target_label: row.get(2)?,
+                engine_id: row.get(3)?,
+                location: row.get(4)?,
+                version: row.get(5)?,
                 authorization_status: detection_status_from_str(&authorization_status).map_err(to_sql_conversion_error)?,
+                platform: platform
+                    .as_deref()
+                    .map(platform_from_str)
+                    .transpose()
+                    .map_err(to_sql_conversion_error)?,
+                arch: row.get(8)?,
                 checked_at: parse_datetime(&checked_at).map_err(to_sql_conversion_error)?,
             })
         })?;
@@ -258,17 +270,26 @@ impl ProjectDatabase {
         let record = normalize_engine_installation(record)?;
         self.connection.execute(
             "INSERT INTO engine_installations
-                (engine_id, location, version, authorization_status, checked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(engine_id, location) DO UPDATE SET
+                (target_kind, target_id, target_label, engine_id, location, version,
+                 authorization_status, platform, arch, checked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(target_kind, target_id, engine_id, location) DO UPDATE SET
+                target_label = excluded.target_label,
                 version = excluded.version,
                 authorization_status = excluded.authorization_status,
+                platform = excluded.platform,
+                arch = excluded.arch,
                 checked_at = excluded.checked_at",
             params![
-                record.engine_id,
-                record.location,
-                record.version,
+                engine_target_kind_to_str(&record.target_kind),
+                &record.target_id,
+                &record.target_label,
+                &record.engine_id,
+                &record.location,
+                &record.version,
                 detection_status_to_str(&record.authorization_status),
+                record.platform.as_ref().map(platform_to_str),
+                &record.arch,
                 record.checked_at.to_rfc3339(),
             ],
         )?;
@@ -277,10 +298,300 @@ impl ProjectDatabase {
 
     pub fn delete_engine_installation(&self, engine_id: String, location: String) -> Result<bool, StoreError> {
         let deleted = self.connection.execute(
-            "DELETE FROM engine_installations WHERE engine_id = ?1 AND location = ?2",
+            "DELETE FROM engine_installations WHERE target_id = 'local' AND engine_id = ?1 AND location = ?2",
             params![engine_id, location],
         )?;
         Ok(deleted > 0)
+    }
+
+    pub fn delete_engine_installation_for_target(
+        &self,
+        target_id: String,
+        engine_id: String,
+        location: String,
+    ) -> Result<bool, StoreError> {
+        let deleted = self.connection.execute(
+            "DELETE FROM engine_installations WHERE target_id = ?1 AND engine_id = ?2 AND location = ?3",
+            params![target_id, engine_id, location],
+        )?;
+        Ok(deleted > 0)
+    }
+
+    pub fn list_remote_helper_statuses(&self) -> Result<Vec<RemoteHelperStatus>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT profile_id, helper_version, status, install_path, platform, arch, hostname,
+                    hardware_json, checked_at, last_error
+             FROM remote_helper_statuses
+             ORDER BY profile_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let status: String = row.get(2)?;
+            let platform: Option<String> = row.get(4)?;
+            let checked_at: String = row.get(8)?;
+            Ok(RemoteHelperStatus {
+                profile_id: row.get(0)?,
+                helper_version: row.get(1)?,
+                status: remote_helper_state_from_str(&status).map_err(to_sql_conversion_error)?,
+                install_path: row.get(3)?,
+                platform: platform
+                    .as_deref()
+                    .map(platform_from_str)
+                    .transpose()
+                    .map_err(to_sql_conversion_error)?,
+                arch: row.get(5)?,
+                hostname: row.get(6)?,
+                hardware_json: row.get(7)?,
+                checked_at: parse_datetime(&checked_at).map_err(to_sql_conversion_error)?,
+                last_error: row.get(9)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+    }
+
+    pub fn save_remote_helper_status(
+        &self,
+        status: RemoteHelperStatus,
+    ) -> Result<RemoteHelperStatus, StoreError> {
+        let status = normalize_remote_helper_status(status)?;
+        self.connection.execute(
+            "INSERT INTO remote_helper_statuses
+                (profile_id, helper_version, status, install_path, platform, arch, hostname,
+                 hardware_json, checked_at, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                helper_version = excluded.helper_version,
+                status = excluded.status,
+                install_path = excluded.install_path,
+                platform = excluded.platform,
+                arch = excluded.arch,
+                hostname = excluded.hostname,
+                hardware_json = excluded.hardware_json,
+                checked_at = excluded.checked_at,
+                last_error = excluded.last_error",
+            params![
+                &status.profile_id,
+                &status.helper_version,
+                remote_helper_state_to_str(&status.status),
+                &status.install_path,
+                status.platform.as_ref().map(platform_to_str),
+                &status.arch,
+                &status.hostname,
+                &status.hardware_json,
+                status.checked_at.to_rfc3339(),
+                &status.last_error,
+            ],
+        )?;
+        Ok(status)
+    }
+
+    pub fn list_plugin_states(&self) -> Result<Vec<PluginStateRecord>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT plugin_id, enabled, config_json, installed_at, updated_at, last_run_at, last_error
+             FROM plugin_states
+             ORDER BY plugin_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let config_json: String = row.get(2)?;
+            let installed_at: String = row.get(3)?;
+            let updated_at: String = row.get(4)?;
+            let last_run_at: Option<String> = row.get(5)?;
+            Ok(PluginStateRecord {
+                plugin_id: row.get(0)?,
+                enabled: row.get::<_, i64>(1)? != 0,
+                config: serde_json::from_str(&config_json)
+                    .map_err(|err| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err)))?,
+                installed_at: parse_datetime(&installed_at).map_err(to_sql_conversion_error)?,
+                updated_at: parse_datetime(&updated_at).map_err(to_sql_conversion_error)?,
+                last_run_at: last_run_at
+                    .as_deref()
+                    .map(parse_datetime)
+                    .transpose()
+                    .map_err(to_sql_conversion_error)?,
+                last_error: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+    }
+
+    pub fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<PluginStateRecord, StoreError> {
+        let now = Utc::now();
+        self.connection.execute(
+            "INSERT INTO plugin_states
+                (plugin_id, enabled, config_json, installed_at, updated_at, last_run_at, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?4, NULL, NULL)
+             ON CONFLICT(plugin_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                plugin_id,
+                if enabled { 1 } else { 0 },
+                serde_json::Value::Null.to_string(),
+                now.to_rfc3339(),
+            ],
+        )?;
+        self.plugin_state(plugin_id)
+    }
+
+    pub fn save_plugin_config(&self, plugin_id: &str, config: serde_json::Value) -> Result<PluginStateRecord, StoreError> {
+        let now = Utc::now();
+        self.connection.execute(
+            "INSERT INTO plugin_states
+                (plugin_id, enabled, config_json, installed_at, updated_at, last_run_at, last_error)
+             VALUES (?1, 1, ?2, ?3, ?3, NULL, NULL)
+             ON CONFLICT(plugin_id) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at",
+            params![plugin_id, config.to_string(), now.to_rfc3339()],
+        )?;
+        self.plugin_state(plugin_id)
+    }
+
+    pub fn delete_plugin_state(&self, plugin_id: &str) -> Result<bool, StoreError> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM plugin_states WHERE plugin_id = ?1", params![plugin_id])?;
+        self.connection
+            .execute("DELETE FROM plugin_runs WHERE plugin_id = ?1", params![plugin_id])?;
+        Ok(deleted > 0)
+    }
+
+    pub fn insert_plugin_run(
+        &self,
+        id: Uuid,
+        plugin_id: &str,
+        action_id: &str,
+        mode: PluginRunMode,
+    ) -> Result<PluginRunRecord, StoreError> {
+        let started_at = Utc::now();
+        self.connection.execute(
+            "INSERT INTO plugin_runs
+                (id, plugin_id, action_id, mode, status, started_at, finished_at, stdout_tail, stderr_tail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
+            params![
+                id.to_string(),
+                plugin_id,
+                action_id,
+                plugin_run_mode_to_str(&mode),
+                plugin_run_status_to_str(&PluginRunStatus::Running),
+                started_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(PluginRunRecord {
+            id,
+            plugin_id: plugin_id.to_string(),
+            action_id: action_id.to_string(),
+            mode,
+            status: PluginRunStatus::Running,
+            started_at,
+            finished_at: None,
+            stdout_tail: None,
+            stderr_tail: None,
+        })
+    }
+
+    pub fn finish_plugin_run(
+        &self,
+        id: Uuid,
+        status: PluginRunStatus,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<PluginRunRecord, StoreError> {
+        let finished_at = Utc::now();
+        let stdout_tail = tail_string(stdout, 4096);
+        let stderr_tail = tail_string(stderr, 4096);
+        self.connection.execute(
+            "UPDATE plugin_runs
+             SET status = ?1, finished_at = ?2, stdout_tail = ?3, stderr_tail = ?4
+             WHERE id = ?5",
+            params![
+                plugin_run_status_to_str(&status),
+                finished_at.to_rfc3339(),
+                stdout_tail,
+                stderr_tail,
+                id.to_string(),
+            ],
+        )?;
+        let record = self.plugin_run(id)?;
+        let last_error = if matches!(status, PluginRunStatus::Failed) {
+            record.stderr_tail.clone()
+        } else {
+            None
+        };
+        self.connection.execute(
+            "INSERT INTO plugin_states
+                (plugin_id, enabled, config_json, installed_at, updated_at, last_run_at, last_error)
+             VALUES (?1, 1, 'null', ?2, ?2, ?2, ?3)
+             ON CONFLICT(plugin_id) DO UPDATE SET
+                updated_at = excluded.updated_at,
+                last_run_at = excluded.last_run_at,
+                last_error = excluded.last_error",
+            params![record.plugin_id, finished_at.to_rfc3339(), last_error],
+        )?;
+        Ok(record)
+    }
+
+    fn plugin_state(&self, plugin_id: &str) -> Result<PluginStateRecord, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT plugin_id, enabled, config_json, installed_at, updated_at, last_run_at, last_error
+                 FROM plugin_states WHERE plugin_id = ?1",
+                params![plugin_id],
+                |row| {
+                    let config_json: String = row.get(2)?;
+                    let installed_at: String = row.get(3)?;
+                    let updated_at: String = row.get(4)?;
+                    let last_run_at: Option<String> = row.get(5)?;
+                    Ok(PluginStateRecord {
+                        plugin_id: row.get(0)?,
+                        enabled: row.get::<_, i64>(1)? != 0,
+                        config: serde_json::from_str(&config_json)
+                            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err)))?,
+                        installed_at: parse_datetime(&installed_at).map_err(to_sql_conversion_error)?,
+                        updated_at: parse_datetime(&updated_at).map_err(to_sql_conversion_error)?,
+                        last_run_at: last_run_at
+                            .as_deref()
+                            .map(parse_datetime)
+                            .transpose()
+                            .map_err(to_sql_conversion_error)?,
+                        last_error: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(StoreError::Database)
+    }
+
+    fn plugin_run(&self, id: Uuid) -> Result<PluginRunRecord, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, plugin_id, action_id, mode, status, started_at, finished_at, stdout_tail, stderr_tail
+                 FROM plugin_runs WHERE id = ?1",
+                params![id.to_string()],
+                |row| {
+                    let id_text: String = row.get(0)?;
+                    let mode: String = row.get(3)?;
+                    let status: String = row.get(4)?;
+                    let started_at: String = row.get(5)?;
+                    let finished_at: Option<String> = row.get(6)?;
+                    Ok(PluginRunRecord {
+                        id: Uuid::parse_str(&id_text)
+                            .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?,
+                        plugin_id: row.get(1)?,
+                        action_id: row.get(2)?,
+                        mode: plugin_run_mode_from_str(&mode).map_err(to_sql_conversion_error)?,
+                        status: plugin_run_status_from_str(&status).map_err(to_sql_conversion_error)?,
+                        started_at: parse_datetime(&started_at).map_err(to_sql_conversion_error)?,
+                        finished_at: finished_at
+                            .as_deref()
+                            .map(parse_datetime)
+                            .transpose()
+                            .map_err(to_sql_conversion_error)?,
+                        stdout_tail: row.get(7)?,
+                        stderr_tail: row.get(8)?,
+                    })
+                },
+            )
+            .map_err(StoreError::Database)
     }
 
     pub fn upsert_task_snapshot(&self, snapshot: &LocalTaskSnapshot, project_id: Option<Uuid>) -> Result<TaskRecord, StoreError> {
@@ -539,12 +850,17 @@ impl ProjectDatabase {
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS engine_installations (
+                target_kind TEXT NOT NULL DEFAULT 'local',
+                target_id TEXT NOT NULL DEFAULT 'local',
+                target_label TEXT NOT NULL DEFAULT '本机',
                 engine_id TEXT NOT NULL,
                 location TEXT NOT NULL,
                 version TEXT,
                 authorization_status TEXT NOT NULL,
+                platform TEXT,
+                arch TEXT,
                 checked_at TEXT NOT NULL,
-                PRIMARY KEY (engine_id, location)
+                PRIMARY KEY (target_kind, target_id, engine_id, location)
             );
             CREATE TABLE IF NOT EXISTS remote_profiles (
                 id TEXT PRIMARY KEY,
@@ -554,6 +870,18 @@ impl ProjectDatabase {
                 workdir TEXT NOT NULL,
                 module_load_json TEXT NOT NULL,
                 default_queue TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_helper_statuses (
+                profile_id TEXT PRIMARY KEY,
+                helper_version TEXT,
+                status TEXT NOT NULL,
+                install_path TEXT,
+                platform TEXT,
+                arch TEXT,
+                hostname TEXT,
+                hardware_json TEXT,
+                checked_at TEXT NOT NULL,
+                last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS artifact_records (
                 project_path TEXT NOT NULL,
@@ -580,25 +908,143 @@ impl ProjectDatabase {
                 series_json TEXT NOT NULL,
                 PRIMARY KEY (project_path, path, label)
             );
+            CREATE TABLE IF NOT EXISTS plugin_states (
+                plugin_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT NOT NULL DEFAULT 'null',
+                installed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS plugin_runs (
+                id TEXT PRIMARY KEY,
+                plugin_id TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                stdout_tail TEXT,
+                stderr_tail TEXT
+            );
+            ",
+        )?;
+        self.migrate_engine_installation_targets()?;
+        Ok(())
+    }
+
+    fn migrate_engine_installation_targets(&self) -> Result<(), StoreError> {
+        let columns = self
+            .connection
+            .prepare("PRAGMA table_info(engine_installations)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if columns.iter().any(|column| column == "target_kind") {
+            return Ok(());
+        }
+
+        self.connection.execute_batch(
+            "
+            ALTER TABLE engine_installations RENAME TO engine_installations_legacy;
+            CREATE TABLE engine_installations (
+                target_kind TEXT NOT NULL DEFAULT 'local',
+                target_id TEXT NOT NULL DEFAULT 'local',
+                target_label TEXT NOT NULL DEFAULT '本机',
+                engine_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                version TEXT,
+                authorization_status TEXT NOT NULL,
+                platform TEXT,
+                arch TEXT,
+                checked_at TEXT NOT NULL,
+                PRIMARY KEY (target_kind, target_id, engine_id, location)
+            );
+            INSERT INTO engine_installations
+                (target_kind, target_id, target_label, engine_id, location, version,
+                 authorization_status, platform, arch, checked_at)
+            SELECT
+                'local', 'local', '本机', engine_id, location, version,
+                authorization_status, NULL, NULL, checked_at
+            FROM engine_installations_legacy;
+            DROP TABLE engine_installations_legacy;
             ",
         )?;
         Ok(())
     }
 }
 
+fn tail_string(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(max_chars);
+    chars[start..].iter().collect()
+}
+
 fn normalize_engine_installation(mut record: EngineInstallationRecord) -> Result<EngineInstallationRecord, StoreError> {
+    record.target_id = record.target_id.trim().to_string();
+    record.target_label = record.target_label.trim().to_string();
     record.engine_id = record.engine_id.trim().to_string();
     record.location = record.location.trim().to_string();
+    record.arch = record
+        .arch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     record.version = record
         .version
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
+    if record.target_id.is_empty() {
+        record.target_id = "local".to_string();
+    }
+    if record.target_label.is_empty() {
+        record.target_label = "本机".to_string();
+    }
     if record.engine_id.is_empty() || record.location.is_empty() {
         return Err(StoreError::InvalidEngineInstallation);
     }
     Ok(record)
+}
+
+fn normalize_remote_helper_status(mut status: RemoteHelperStatus) -> Result<RemoteHelperStatus, StoreError> {
+    status.profile_id = status.profile_id.trim().to_string();
+    status.helper_version = status
+        .helper_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    status.install_path = status
+        .install_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    status.arch = status
+        .arch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    status.hostname = status
+        .hostname
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    status.last_error = status
+        .last_error
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if status.profile_id.is_empty() {
+        return Err(StoreError::InvalidRemoteProfile);
+    }
+    Ok(status)
 }
 
 fn normalize_remote_profile(mut profile: RemoteProfile) -> Result<RemoteProfile, StoreError> {
@@ -683,6 +1129,38 @@ fn status_from_str(value: &str) -> Result<ProjectStatus, StoreError> {
         "running" => Ok(ProjectStatus::Running),
         "completed" => Ok(ProjectStatus::Completed),
         "failed" => Ok(ProjectStatus::Failed),
+        other => Err(StoreError::InvalidEnumValue(other.to_string())),
+    }
+}
+
+fn plugin_run_mode_to_str(value: &PluginRunMode) -> &'static str {
+    match value {
+        PluginRunMode::Sandbox => "sandbox",
+        PluginRunMode::Direct => "direct",
+    }
+}
+
+fn plugin_run_mode_from_str(value: &str) -> Result<PluginRunMode, StoreError> {
+    match value {
+        "sandbox" => Ok(PluginRunMode::Sandbox),
+        "direct" => Ok(PluginRunMode::Direct),
+        other => Err(StoreError::InvalidEnumValue(other.to_string())),
+    }
+}
+
+fn plugin_run_status_to_str(value: &PluginRunStatus) -> &'static str {
+    match value {
+        PluginRunStatus::Running => "running",
+        PluginRunStatus::Completed => "completed",
+        PluginRunStatus::Failed => "failed",
+    }
+}
+
+fn plugin_run_status_from_str(value: &str) -> Result<PluginRunStatus, StoreError> {
+    match value {
+        "running" => Ok(PluginRunStatus::Running),
+        "completed" => Ok(PluginRunStatus::Completed),
+        "failed" => Ok(PluginRunStatus::Failed),
         other => Err(StoreError::InvalidEnumValue(other.to_string())),
     }
 }
@@ -793,6 +1271,63 @@ fn execution_mode_from_str(value: &str) -> Result<ExecutionMode, StoreError> {
     }
 }
 
+fn engine_target_kind_to_str(value: &EngineTargetKind) -> &'static str {
+    match value {
+        EngineTargetKind::Local => "local",
+        EngineTargetKind::Remote => "remote",
+    }
+}
+
+fn engine_target_kind_from_str(value: &str) -> Result<EngineTargetKind, StoreError> {
+    match value {
+        "local" => Ok(EngineTargetKind::Local),
+        "remote" => Ok(EngineTargetKind::Remote),
+        other => Err(StoreError::InvalidEnumValue(other.to_string())),
+    }
+}
+
+fn remote_helper_state_to_str(value: &RemoteHelperState) -> &'static str {
+    match value {
+        RemoteHelperState::Missing => "missing",
+        RemoteHelperState::Ready => "ready",
+        RemoteHelperState::Outdated => "outdated",
+        RemoteHelperState::Unreachable => "unreachable",
+        RemoteHelperState::PermissionDenied => "permissionDenied",
+    }
+}
+
+fn remote_helper_state_from_str(value: &str) -> Result<RemoteHelperState, StoreError> {
+    match value {
+        "missing" => Ok(RemoteHelperState::Missing),
+        "ready" => Ok(RemoteHelperState::Ready),
+        "outdated" => Ok(RemoteHelperState::Outdated),
+        "unreachable" => Ok(RemoteHelperState::Unreachable),
+        "permissionDenied" => Ok(RemoteHelperState::PermissionDenied),
+        other => Err(StoreError::InvalidEnumValue(other.to_string())),
+    }
+}
+
+fn platform_to_str(value: &Platform) -> &'static str {
+    match value {
+        Platform::Windows => "windows",
+        Platform::Macos => "macos",
+        Platform::Linux => "linux",
+        Platform::Wsl2 => "wsl2",
+        Platform::RemoteLinux => "remoteLinux",
+    }
+}
+
+fn platform_from_str(value: &str) -> Result<Platform, StoreError> {
+    match value {
+        "windows" => Ok(Platform::Windows),
+        "macos" => Ok(Platform::Macos),
+        "linux" => Ok(Platform::Linux),
+        "wsl2" => Ok(Platform::Wsl2),
+        "remoteLinux" => Ok(Platform::RemoteLinux),
+        other => Err(StoreError::InvalidEnumValue(other.to_string())),
+    }
+}
+
 fn detection_status_to_str(value: &DetectionStatus) -> &'static str {
     match value {
         DetectionStatus::Ready => "ready",
@@ -870,10 +1405,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("automd-engines-{}.sqlite", Uuid::new_v4()));
         let db = ProjectDatabase::open(&path).expect("db");
         let record = EngineInstallationRecord {
+            target_kind: EngineTargetKind::Local,
+            target_id: "local".to_string(),
+            target_label: "本机".to_string(),
             engine_id: "namd".to_string(),
             location: "/opt/namd/namd3".to_string(),
             version: Some("NAMD 3.0".to_string()),
             authorization_status: DetectionStatus::MissingLicense,
+            platform: Some(Platform::Linux),
+            arch: Some("x86_64".to_string()),
             checked_at: Utc::now(),
         };
 

@@ -24,6 +24,8 @@ export type ExecutionMode =
   | "lsf";
 export type GpuBackend = "cuda" | "rocm" | "openCl" | "metal" | "sycl" | "cpuOnly";
 export type Platform = "windows" | "macos" | "linux" | "wsl2" | "remoteLinux";
+export type EngineTargetKind = "local" | "remote";
+export type RemoteHelperState = "missing" | "ready" | "outdated" | "unreachable" | "permissionDenied";
 export type ProjectDomain = "biomolecular" | "materials" | "qmmm";
 export type ProjectStatus = "draft" | "ready" | "running" | "completed" | "failed";
 export type StructureSourceKind = "pdb" | "mmcif" | "sdf" | "mol2" | "smiles" | "engineProject";
@@ -88,11 +90,41 @@ export interface EngineCapability {
   notes: string[];
 }
 
+export interface RemoteHelperStatus {
+  profileId: string;
+  helperVersion?: string | null;
+  status: RemoteHelperState;
+  installPath?: string | null;
+  platform?: Platform | null;
+  arch?: string | null;
+  hostname?: string | null;
+  hardwareJson?: string | null;
+  checkedAt: string;
+  lastError?: string | null;
+}
+
+export interface EngineTarget {
+  id: string;
+  kind: EngineTargetKind;
+  profileId?: string | null;
+  label: string;
+  detail: string;
+  status: RemoteHelperState;
+  platform?: Platform | null;
+  arch?: string | null;
+  hostname?: string | null;
+}
+
 export interface EngineInstallationRecord {
+  targetKind: EngineTargetKind;
+  targetId: string;
+  targetLabel: string;
   engineId: string;
   location: string;
   version?: string | null;
   authorizationStatus: DetectionStatus;
+  platform?: Platform | null;
+  arch?: string | null;
   checkedAt: string;
 }
 
@@ -103,22 +135,97 @@ export type PluginKind =
   | "buildRecipe"
   | "reportTemplate";
 
+export type PluginOrigin = "builtIn" | "user";
+export type PluginValidationStatus = "valid" | "warning" | "error";
+export type PluginRunMode = "sandbox" | "direct";
+export type PluginRunStatus = "running" | "completed" | "failed";
+
+export interface PluginAction {
+  id: string;
+  label: string;
+  description?: string | null;
+  command?: string | null;
+  args: string[];
+  timeoutSeconds?: number | null;
+}
+
 export interface PluginManifest {
   id: string;
   name: string;
   version: string;
   kind: PluginKind;
   entrypoint: string;
+  description?: string | null;
+  author?: string | null;
+  homepage?: string | null;
   engineId?: string | null;
   capabilities: string[];
   licensePolicy?: string | null;
   warnings: string[];
   sourcePath?: string | null;
+  supportedPlatforms: string[];
+  integrationTargets: string[];
+  actions: PluginAction[];
+  configSchema: unknown;
+  defaultConfig: unknown;
+  permissions: string[];
+  origin: PluginOrigin;
+  enabled: boolean;
+  installPath?: string | null;
+  validationStatus: PluginValidationStatus;
+  config: unknown;
 }
 
 export interface PluginRegistrySnapshot {
   pluginRoot: string;
   manifests: PluginManifest[];
+  warnings: string[];
+}
+
+export interface PluginImportRequest {
+  sourcePath: string;
+  overwrite: boolean;
+}
+
+export interface PluginTemplateRequest {
+  id: string;
+  name: string;
+  kind: PluginKind;
+  target?: string | null;
+  language: string;
+  description?: string | null;
+}
+
+export interface PluginConfigRequest {
+  pluginId: string;
+  config: unknown;
+}
+
+export interface PluginRunRequest {
+  pluginId: string;
+  actionId: string;
+  mode: PluginRunMode;
+  confirmedDirect: boolean;
+  context: unknown;
+}
+
+export interface PluginRunRecord {
+  id: string;
+  pluginId: string;
+  actionId: string;
+  mode: PluginRunMode;
+  status: PluginRunStatus;
+  startedAt: string;
+  finishedAt?: string | null;
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
+}
+
+export interface PluginRunResult {
+  record: PluginRunRecord;
+  stdout: string;
+  stderr: string;
+  parsedOutput?: unknown | null;
   warnings: string[];
 }
 
@@ -606,6 +713,7 @@ export interface RecipeExportResult {
 }
 
 export type BuildWorkflowMode = "dryRun" | "writeFiles" | "execute";
+export type EngineDeployStrategy = "auto" | "package" | "sourceBuild" | "recipeOnly";
 
 export interface BuildWorkflowRequest {
   projectPath: string;
@@ -613,6 +721,16 @@ export interface BuildWorkflowRequest {
   includeContainer: boolean;
   includeBuildScript: boolean;
   mode: BuildWorkflowMode;
+  timeoutSeconds?: number | null;
+}
+
+export interface EngineDeployRequest {
+  targetId: string;
+  engineId: string;
+  strategy: EngineDeployStrategy;
+  mode: BuildWorkflowMode;
+  buildOptions: BuildRecipeOptions;
+  projectPath?: string | null;
   timeoutSeconds?: number | null;
 }
 
@@ -631,6 +749,19 @@ export interface BuildWorkflowResult {
   startedAt: string;
   finishedAt?: string | null;
   durationMs?: number | null;
+  warnings: string[];
+}
+
+export interface EngineDeployResult {
+  targetId: string;
+  engineId: string;
+  strategy: EngineDeployStrategy;
+  mode: BuildWorkflowMode;
+  record?: EngineInstallationRecord | null;
+  buildResult?: BuildWorkflowResult | null;
+  status: TaskStatus;
+  stdout: string;
+  stderr: string;
   warnings: string[];
 }
 

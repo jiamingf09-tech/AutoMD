@@ -131,13 +131,64 @@ pub struct EngineCapability {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineTargetKind {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteHelperState {
+    Missing,
+    Ready,
+    Outdated,
+    Unreachable,
+    PermissionDenied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHelperStatus {
+    pub profile_id: String,
+    pub helper_version: Option<String>,
+    pub status: RemoteHelperState,
+    pub install_path: Option<String>,
+    pub platform: Option<Platform>,
+    pub arch: Option<String>,
+    pub hostname: Option<String>,
+    pub hardware_json: Option<String>,
+    pub checked_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineTarget {
+    pub id: String,
+    pub kind: EngineTargetKind,
+    pub profile_id: Option<String>,
+    pub label: String,
+    pub detail: String,
+    pub status: RemoteHelperState,
+    pub platform: Option<Platform>,
+    pub arch: Option<String>,
+    pub hostname: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineInstallationRecord {
+    pub target_kind: EngineTargetKind,
+    pub target_id: String,
+    pub target_label: String,
     pub engine_id: String,
     pub location: String,
     pub version: Option<String>,
     pub authorization_status: DetectionStatus,
+    pub platform: Option<Platform>,
+    pub arch: Option<String>,
     pub checked_at: DateTime<Utc>,
 }
 
@@ -151,6 +202,67 @@ pub enum PluginKind {
     ReportTemplate,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginOrigin {
+    BuiltIn,
+    User,
+}
+
+fn default_plugin_origin() -> PluginOrigin {
+    PluginOrigin::User
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginValidationStatus {
+    Valid,
+    Warning,
+    Error,
+}
+
+fn default_plugin_validation_status() -> PluginValidationStatus {
+    PluginValidationStatus::Valid
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginRunMode {
+    Sandbox,
+    Direct,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAction {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+fn json_null() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -159,11 +271,43 @@ pub struct PluginManifest {
     pub version: String,
     pub kind: PluginKind,
     pub entrypoint: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
     pub engine_id: Option<String>,
+    #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
     pub license_policy: Option<String>,
+    #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default)]
     pub source_path: Option<String>,
+    #[serde(default)]
+    pub supported_platforms: Vec<String>,
+    #[serde(default)]
+    pub integration_targets: Vec<String>,
+    #[serde(default)]
+    pub actions: Vec<PluginAction>,
+    #[serde(default = "json_null")]
+    pub config_schema: serde_json::Value,
+    #[serde(default = "json_null")]
+    pub default_config: serde_json::Value,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default = "default_plugin_origin")]
+    pub origin: PluginOrigin,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub install_path: Option<String>,
+    #[serde(default = "default_plugin_validation_status")]
+    pub validation_status: PluginValidationStatus,
+    #[serde(default = "json_null")]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +315,77 @@ pub struct PluginManifest {
 pub struct PluginRegistrySnapshot {
     pub plugin_root: String,
     pub manifests: Vec<PluginManifest>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStateRecord {
+    pub plugin_id: String,
+    pub enabled: bool,
+    pub config: serde_json::Value,
+    pub installed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRunRecord {
+    pub id: Uuid,
+    pub plugin_id: String,
+    pub action_id: String,
+    pub mode: PluginRunMode,
+    pub status: PluginRunStatus,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub stdout_tail: Option<String>,
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginImportRequest {
+    pub source_path: String,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTemplateRequest {
+    pub id: String,
+    pub name: String,
+    pub kind: PluginKind,
+    pub target: Option<String>,
+    pub language: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigRequest {
+    pub plugin_id: String,
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRunRequest {
+    pub plugin_id: String,
+    pub action_id: String,
+    pub mode: PluginRunMode,
+    pub confirmed_direct: bool,
+    pub context: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRunResult {
+    pub record: PluginRunRecord,
+    pub stdout: String,
+    pub stderr: String,
+    pub parsed_output: Option<serde_json::Value>,
     pub warnings: Vec<String>,
 }
 
@@ -876,6 +1091,15 @@ pub enum BuildWorkflowMode {
     Execute,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum EngineDeployStrategy {
+    Auto,
+    Package,
+    SourceBuild,
+    RecipeOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildWorkflowRequest {
@@ -884,6 +1108,18 @@ pub struct BuildWorkflowRequest {
     pub include_container: bool,
     pub include_build_script: bool,
     pub mode: BuildWorkflowMode,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineDeployRequest {
+    pub target_id: String,
+    pub engine_id: String,
+    pub strategy: EngineDeployStrategy,
+    pub mode: BuildWorkflowMode,
+    pub build_options: BuildRecipeOptions,
+    pub project_path: Option<String>,
     pub timeout_seconds: Option<u64>,
 }
 
@@ -904,6 +1140,21 @@ pub struct BuildWorkflowResult {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u128>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineDeployResult {
+    pub target_id: String,
+    pub engine_id: String,
+    pub strategy: EngineDeployStrategy,
+    pub mode: BuildWorkflowMode,
+    pub record: Option<EngineInstallationRecord>,
+    pub build_result: Option<BuildWorkflowResult>,
+    pub status: TaskStatus,
+    pub stdout: String,
+    pub stderr: String,
     pub warnings: Vec<String>,
 }
 

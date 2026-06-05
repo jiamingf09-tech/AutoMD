@@ -407,6 +407,10 @@ ul {
   background: var(--brand);
 }
 
+.status-dot.warn {
+  background: var(--warn-fg);
+}
+
 .workspace {
   display: grid;
   grid-template-rows: auto auto auto 1fr;
@@ -1378,10 +1382,170 @@ ul {
   min-height: 0;
 }
 
+.nav-plugin-group {
+  display: grid;
+  gap: 10px;
+  margin-top: 30px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.nav-plugin-group > span {
+  color: var(--text-4);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.nav-plugin {
+  border-style: dashed;
+}
+
+.plugin-builder-grid,
+.plugin-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.plugin-import-box {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 14px;
+}
+
+.plugin-import-box h4,
+.plugin-import-box summary,
+.plugin-actions-panel h4,
+.plugin-run-result h4 {
+  margin: 0;
+}
+
+.plugin-template-grid {
+  margin-top: 12px;
+}
+
+.plugin-card-actions,
+.plugin-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.danger-lite {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  color: var(--danger);
+}
+
+.danger-lite:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+}
+
+.plugin-detail {
+  display: grid;
+  gap: 16px;
+}
+
+.plugin-detail-side,
+.plugin-actions-panel,
+.plugin-run-result,
+.plugin-config-row {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.plugin-config-row textarea {
+  min-height: 180px;
+  resize: vertical;
+  font-family: var(--mono);
+}
+
+.plugin-action-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-action-row {
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.plugin-action-row > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 240px;
+}
+
+.plugin-action-row small,
+.plugin-action-row code {
+  color: var(--text-3);
+}
+
+.plugin-action-row code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.plugin-guide summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
 .engine-card.selected,
 .selected-lite {
   border-color: var(--brand);
   background: var(--brand-softer);
+}
+
+.engine-target-switcher {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.engine-target-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 9px;
+  align-items: center;
+  justify-items: start;
+  min-height: 68px;
+  padding: 12px;
+  text-align: left;
+  background: var(--surface-2);
+}
+
+.engine-target-card small {
+  grid-column: 2;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.engine-target-card.selected {
+  border-color: var(--brand);
+  background: var(--brand-softer);
+  box-shadow: inset 3px 0 0 var(--brand);
+}
+
+.warning-inline {
+  margin-top: 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  padding: 10px 12px;
+  font-weight: 750;
 }
 
 .engine-card p {
@@ -1402,6 +1566,31 @@ ul {
   padding: 6px 9px;
   font-size: 12px;
   font-weight: 800;
+}
+
+.engine-advanced {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.engine-advanced summary {
+  cursor: pointer;
+  color: var(--brand-strong);
+  font-weight: 850;
+}
+
+.engine-advanced-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.build-runner-result.compact {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px;
 }
 
 .engine-install-form {
@@ -2497,6 +2686,22 @@ ul {
   overflow-wrap: anywhere;
 }
 
+.local-runtime-tools .tool-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.local-runtime-tools .tool-row .tool-action-row,
+.local-runtime-tools .tool-row > small {
+  grid-column: 1 / -1;
+}
+
+.local-runtime-tools .tool-row > small {
+  display: block;
+  line-height: 1.45;
+  white-space: normal;
+}
+
 .recipe-buttons {
   display: flex;
   flex-wrap: wrap;
@@ -3169,7 +3374,9 @@ ul {
 
   .settings-hardware-grid,
   .settings-control-grid,
-  .settings-device-row {
+  .settings-device-row,
+  .plugin-builder-grid,
+  .plugin-detail-grid {
     grid-template-columns: 1fr;
   }
 }

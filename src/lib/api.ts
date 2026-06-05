@@ -12,7 +12,10 @@ import type {
   BuildWorkflowResult,
   CreateProjectRequest,
   EngineCapability,
+  EngineDeployRequest,
+  EngineDeployResult,
   EngineInstallationRecord,
+  EngineTarget,
   EngineLogParseRequest,
   EngineLogReport,
   EngineRunPackage,
@@ -32,13 +35,19 @@ import type {
   ParameterMappingReport,
   ParameterMappingRequest,
   PlanRequest,
+  PluginConfigRequest,
+  PluginImportRequest,
+  PluginRunRequest,
+  PluginRunResult,
   PluginRegistrySnapshot,
+  PluginTemplateRequest,
   ProjectTextFilePayload,
   ProjectTextFileRequest,
   ProjectTextFileWriteRequest,
   ProjectSummary,
   RemoteExecutionPackage,
   RemoteExecutionRequest,
+  RemoteHelperStatus,
   RemoteJobSnapshot,
   RemoteProfile,
   RemoteWorkflowStepRequest,
@@ -127,21 +136,121 @@ async function call<T>(command: string, args?: Record<string, unknown>, fallback
 export const api = {
   engineCapabilities: () =>
     call<EngineCapability[]>("list_engine_capabilities", undefined, () => mockEngines),
+  engineTargets: () =>
+    call<EngineTarget[]>("list_engine_targets", undefined, () => [
+      {
+        id: "local",
+        kind: "local",
+        profileId: null,
+        label: "本机",
+        detail: "web-preview · browser",
+        status: "ready",
+        platform: null,
+        arch: "browser",
+        hostname: null
+      },
+      ...mockRemoteProfiles.map((profile) => ({
+        id: `remote:${profile.id}`,
+        kind: "remote" as const,
+        profileId: profile.id,
+        label: profile.name,
+        detail: `${profile.host} · 未安装 helper`,
+        status: "missing" as const,
+        platform: null,
+        arch: null,
+        hostname: null
+      }))
+    ]),
+  engineCapabilitiesForTarget: (targetId: string) =>
+    call<EngineCapability[]>("list_engine_capabilities_for_target", { targetId }, () =>
+      mockEngines.map((engine) =>
+        targetId === "local"
+          ? engine
+          : {
+              ...engine,
+              detection: {
+                status: "missingInstall",
+                path: null,
+                version: null,
+                message: "Web 预览模式：远程 helper 未安装。"
+              }
+            }
+      )
+    ),
   listEngineInstallations: () =>
     call<EngineInstallationRecord[]>("list_engine_installations", undefined, () => mockEngineInstallations),
   saveEngineInstallation: (record: EngineInstallationRecord) =>
     call<EngineInstallationRecord>("save_engine_installation", { record }, () => record),
   deleteEngineInstallation: (engineId: string, location: string) =>
     call<boolean>("delete_engine_installation", { engineId, location }, () => true),
+  deleteEngineInstallationForTarget: (targetId: string, engineId: string, location: string) =>
+    call<boolean>("delete_engine_installation_for_target", { targetId, engineId, location }, () => true),
+  scanEnginesOnTarget: (targetId: string) =>
+    call<EngineCapability[]>("scan_engines_on_target", { targetId }, () => mockEngines),
+  installRemoteHelper: (profileId: string) =>
+    call<RemoteHelperStatus>("install_remote_helper", { profileId }, () => ({
+      profileId,
+      helperVersion: "0.1.0",
+      status: "ready",
+      installPath: `/mock/${profileId}/.automd/helper/0.1.0`,
+      platform: "linux",
+      arch: "x86_64",
+      hostname: "mock-host",
+      hardwareJson: "{\"cpuCount\":32}",
+      checkedAt: new Date().toISOString(),
+      lastError: null
+    })),
+  checkRemoteHelper: (profileId: string) =>
+    call<RemoteHelperStatus>("check_remote_helper", { profileId }, () => ({
+      profileId,
+      helperVersion: "0.1.0",
+      status: "ready",
+      installPath: `/mock/${profileId}/.automd/helper/0.1.0`,
+      platform: "linux",
+      arch: "x86_64",
+      hostname: "mock-host",
+      hardwareJson: "{\"cpuCount\":32}",
+      checkedAt: new Date().toISOString(),
+      lastError: null
+    })),
   listInstallableEngines: () =>
     call<string[]>("list_installable_engines", undefined, () => ["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]),
   installEngine: (engineId: string) =>
     call<EngineInstallationRecord>("install_engine", { engineId }, () => ({
+      targetKind: "local",
+      targetId: "local",
+      targetLabel: "本机",
       engineId,
       location: `/mock/engines/${engineId}/bin/${engineId}`,
       version: "conda-forge (mock)",
       authorizationStatus: "ready",
+      platform: null,
+      arch: "browser",
       checkedAt: new Date().toISOString()
+    })),
+  installOrBuildEngine: (request: EngineDeployRequest) =>
+    call<EngineDeployResult>("install_or_build_engine", { request }, () => ({
+      targetId: request.targetId,
+      engineId: request.engineId,
+      strategy: request.strategy === "auto" ? "package" : request.strategy,
+      mode: request.mode,
+      record: {
+        targetKind: request.targetId === "local" ? "local" : "remote",
+        targetId: request.targetId,
+        targetLabel: request.targetId === "local" ? "本机" : "Mock remote",
+        engineId: request.engineId,
+        location: `/mock/engines/${request.engineId}/bin/${request.engineId}`,
+        version: "mock deploy",
+        authorizationStatus: "ready",
+        platform: request.targetId === "local" ? null : "linux",
+        arch: "x86_64",
+        checkedAt: new Date().toISOString()
+      },
+      buildResult: null,
+      status: "completed",
+      stdout: "Web 预览模式：部署完成。",
+      stderr: "",
+      warnings: []
     })),
   listInstallableTools: () =>
     call<string[]>("list_installable_tools", undefined, () => ["conda", "mamba", "mpirun", "plumed"]),
@@ -173,8 +282,51 @@ export const api = {
     call<boolean>("delete_remote_profile", { id }, () => true),
   pluginManifests: () =>
     call<PluginRegistrySnapshot>("list_plugin_manifests", undefined, () => mockPluginRegistry),
+  importPlugin: (request: PluginImportRequest) =>
+    call<PluginRegistrySnapshot>("import_plugin", { request }, () => mockPluginRegistry),
+  createPluginTemplate: (request: PluginTemplateRequest) =>
+    call<PluginRegistrySnapshot>("create_plugin_template", { request }, () => mockPluginRegistry),
+  setPluginEnabled: (pluginId: string, enabled: boolean) =>
+    call<PluginRegistrySnapshot>("set_plugin_enabled", { pluginId, enabled }, () => ({
+      ...mockPluginRegistry,
+      manifests: mockPluginRegistry.manifests.map((manifest) =>
+        manifest.id === pluginId && manifest.origin === "user" ? { ...manifest, enabled } : manifest
+      )
+    })),
+  deletePlugin: (pluginId: string) =>
+    call<PluginRegistrySnapshot>("delete_plugin", { pluginId }, () => ({
+      ...mockPluginRegistry,
+      manifests: mockPluginRegistry.manifests.filter((manifest) => manifest.id !== pluginId)
+    })),
+  savePluginConfig: (request: PluginConfigRequest) =>
+    call<PluginRegistrySnapshot>("save_plugin_config", { request }, () => ({
+      ...mockPluginRegistry,
+      manifests: mockPluginRegistry.manifests.map((manifest) =>
+        manifest.id === request.pluginId ? { ...manifest, config: request.config } : manifest
+      )
+    })),
+  runPluginAction: (request: PluginRunRequest) =>
+    call<PluginRunResult>("run_plugin_action", { request }, () => ({
+      record: {
+        id: globalThis.crypto?.randomUUID?.() ?? String(Date.now()),
+        pluginId: request.pluginId,
+        actionId: request.actionId,
+        mode: request.mode,
+        status: "completed",
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        stdoutTail: "{\"artifacts\":[],\"warnings\":[\"Web 预览模式\"]}",
+        stderrTail: null
+      },
+      stdout: "{\"artifacts\":[],\"warnings\":[\"Web 预览模式\"]}",
+      stderr: "",
+      parsedOutput: { artifacts: [], warnings: ["Web 预览模式"] },
+      warnings: []
+    })),
   openPluginFolder: () =>
     call<boolean>("open_plugin_folder", undefined, () => true),
+  openPluginInstallFolder: (pluginId: string) =>
+    call<boolean>("open_plugin_install_folder", { pluginId }, () => true),
   openPath: (path: string) =>
     call<boolean>("open_path_in_system", { path }, () => true),
   pickFile: (request: FilePickRequest) =>

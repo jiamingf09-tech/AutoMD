@@ -12,6 +12,7 @@ mod project_files;
 mod project_store;
 mod recipes;
 mod remote_monitor;
+mod remote_helper;
 mod remote_runner;
 mod runtime;
 mod science_sidecar;
@@ -329,21 +330,115 @@ fn list_engine_capabilities(state: tauri::State<'_, AppState>) -> Vec<EngineCapa
     let mut capabilities = engine_registry::detect_all();
     if let Ok(db) = state.db.lock() {
         if let Ok(records) = db.list_engine_installations() {
-            apply_installation_records(&mut capabilities, &records);
+            apply_installation_records(&mut capabilities, &records, "local", Some(current_native_platform()));
         }
     }
     capabilities
 }
 
-fn apply_installation_records(capabilities: &mut [EngineCapability], records: &[EngineInstallationRecord]) {
+#[tauri::command]
+fn list_engine_targets(state: tauri::State<'_, AppState>) -> Result<Vec<EngineTarget>, String> {
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+    let helper_statuses = db
+        .list_remote_helper_statuses()
+        .map_err(|error| error.to_string())?;
+    let mut targets = vec![local_engine_target()];
+    targets.extend(
+        profiles
+            .iter()
+            .map(|profile| engine_target_from_profile(profile, helper_status_for_profile(profile, &helper_statuses))),
+    );
+    Ok(targets)
+}
+
+#[tauri::command]
+fn list_engine_capabilities_for_target(
+    target_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<EngineCapability>, String> {
+    let (target_kind, profile_id) = split_target_id(&target_id);
+    let mut capabilities = engine_registry::detect_all();
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let records = db.list_engine_installations().map_err(|error| error.to_string())?;
+    match target_kind {
+        EngineTargetKind::Local => {
+            apply_installation_records(&mut capabilities, &records, "local", Some(current_native_platform()));
+        }
+        EngineTargetKind::Remote => {
+            let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+            let profile = profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .ok_or_else(|| format!("未找到远程 profile：{profile_id}"))?;
+            let helper_status = helper_status_for_profile(
+                profile,
+                &db.list_remote_helper_statuses().map_err(|error| error.to_string())?,
+            );
+            if !matches!(&helper_status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+                for capability in &mut capabilities {
+                    capability.detection = DetectionState {
+                        status: DetectionStatus::MissingInstall,
+                        path: None,
+                        version: None,
+                        message: format!("{} 的 AutoMD 远程 helper 未就绪：{}。", profile.name, profile.host),
+                    };
+                }
+                return Ok(capabilities);
+            }
+            apply_installation_records(
+                &mut capabilities,
+                &records,
+                &format!("remote:{profile_id}"),
+                helper_status.platform,
+            );
+        }
+    }
+    Ok(capabilities)
+}
+
+fn apply_installation_records(
+    capabilities: &mut [EngineCapability],
+    records: &[EngineInstallationRecord],
+    target_id: &str,
+    target_platform: Option<Platform>,
+) {
     for capability in capabilities {
-        if matches!(
+        if let Some(platform) = &target_platform {
+            if !capability.platform_support.native.contains(platform) {
+                capability.detection = DetectionState {
+                    status: DetectionStatus::NotApplicable,
+                    path: None,
+                    version: None,
+                    message: format!(
+                        "{} 不支持目标平台 {}；支持平台：{}。",
+                        capability.name,
+                        platform_label(platform),
+                        platform_list(&capability.platform_support.native)
+                    ),
+                };
+                continue;
+            }
+        } else if matches!(
             capability.detection.status,
             DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported
         ) {
             continue;
         }
-        if let Some(record) = records.iter().find(|record| record.engine_id == capability.id) {
+        if target_id != "local"
+            && matches!(&capability.detection.status, DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported)
+        {
+            capability.detection = DetectionState {
+                status: DetectionStatus::MissingInstall,
+                path: None,
+                version: None,
+                message: "远程目标尚未扫描到该引擎。".to_string(),
+            };
+        }
+        if let Some(record) = records
+            .iter()
+            .find(|record| record.target_id == target_id && record.engine_id == capability.id)
+        {
             capability.detection = DetectionState {
                 status: record.authorization_status.clone(),
                 path: Some(record.location.clone()),
@@ -359,6 +454,136 @@ fn apply_installation_records(capabilities: &mut [EngineCapability], records: &[
             };
         }
     }
+}
+
+fn current_native_platform() -> Platform {
+    match std::env::consts::OS {
+        "windows" => Platform::Windows,
+        "macos" => Platform::Macos,
+        _ => Platform::Linux,
+    }
+}
+
+fn platform_label(platform: &Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "windows",
+        Platform::Macos => "macos",
+        Platform::Linux => "linux",
+        Platform::Wsl2 => "wsl2",
+        Platform::RemoteLinux => "remoteLinux",
+    }
+}
+
+fn platform_list(platforms: &[Platform]) -> String {
+    platforms
+        .iter()
+        .map(platform_label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn merge_remote_profile_templates(mut saved: Vec<RemoteProfile>) -> Vec<RemoteProfile> {
+    for template in runtime::remote_profile_templates() {
+        if !saved.iter().any(|profile| profile.id == template.id) {
+            saved.push(template);
+        }
+    }
+    saved
+}
+
+fn local_engine_target() -> EngineTarget {
+    let platform = current_native_platform();
+    EngineTarget {
+        id: "local".to_string(),
+        kind: EngineTargetKind::Local,
+        profile_id: None,
+        label: "本机".to_string(),
+        detail: format!("{} · {}", platform_label(&platform), std::env::consts::ARCH),
+        status: RemoteHelperState::Ready,
+        platform: Some(platform),
+        arch: Some(std::env::consts::ARCH.to_string()),
+        hostname: None,
+    }
+}
+
+fn helper_status_for_profile(
+    profile: &RemoteProfile,
+    statuses: &[RemoteHelperStatus],
+) -> RemoteHelperStatus {
+    statuses
+        .iter()
+        .find(|status| status.profile_id == profile.id)
+        .cloned()
+        .unwrap_or_else(|| RemoteHelperStatus {
+            profile_id: profile.id.clone(),
+            helper_version: None,
+            status: RemoteHelperState::Missing,
+            install_path: None,
+            platform: None,
+            arch: None,
+            hostname: None,
+            hardware_json: None,
+            checked_at: chrono::Utc::now(),
+            last_error: Some("远程 helper 未安装。".to_string()),
+        })
+}
+
+fn engine_target_from_profile(profile: &RemoteProfile, helper: RemoteHelperStatus) -> EngineTarget {
+    let status_text = match &helper.status {
+        RemoteHelperState::Ready => helper
+            .platform
+            .as_ref()
+            .map(platform_label)
+            .unwrap_or("已检测"),
+        RemoteHelperState::Missing => "未安装 helper",
+        RemoteHelperState::Outdated => "helper 版本过旧",
+        RemoteHelperState::Unreachable => "远程不可达",
+        RemoteHelperState::PermissionDenied => "权限不足",
+    };
+    EngineTarget {
+        id: format!("remote:{}", profile.id),
+        kind: EngineTargetKind::Remote,
+        profile_id: Some(profile.id.clone()),
+        label: profile.name.clone(),
+        detail: format!("{} · {}", profile.host, status_text),
+        status: helper.status,
+        platform: helper.platform,
+        arch: helper.arch,
+        hostname: helper.hostname,
+    }
+}
+
+fn split_target_id(target_id: &str) -> (EngineTargetKind, String) {
+    if let Some(profile_id) = target_id.strip_prefix("remote:") {
+        (EngineTargetKind::Remote, profile_id.to_string())
+    } else if target_id == "local" {
+        (EngineTargetKind::Local, "local".to_string())
+    } else {
+        (EngineTargetKind::Remote, target_id.to_string())
+    }
+}
+
+fn remote_profile_by_id(state: &tauri::State<'_, AppState>, profile_id: &str) -> Result<RemoteProfile, String> {
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+    profiles
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| format!("未找到远程 profile：{profile_id}"))
+}
+
+fn remote_helper_status_by_profile(
+    state: &tauri::State<'_, AppState>,
+    profile_id: &str,
+) -> Result<RemoteHelperStatus, String> {
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let statuses = db
+        .list_remote_helper_statuses()
+        .map_err(|error| error.to_string())?;
+    statuses
+        .into_iter()
+        .find(|status| status.profile_id == profile_id)
+        .ok_or_else(|| "远程 helper 未安装，请先在远程页安装/检测 helper。".to_string())
 }
 
 #[tauri::command]
@@ -540,6 +765,134 @@ fn delete_engine_installation(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn delete_engine_installation_for_target(
+    target_id: String,
+    engine_id: String,
+    location: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    db.delete_engine_installation_for_target(target_id, engine_id, location)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn check_remote_helper(
+    profile_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteHelperStatus, String> {
+    let profile = remote_profile_by_id(&state, &profile_id)?;
+    let existing = remote_helper_status_by_profile(&state, &profile_id).ok();
+    let checked = remote_helper::check_helper(&profile, existing.and_then(|status| status.install_path))
+        .unwrap_or_else(|error| RemoteHelperStatus {
+            profile_id: profile.id.clone(),
+            helper_version: None,
+            status: if error.to_string().to_ascii_lowercase().contains("permission") {
+                RemoteHelperState::PermissionDenied
+            } else {
+                RemoteHelperState::Unreachable
+            },
+            install_path: Some(remote_helper::default_install_path(&profile)),
+            platform: None,
+            arch: None,
+            hostname: None,
+            hardware_json: None,
+            checked_at: chrono::Utc::now(),
+            last_error: Some(error.to_string()),
+        });
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_remote_helper_status(checked)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn install_remote_helper(
+    profile_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteHelperStatus, String> {
+    let profile = remote_profile_by_id(&state, &profile_id)?;
+    let installed = remote_helper::install_helper(&profile).unwrap_or_else(|error| RemoteHelperStatus {
+        profile_id: profile.id.clone(),
+        helper_version: None,
+        status: if error.to_string().to_ascii_lowercase().contains("permission") {
+            RemoteHelperState::PermissionDenied
+        } else {
+            RemoteHelperState::Unreachable
+        },
+        install_path: Some(remote_helper::default_install_path(&profile)),
+        platform: None,
+        arch: None,
+        hostname: None,
+        hardware_json: None,
+        checked_at: chrono::Utc::now(),
+        last_error: Some(error.to_string()),
+    });
+    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_remote_helper_status(installed)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn scan_engines_on_target(
+    target_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<EngineCapability>, String> {
+    let (target_kind, profile_id) = split_target_id(&target_id);
+    match target_kind {
+        EngineTargetKind::Local => Ok(list_engine_capabilities(state)),
+        EngineTargetKind::Remote => {
+            let profile = remote_profile_by_id(&state, &profile_id)?;
+            let helper_status = remote_helper_status_by_profile(&state, &profile_id)?;
+            if !matches!(&helper_status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+                return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
+            }
+            let install_path = helper_status
+                .install_path
+                .as_deref()
+                .ok_or_else(|| "远程 helper 缺少安装路径。".to_string())?;
+            let target_id = format!("remote:{profile_id}");
+            let target_label = profile.name.clone();
+            let mut found_records = Vec::new();
+            for engine in engine_registry::detect_all() {
+                if let Some(platform) = &helper_status.platform {
+                    if !engine.platform_support.native.contains(platform) {
+                        continue;
+                    }
+                }
+                if let Some(probe) = remote_helper::scan_engine(&profile, install_path, &engine.executable_names)
+                    .map_err(|error| error.to_string())?
+                {
+                    found_records.push(EngineInstallationRecord {
+                        target_kind: EngineTargetKind::Remote,
+                        target_id: target_id.clone(),
+                        target_label: target_label.clone(),
+                        engine_id: engine.id,
+                        location: probe.location,
+                        version: probe.version,
+                        authorization_status: if engine.license.requires_user_license {
+                            DetectionStatus::MissingLicense
+                        } else {
+                            DetectionStatus::Ready
+                        },
+                        platform: probe.platform.or_else(|| helper_status.platform.clone()),
+                        arch: probe.arch.or_else(|| helper_status.arch.clone()),
+                        checked_at: chrono::Utc::now(),
+                    });
+                }
+            }
+            {
+                let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+                for record in found_records {
+                    db.save_engine_installation(record)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            list_engine_capabilities_for_target(target_id, state)
+        }
+    }
+}
+
 /// Engine ids that AutoMD can install with one click via conda-forge
 /// (kept in sync with `engine_conda_package`).
 #[tauri::command]
@@ -613,16 +966,311 @@ async fn install_engine(
         .map_err(|error| format!("安装任务执行失败：{error}"))??;
 
     let record = EngineInstallationRecord {
+        target_kind: EngineTargetKind::Local,
+        target_id: "local".to_string(),
+        target_label: "本机".to_string(),
         engine_id,
         location,
         version,
         authorization_status: DetectionStatus::Ready,
+        platform: Some(current_native_platform()),
+        arch: Some(std::env::consts::ARCH.to_string()),
         checked_at: chrono::Utc::now(),
     };
     let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
     db.save_engine_installation(record.clone())
         .map_err(|error| error.to_string())?;
     Ok(record)
+}
+
+fn source_build_capable(engine_id: &str) -> bool {
+    matches!(engine_id, "gromacs" | "cp2k")
+}
+
+fn resolve_deploy_strategy(engine_id: &str, requested: EngineDeployStrategy) -> EngineDeployStrategy {
+    match requested {
+        EngineDeployStrategy::Auto => {
+            if engine_conda_package(engine_id).is_some() {
+                EngineDeployStrategy::Package
+            } else if source_build_capable(engine_id) {
+                EngineDeployStrategy::SourceBuild
+            } else {
+                EngineDeployStrategy::RecipeOnly
+            }
+        }
+        other => other,
+    }
+}
+
+fn locate_source_build_binary(engine_id: &str, options: &BuildRecipeOptions) -> Option<PathBuf> {
+    let prefix = options
+        .install_prefix
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".local").join("automd").join(engine_id))
+        })?;
+    let bin_dir = prefix.join("bin");
+    let capability = engine_registry::detect_engine_by_id(engine_id)?;
+    for executable in capability.executable_names {
+        let candidate = bin_dir.join(&executable);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn source_build_record(
+    target_id: &str,
+    target_label: String,
+    engine_id: String,
+    options: &BuildRecipeOptions,
+) -> Option<EngineInstallationRecord> {
+    let binary = locate_source_build_binary(&engine_id, options)?;
+    Some(EngineInstallationRecord {
+        target_kind: EngineTargetKind::Local,
+        target_id: target_id.to_string(),
+        target_label,
+        engine_id: engine_id.clone(),
+        location: binary.display().to_string(),
+        version: detect_installed_engine_version(&binary, &engine_id),
+        authorization_status: DetectionStatus::Ready,
+        platform: Some(current_native_platform()),
+        arch: Some(std::env::consts::ARCH.to_string()),
+        checked_at: chrono::Utc::now(),
+    })
+}
+
+fn run_local_build_for_deploy(request: &EngineDeployRequest) -> Result<BuildWorkflowResult, String> {
+    let project_path = request
+        .project_path
+        .clone()
+        .ok_or_else(|| "需要先创建项目，才能生成或执行构建 recipe。".to_string())?;
+    build_runner::run_build_workflow(BuildWorkflowRequest {
+        project_path,
+        build_options: request.build_options.clone(),
+        include_container: true,
+        include_build_script: true,
+        mode: request.mode.clone(),
+        timeout_seconds: request.timeout_seconds,
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn install_or_build_engine(
+    request: EngineDeployRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<EngineDeployResult, String> {
+    let strategy = resolve_deploy_strategy(&request.engine_id, request.strategy.clone());
+    let (target_kind, profile_id) = split_target_id(&request.target_id);
+    let mut warnings = Vec::new();
+
+    match (target_kind, strategy.clone()) {
+        (EngineTargetKind::Local, EngineDeployStrategy::Package) => {
+            let record = install_engine(request.engine_id.clone(), state.clone()).await?;
+            Ok(EngineDeployResult {
+                target_id: "local".to_string(),
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record: Some(record),
+                build_result: None,
+                status: TaskStatus::Completed,
+                stdout: "本机包管理安装完成。".to_string(),
+                stderr: String::new(),
+                warnings,
+            })
+        }
+        (EngineTargetKind::Local, EngineDeployStrategy::SourceBuild) => {
+            if !source_build_capable(&request.engine_id) {
+                return Err(format!("{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。", request.engine_id));
+            }
+            let build_result = run_local_build_for_deploy(&request)?;
+            let mut record = None;
+            if matches!(&request.mode, BuildWorkflowMode::Execute) && build_result.status == TaskStatus::Completed {
+                if let Some(found) = source_build_record("local", "本机".to_string(), request.engine_id.clone(), &request.build_options) {
+                    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+                    record = Some(db.save_engine_installation(found).map_err(|error| error.to_string())?);
+                } else {
+                    warnings.push("构建完成，但未自动定位到可执行文件；请回到引擎页手动登记路径。".to_string());
+                }
+            }
+            Ok(EngineDeployResult {
+                target_id: "local".to_string(),
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record,
+                status: build_result.status.clone(),
+                stdout: build_result.stdout.clone(),
+                stderr: build_result.stderr.clone(),
+                build_result: Some(build_result),
+                warnings,
+            })
+        }
+        (EngineTargetKind::Local, EngineDeployStrategy::RecipeOnly) => {
+            let build_result = run_local_build_for_deploy(&request)?;
+            warnings.push("该引擎不能由 AutoMD 自动下载或编译；已生成 recipe/接入清单，请按授权和上游文档处理。".to_string());
+            Ok(EngineDeployResult {
+                target_id: "local".to_string(),
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record: None,
+                status: build_result.status.clone(),
+                stdout: build_result.stdout.clone(),
+                stderr: build_result.stderr.clone(),
+                build_result: Some(build_result),
+                warnings,
+            })
+        }
+        (EngineTargetKind::Remote, EngineDeployStrategy::Package) => {
+            let package = engine_conda_package(&request.engine_id)
+                .ok_or_else(|| format!("{} 不能通过包管理器自动部署。", request.engine_id))?;
+            let profile = remote_profile_by_id(&state, &profile_id)?;
+            let helper = remote_helper_status_by_profile(&state, &profile_id)?;
+            if !matches!(&helper.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+                return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
+            }
+            let install_path = helper
+                .install_path
+                .as_deref()
+                .ok_or_else(|| "远程 helper 缺少安装路径。".to_string())?;
+            let capability = engine_registry::detect_engine_by_id(&request.engine_id)
+                .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
+            if let Some(platform) = &helper.platform {
+                if !capability.platform_support.native.contains(platform) {
+                    return Err(format!("{} 不支持该远程平台 {}。", capability.name, platform_label(platform)));
+                }
+            }
+            let probe = remote_helper::install_engine_with_helper(
+                &profile,
+                install_path,
+                &request.engine_id,
+                package,
+                &capability.executable_names,
+            )
+            .map_err(|error| error.to_string())?;
+            let record = EngineInstallationRecord {
+                target_kind: EngineTargetKind::Remote,
+                target_id: format!("remote:{profile_id}"),
+                target_label: profile.name.clone(),
+                engine_id: request.engine_id.clone(),
+                location: probe.location,
+                version: probe.version,
+                authorization_status: if capability.license.requires_user_license {
+                    DetectionStatus::MissingLicense
+                } else {
+                    DetectionStatus::Ready
+                },
+                platform: probe.platform.or(helper.platform),
+                arch: probe.arch.or(helper.arch),
+                checked_at: chrono::Utc::now(),
+            };
+            let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+            let saved = db.save_engine_installation(record).map_err(|error| error.to_string())?;
+            Ok(EngineDeployResult {
+                target_id: format!("remote:{profile_id}"),
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record: Some(saved),
+                build_result: None,
+                status: TaskStatus::Completed,
+                stdout: "远程包管理部署完成。".to_string(),
+                stderr: String::new(),
+                warnings,
+            })
+        }
+        (EngineTargetKind::Remote, EngineDeployStrategy::SourceBuild) => {
+            if !source_build_capable(&request.engine_id) {
+                return Err(format!("{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。", request.engine_id));
+            }
+            let profile = remote_profile_by_id(&state, &profile_id)?;
+            let helper = remote_helper_status_by_profile(&state, &profile_id)?;
+            if !matches!(&helper.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+                return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
+            }
+            let install_path = helper
+                .install_path
+                .as_deref()
+                .ok_or_else(|| "远程 helper 缺少安装路径。".to_string())?;
+            if !matches!(&request.mode, BuildWorkflowMode::Execute) {
+                let build_result = run_local_build_for_deploy(&request)?;
+                return Ok(EngineDeployResult {
+                    target_id: format!("remote:{profile_id}"),
+                    engine_id: request.engine_id,
+                    strategy,
+                    mode: request.mode,
+                    record: None,
+                    status: build_result.status.clone(),
+                    stdout: build_result.stdout.clone(),
+                    stderr: build_result.stderr.clone(),
+                    build_result: Some(build_result),
+                    warnings,
+                });
+            }
+            let build = recipes::build_recipe(request.build_options.clone());
+            let stdout = remote_helper::run_build_engine_with_helper(&profile, install_path, &request.engine_id, &build.script)
+                .map_err(|error| error.to_string())?;
+            let capability = engine_registry::detect_engine_by_id(&request.engine_id)
+                .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
+            let record = remote_helper::scan_engine(&profile, install_path, &capability.executable_names)
+                .map_err(|error| error.to_string())?
+                .map(|probe| EngineInstallationRecord {
+                    target_kind: EngineTargetKind::Remote,
+                    target_id: format!("remote:{profile_id}"),
+                    target_label: profile.name.clone(),
+                    engine_id: request.engine_id.clone(),
+                    location: probe.location,
+                    version: probe.version,
+                    authorization_status: DetectionStatus::Ready,
+                    platform: probe.platform.or(helper.platform.clone()),
+                    arch: probe.arch.or(helper.arch.clone()),
+                    checked_at: chrono::Utc::now(),
+                });
+            let saved = if let Some(record) = record {
+                let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+                Some(db.save_engine_installation(record).map_err(|error| error.to_string())?)
+            } else {
+                warnings.push("远程构建完成，但未自动扫描到可执行文件；请手动登记远程路径。".to_string());
+                None
+            };
+            Ok(EngineDeployResult {
+                target_id: format!("remote:{profile_id}"),
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record: saved,
+                build_result: None,
+                status: TaskStatus::Completed,
+                stdout,
+                stderr: String::new(),
+                warnings,
+            })
+        }
+        (_, EngineDeployStrategy::RecipeOnly) => {
+            let build_result = run_local_build_for_deploy(&request)?;
+            warnings.push("该引擎需要用户源码、许可证或目标平台工具链；AutoMD 只生成 recipe/接入清单。".to_string());
+            Ok(EngineDeployResult {
+                target_id: request.target_id,
+                engine_id: request.engine_id,
+                strategy,
+                mode: request.mode,
+                record: None,
+                status: build_result.status.clone(),
+                stdout: build_result.stdout.clone(),
+                stderr: build_result.stderr.clone(),
+                build_result: Some(build_result),
+                warnings,
+            })
+        }
+        (_, EngineDeployStrategy::Auto) => unreachable!("auto strategy is resolved before matching"),
+    }
 }
 
 /// (conda-forge package, primary executable) for runtime tools that can be
@@ -693,13 +1341,185 @@ async fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Res
 
 #[tauri::command]
 fn list_plugin_manifests(state: tauri::State<'_, AppState>) -> Result<PluginRegistrySnapshot, String> {
-    plugins::registry_snapshot(&state.plugin_root).map_err(|error| error.to_string())
+    plugin_registry_snapshot(&state)
+}
+
+fn plugin_registry_snapshot(state: &tauri::State<'_, AppState>) -> Result<PluginRegistrySnapshot, String> {
+    let states = state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .list_plugin_states()
+        .map_err(|error| error.to_string())?;
+    plugins::registry_snapshot(&state.plugin_root, &states).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn import_plugin(state: tauri::State<'_, AppState>, request: PluginImportRequest) -> Result<PluginRegistrySnapshot, String> {
+    let states = state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .list_plugin_states()
+        .map_err(|error| error.to_string())?;
+    let plugin_id = plugins::import_plugin(&state.plugin_root, &request, &states).map_err(|error| error.to_string())?;
+    state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .set_plugin_enabled(&plugin_id, true)
+        .map_err(|error| error.to_string())?;
+    plugin_registry_snapshot(&state)
+}
+
+#[tauri::command]
+fn create_plugin_template(state: tauri::State<'_, AppState>, request: PluginTemplateRequest) -> Result<PluginRegistrySnapshot, String> {
+    let plugin_id = plugins::create_plugin_template(&state.plugin_root, &request).map_err(|error| error.to_string())?;
+    state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .set_plugin_enabled(&plugin_id, true)
+        .map_err(|error| error.to_string())?;
+    plugin_registry_snapshot(&state)
+}
+
+#[tauri::command]
+fn set_plugin_enabled(state: tauri::State<'_, AppState>, plugin_id: String, enabled: bool) -> Result<PluginRegistrySnapshot, String> {
+    let snapshot = plugin_registry_snapshot(&state)?;
+    let manifest = snapshot
+        .manifests
+        .iter()
+        .find(|manifest| manifest.id == plugin_id)
+        .ok_or_else(|| format!("插件不存在：{plugin_id}"))?;
+    if matches!(manifest.origin, PluginOrigin::BuiltIn) {
+        return Err(format!("内置插件不能停用：{plugin_id}"));
+    }
+    state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .set_plugin_enabled(&plugin_id, enabled)
+        .map_err(|error| error.to_string())?;
+    plugin_registry_snapshot(&state)
+}
+
+#[tauri::command]
+fn delete_plugin(state: tauri::State<'_, AppState>, plugin_id: String) -> Result<PluginRegistrySnapshot, String> {
+    let states = state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .list_plugin_states()
+        .map_err(|error| error.to_string())?;
+    plugins::delete_user_plugin(&state.plugin_root, &plugin_id, &states).map_err(|error| error.to_string())?;
+    state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .delete_plugin_state(&plugin_id)
+        .map_err(|error| error.to_string())?;
+    plugin_registry_snapshot(&state)
+}
+
+#[tauri::command]
+fn save_plugin_config(state: tauri::State<'_, AppState>, request: PluginConfigRequest) -> Result<PluginRegistrySnapshot, String> {
+    let snapshot = plugin_registry_snapshot(&state)?;
+    let manifest = snapshot
+        .manifests
+        .iter()
+        .find(|manifest| manifest.id == request.plugin_id)
+        .ok_or_else(|| format!("插件不存在：{}", request.plugin_id))?;
+    if matches!(manifest.origin, PluginOrigin::BuiltIn) {
+        return Err(format!("内置插件不能修改配置：{}", request.plugin_id));
+    }
+    state
+        .db
+        .lock()
+        .map_err(|error| error.to_string())?
+        .save_plugin_config(&request.plugin_id, request.config)
+        .map_err(|error| error.to_string())?;
+    plugin_registry_snapshot(&state)
+}
+
+#[tauri::command]
+fn run_plugin_action(state: tauri::State<'_, AppState>, request: PluginRunRequest) -> Result<PluginRunResult, String> {
+    let snapshot = plugin_registry_snapshot(&state)?;
+    let manifest = snapshot
+        .manifests
+        .iter()
+        .find(|manifest| manifest.id == request.plugin_id)
+        .cloned()
+        .ok_or_else(|| format!("插件不存在：{}", request.plugin_id))?;
+    let run_id = uuid::Uuid::new_v4();
+    {
+        state
+            .db
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert_plugin_run(run_id, &request.plugin_id, &request.action_id, request.mode.clone())
+            .map_err(|error| error.to_string())?;
+    }
+
+    match plugins::execute_plugin_action(&state.plugin_root, &manifest, &request, &run_id.to_string()) {
+        Ok((stdout, stderr, parsed_output, warnings)) => {
+            let record = state
+                .db
+                .lock()
+                .map_err(|error| error.to_string())?
+                .finish_plugin_run(run_id, PluginRunStatus::Completed, &stdout, &stderr)
+                .map_err(|error| error.to_string())?;
+            Ok(PluginRunResult { record, stdout, stderr, parsed_output, warnings })
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let record = state
+                .db
+                .lock()
+                .map_err(|error| error.to_string())?
+                .finish_plugin_run(run_id, PluginRunStatus::Failed, "", &message)
+                .map_err(|error| error.to_string())?;
+            Ok(PluginRunResult {
+                record,
+                stdout: String::new(),
+                stderr: message,
+                parsed_output: None,
+                warnings: vec!["插件运行失败，已记录到运行历史。".to_string()],
+            })
+        }
+    }
 }
 
 #[tauri::command]
 fn open_plugin_folder(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     std::fs::create_dir_all(&state.plugin_root).map_err(|error| error.to_string())?;
     tauri_plugin_opener::open_path(&state.plugin_root, None::<&str>).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn open_plugin_install_folder(state: tauri::State<'_, AppState>, plugin_id: String) -> Result<bool, String> {
+    let snapshot = plugin_registry_snapshot(&state)?;
+    let manifest = snapshot
+        .manifests
+        .iter()
+        .find(|manifest| manifest.id == plugin_id)
+        .ok_or_else(|| format!("插件不存在：{plugin_id}"))?;
+    let target = manifest
+        .install_path
+        .as_deref()
+        .or(manifest.source_path.as_deref())
+        .ok_or_else(|| "内置插件没有可打开的安装目录。".to_string())?;
+    let path = PathBuf::from(target);
+    let folder = if path.is_file() {
+        path.parent().map(PathBuf::from).unwrap_or(path)
+    } else {
+        path
+    };
+    if !folder.exists() {
+        return Err(format!("插件目录不存在：{}", folder.display()));
+    }
+    tauri_plugin_opener::open_path(folder, None::<&str>).map_err(|error| error.to_string())?;
     Ok(true)
 }
 
@@ -1314,6 +2134,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_engine_capabilities,
             list_engine_capabilities,
+            list_engine_targets,
+            list_engine_capabilities_for_target,
             get_runtime_diagnostics,
             get_science_sidecar_diagnostics,
             install_science_sidecar,
@@ -1325,12 +2147,24 @@ pub fn run() {
             list_engine_installations,
             save_engine_installation,
             delete_engine_installation,
+            delete_engine_installation_for_target,
+            scan_engines_on_target,
+            check_remote_helper,
+            install_remote_helper,
             list_installable_engines,
             install_engine,
+            install_or_build_engine,
             list_installable_tools,
             install_tool,
             list_plugin_manifests,
+            import_plugin,
+            create_plugin_template,
+            set_plugin_enabled,
+            delete_plugin,
+            save_plugin_config,
+            run_plugin_action,
             open_plugin_folder,
+            open_plugin_install_folder,
             open_path_in_system,
             pick_file_in_system,
             find_executable,
