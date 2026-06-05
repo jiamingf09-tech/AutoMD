@@ -5131,12 +5131,13 @@ function WorkflowPanel({
   const readyScienceCount = neededScienceTools.filter((entry) => entry.status === "ready").length;
 
   return (
-    <div className="content-grid">
-      <section className="panel span-2">
-        <div className="panel-title-row">
+    <div className="flow-steps">
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">1</span>
           <div>
             <h3>模拟参数</h3>
-            <p className="muted">这里填写和科学体系直接相关的参数；集群 walltime 属于远程/资源设置，不等于模拟长度。</p>
+            <p className="muted">填写和科学体系直接相关的参数；集群 walltime 属于远程/资源设置，不等于模拟长度。</p>
           </div>
         </div>
         <div className="form-grid three">
@@ -5228,8 +5229,35 @@ function WorkflowPanel({
           </label>
         </div>
       </section>
-      <section className="panel">
-        <h3>分析模块</h3>
+
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">2</span>
+          <div>
+            <h3>阶段参数</h3>
+            <p className="muted">能量最小化 / 升温 / 平衡 / 生产各阶段的开关与参数，按顺序确认即可。</p>
+          </div>
+        </div>
+        <div className="stage-list">
+          {plan.stages.map((stage) => (
+            <StageEditor
+              stage={stage}
+              key={stage.id}
+              updateStageParameter={updateStageParameter}
+              toggleStage={toggleStage}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">3</span>
+          <div>
+            <h3>分析模块</h3>
+            <p className="muted">勾选需要的分析；运行结束后会自动纳入分析与报告。</p>
+          </div>
+        </div>
         <div className="toggle-list analysis-toggle-grid">
           {plan.analysis.map((module) => (
             <label className="check-row" key={module.kind}>
@@ -5250,16 +5278,10 @@ function WorkflowPanel({
           ))}
         </div>
       </section>
-      <details className="panel span-3 advanced-panel">
-        <summary>高级：当前引擎原生参数预览</summary>
-        <p className="muted">
-          这不是另一套需要你重新填写的参数，而是把上面的 GUI 参数翻译成 {engineLabel[plan.engineId] ?? plan.engineId}
-          会写入的原生字段。需复核表示模板能给出建议，但正式生产前应打开生成文件确认。
-        </p>
-        <ParameterMappingList report={parameterMappingReport} />
-      </details>
-      <section className="panel span-3">
-        <div className="panel-title-row">
+
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">4</span>
           <div>
             <h3>结构准备与分析环境</h3>
             <p className="muted">
@@ -5353,23 +5375,20 @@ function WorkflowPanel({
           </div>
         </div>
       </section>
-      <section className="panel span-3">
-        <h3>阶段参数</h3>
-        <div className="stage-list">
-          {plan.stages.map((stage) => (
-            <StageEditor
-              stage={stage}
-              key={stage.id}
-              updateStageParameter={updateStageParameter}
-              toggleStage={toggleStage}
-            />
-          ))}
-        </div>
-      </section>
-      <section className="panel span-3">
+
+      <section className="panel">
         <h3>参数检查</h3>
         <ValidationList validation={validation} />
       </section>
+
+      <details className="panel flow-advanced">
+        <summary>高级：当前引擎原生参数预览</summary>
+        <p className="muted">
+          这不是另一套需要你重新填写的参数，而是把上面的 GUI 参数翻译成 {engineLabel[plan.engineId] ?? plan.engineId}
+          会写入的原生字段。需复核表示模板能给出建议，但正式生产前应打开生成文件确认。
+        </p>
+        <ParameterMappingList report={parameterMappingReport} />
+      </details>
     </div>
   );
 }
@@ -5491,9 +5510,15 @@ function RunPanel({
   const localTaskActive = Boolean(localSnapshot && !["completed", "failed", "cancelled"].includes(localSnapshot.status));
   const generatedFiles = [...(runPackage?.files ?? []), ...(batchPackage?.files ?? [])];
   return (
-    <div className="content-grid">
-      <section className="panel">
-        <h3>启动前检查</h3>
+    <div className="flow-steps">
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">1</span>
+          <div>
+            <h3>启动前检查</h3>
+            <p className="muted">确认引擎与参数校验通过，然后生成本地 run package。</p>
+          </div>
+        </div>
         {selectedEngine ? (
           <dl className="definition-list">
             <div><dt>引擎</dt><dd>{selectedEngine.name}</dd></div>
@@ -5507,8 +5532,87 @@ function RunPanel({
           生成 run package
         </button>
       </section>
-      <section className="panel">
-        <h3>批量重复实验</h3>
+
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">2</span>
+          <div>
+            <h3>本地执行</h3>
+            <p className="muted">先用 Mock runner 验证 GUI 监控链路，再切换真实本地执行。</p>
+          </div>
+        </div>
+        <label>
+          运行模式
+          <select value={localRunMode} onChange={(event) => setLocalRunMode(event.target.value as LocalRunMode)}>
+            <option value="dryRun">Dry run：只写入/校验，不启动进程</option>
+            <option value="mock">Mock runner：快速模拟完整生命周期</option>
+            <option value="real">真实本地执行：启动 run-gromacs.sh</option>
+          </select>
+        </label>
+        <div className="button-row">
+          <button type="button" className="primary" onClick={startLocalRun}>
+            启动本地任务
+          </button>
+          <button type="button" onClick={cancelLocalRun} disabled={!localTaskActive}>
+            取消任务
+          </button>
+        </div>
+        {localSnapshot ? (
+          <>
+            <div className="progress-shell">
+              <div className="progress-bar" style={{ width: `${localSnapshot.progressPercent}%` }} />
+            </div>
+            <dl className="definition-list">
+              <div><dt>模式</dt><dd>{localRunModeText[localSnapshot.mode]}</dd></div>
+              <div><dt>状态</dt><dd>{localSnapshot.status}</dd></div>
+              <div><dt>步数</dt><dd>{localSnapshot.currentStep ?? "未检测"}</dd></div>
+              <div><dt>性能</dt><dd>{localSnapshot.nsPerDay ? `${localSnapshot.nsPerDay.toFixed(3)} ns/day` : "未检测"}</dd></div>
+              <div><dt>命令</dt><dd className="mono">{localSnapshot.command || "无"}</dd></div>
+            </dl>
+            {localSnapshot.errorMessage ? (
+              <div className="error-inline">{localSnapshot.errorMessage}</div>
+            ) : null}
+            <FailureAnalysisCard analysis={localSnapshot.failureAnalysis ?? null} />
+            <pre className="log-tail">{localSnapshot.logTail.join("\n")}</pre>
+          </>
+        ) : (
+          <EmptyState title="暂无本地任务" text="推荐先用 Mock runner 验证 GUI 监控链路，再切换真实本地执行。" />
+        )}
+      </section>
+
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">3</span>
+          <div>
+            <h3>结果与产物</h3>
+            <p className="muted">运行产物索引、轨迹预览与分析曲线；远程作业回收的结果也会出现在这里。</p>
+          </div>
+          <button type="button" onClick={refreshArtifacts}>刷新索引</button>
+        </div>
+        {artifactIndex?.artifacts.length ? (
+          <ArtifactTable artifacts={artifactIndex.artifacts} />
+        ) : (
+          <EmptyState title="暂无 artifact 索引" text="任务完成后会自动索引日志、checkpoint、轨迹、分析表和报告，也可以手动刷新项目目录。" />
+        )}
+        <TrajectoryIndexPanel
+          artifacts={artifactIndex?.artifacts ?? []}
+          trajectoryIndex={trajectoryIndex}
+          trajectoryChunk={trajectoryChunk}
+          indexTrajectory={indexTrajectory}
+          previewTrajectoryFrame={previewTrajectoryFrame}
+        />
+        <TrajectoryAnalysisPackagePanel
+          analysisPackage={trajectoryAnalysisPackage}
+          generateTrajectoryAnalysisPackage={generateTrajectoryAnalysisPackage}
+        />
+        <h4>分析曲线</h4>
+        <AnalysisChartGrid analysisResult={analysisResult} />
+      </section>
+
+      <details className="panel flow-advanced">
+        <summary>高级 / 更多：批量实验、生成文件与脚本、原生编辑、资源、历史、日志解析</summary>
+
+        <h4>批量重复实验</h4>
         <div className="field-grid two">
           <label>
             Replica 数
@@ -5565,61 +5669,8 @@ function RunPanel({
         ) : (
           <EmptyState title="尚未生成 batch" text="用于多 seed / 多 replica 的重复实验；生成后会写入 generated/batch 并复用当前引擎适配器。" />
         )}
-      </section>
-      <section className="panel">
-        <h3>本地执行</h3>
-        <label>
-          运行模式
-          <select value={localRunMode} onChange={(event) => setLocalRunMode(event.target.value as LocalRunMode)}>
-            <option value="dryRun">Dry run：只写入/校验，不启动进程</option>
-            <option value="mock">Mock runner：快速模拟完整生命周期</option>
-            <option value="real">真实本地执行：启动 run-gromacs.sh</option>
-          </select>
-        </label>
-        <div className="button-row">
-          <button type="button" className="primary" onClick={startLocalRun}>
-            启动本地任务
-          </button>
-          <button type="button" onClick={cancelLocalRun} disabled={!localTaskActive}>
-            取消任务
-          </button>
-        </div>
-        {localSnapshot ? (
-          <>
-            <div className="progress-shell">
-              <div className="progress-bar" style={{ width: `${localSnapshot.progressPercent}%` }} />
-            </div>
-            <dl className="definition-list">
-              <div><dt>模式</dt><dd>{localRunModeText[localSnapshot.mode]}</dd></div>
-              <div><dt>状态</dt><dd>{localSnapshot.status}</dd></div>
-              <div><dt>步数</dt><dd>{localSnapshot.currentStep ?? "未检测"}</dd></div>
-              <div><dt>性能</dt><dd>{localSnapshot.nsPerDay ? `${localSnapshot.nsPerDay.toFixed(3)} ns/day` : "未检测"}</dd></div>
-              <div><dt>命令</dt><dd className="mono">{localSnapshot.command || "无"}</dd></div>
-            </dl>
-            {localSnapshot.errorMessage ? (
-              <div className="error-inline">{localSnapshot.errorMessage}</div>
-            ) : null}
-            <FailureAnalysisCard analysis={localSnapshot.failureAnalysis ?? null} />
-            <pre className="log-tail">{localSnapshot.logTail.join("\n")}</pre>
-          </>
-        ) : (
-          <EmptyState title="暂无本地任务" text="推荐先用 Mock runner 验证 GUI 监控链路，再切换真实本地执行。" />
-        )}
-      </section>
-      <section className="panel">
-        <ResumePlanCard resumePlan={resumePlan} onDiscover={discoverResumePlan} />
-      </section>
-      <section className="panel">
-        <div className="panel-title-row">
-          <h3>SQLite 任务历史</h3>
-          <button type="button" onClick={refreshTaskRecords}>
-            刷新
-          </button>
-        </div>
-        <TaskRecordList records={taskRecords} />
-      </section>
-      <section className="panel">
-        <h3>任务记录</h3>
+
+        <h4>当前任务记录</h4>
         {task ? (
           <>
             <div className="progress-shell">
@@ -5635,41 +5686,8 @@ function RunPanel({
         ) : (
           <EmptyState title="暂无任务" text="生成运行计划后会创建可恢复的任务记录。" />
         )}
-      </section>
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <h3>Artifacts</h3>
-          <button type="button" onClick={refreshArtifacts}>
-            刷新索引
-          </button>
-        </div>
-        {artifactIndex?.artifacts.length ? (
-          <ArtifactTable artifacts={artifactIndex.artifacts} />
-        ) : (
-          <EmptyState title="暂无 artifact 索引" text="任务完成后会自动索引日志、checkpoint、轨迹、分析表和报告，也可以手动刷新项目目录。" />
-        )}
-      </section>
-      <section className="panel span-3">
-        <TrajectoryIndexPanel
-          artifacts={artifactIndex?.artifacts ?? []}
-          trajectoryIndex={trajectoryIndex}
-          trajectoryChunk={trajectoryChunk}
-          indexTrajectory={indexTrajectory}
-          previewTrajectoryFrame={previewTrajectoryFrame}
-        />
-      </section>
-      <section className="panel span-3">
-        <TrajectoryAnalysisPackagePanel
-          analysisPackage={trajectoryAnalysisPackage}
-          generateTrajectoryAnalysisPackage={generateTrajectoryAnalysisPackage}
-        />
-      </section>
-      <section className="panel span-3">
-        <h3>分析曲线</h3>
-        <AnalysisChartGrid analysisResult={analysisResult} />
-      </section>
-      <section className="panel span-2">
-        <h3>GROMACS Run Package</h3>
+
+        <h4>GROMACS Run Package</h4>
         {runPackage ? (
           <div className="run-package">
             <dl className="definition-list">
@@ -5697,9 +5715,8 @@ function RunPanel({
         ) : (
           <EmptyState title="尚未生成 run package" text="点击队列化后会生成 GROMACS .mdp、命令序列和运行脚本。" />
         )}
-      </section>
-      <section className="panel">
-        <h3>生成文件</h3>
+
+        <h4>生成文件</h4>
         {generatedFiles.length > 0 ? (
           <div className="file-list">
             {generatedFiles.map((file) => (
@@ -5721,13 +5738,10 @@ function RunPanel({
         ) : (
           <EmptyState title="等待生成" text="文件会按 project/generated、runs、analysis 分区保存。" />
         )}
-      </section>
-      <section className="panel span-2">
-        <div className="panel-title-row">
-          <h3>原生参数文件编辑器</h3>
-          <button type="button" onClick={saveNativeFile} disabled={!nativeFile}>
-            保存
-          </button>
+
+        <div className="advanced-head-row">
+          <h4>原生参数文件编辑器</h4>
+          <button type="button" onClick={saveNativeFile} disabled={!nativeFile}>保存</button>
         </div>
         {nativeFile ? (
           <>
@@ -5747,13 +5761,11 @@ function RunPanel({
         ) : (
           <EmptyState title="尚未打开文件" text="在生成文件列表中选择 .mdp、.mdin、.conf、LAMMPS input 等原生文本文件进行编辑。" />
         )}
-      </section>
-      <section className="panel span-2">
-        <h3>SLURM 脚本</h3>
+
+        <h4>SLURM 脚本</h4>
         <CodeBlock value={slurmScript || "生成运行计划后显示 sbatch 脚本。"} />
-      </section>
-      <section className="panel">
-        <h3>资源摘要</h3>
+
+        <h4>资源摘要</h4>
         {plan ? (
           <dl className="definition-list">
             <div><dt>执行模式</dt><dd>{executionModeText[plan.resources.executionMode]}</dd></div>
@@ -5762,13 +5774,19 @@ function RunPanel({
             <div><dt>MPI</dt><dd>{plan.resources.mpiRanks}</dd></div>
           </dl>
         ) : null}
-      </section>
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <h3>GROMACS 日志解析</h3>
-          <button type="button" onClick={parseLogSample}>
-            解析日志
-          </button>
+
+        <div className="advanced-head-row">
+          <h4>SQLite 任务历史</h4>
+          <button type="button" onClick={refreshTaskRecords}>刷新</button>
+        </div>
+        <TaskRecordList records={taskRecords} />
+
+        <h4>断点续算</h4>
+        <ResumePlanCard resumePlan={resumePlan} onDiscover={discoverResumePlan} />
+
+        <div className="advanced-head-row">
+          <h4>GROMACS 日志解析（手动粘贴）</h4>
+          <button type="button" onClick={parseLogSample}>解析日志</button>
         </div>
         <div className="split">
           <label>
@@ -5800,7 +5818,7 @@ function RunPanel({
             <FailureAnalysisCard analysis={sampleFailureAnalysis} />
           </div>
         </div>
-      </section>
+      </details>
     </div>
   );
 }

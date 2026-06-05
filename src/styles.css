@@ -3647,8 +3647,9 @@ ul {
   overflow-wrap: anywhere;
 }
 
-/* ----- Remote in-app SSH: linear numbered flow ----- */
-.remote-flow {
+/* ----- Linear numbered flow (Remote / Workflow / Run) ----- */
+.remote-flow,
+.flow-steps {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -3666,6 +3667,10 @@ ul {
   display: flex;
   align-items: flex-start;
   gap: 12px;
+}
+.flow-step-head > button {
+  margin-left: auto;
+  align-self: center;
 }
 .flow-step-head h3 {
   margin: 0;
@@ -3832,4 +3837,14 @@ ul {
 }
 .flow-advanced > :first-of-type {
   margin-top: 0;
+}
+.advanced-head-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+}
+.advanced-head-row h4 {
+  margin: 0;
 }
