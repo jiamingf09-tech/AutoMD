@@ -2,6 +2,7 @@ mod analysis;
 mod artifacts;
 mod batch;
 mod build_runner;
+mod credentials;
 mod engine_adapters;
 mod engine_registry;
 mod models;
@@ -16,11 +17,13 @@ mod remote_helper;
 mod remote_runner;
 mod runtime;
 mod science_sidecar;
+mod ssh;
 mod structure_import;
 mod sysenv;
 mod task_runner;
 mod trajectory;
 
+use crate::credentials::CredentialStore;
 use crate::models::*;
 use crate::project_store::ProjectDatabase;
 use crate::task_runner::TaskManager;
@@ -36,6 +39,8 @@ struct AppState {
     plugin_root: PathBuf,
     engines_root: PathBuf,
     task_manager: TaskManager,
+    /// Session-only SSH password store (never persisted). See `credentials`.
+    credentials: credentials::SessionMemoryStore,
 }
 
 /// conda-forge package name for engines that can be installed with one click.
@@ -783,8 +788,9 @@ fn check_remote_helper(
     state: tauri::State<'_, AppState>,
 ) -> Result<RemoteHelperStatus, String> {
     let profile = remote_profile_by_id(&state, &profile_id)?;
+    let password = state.credentials.get(&profile_id);
     let existing = remote_helper_status_by_profile(&state, &profile_id).ok();
-    let checked = remote_helper::check_helper(&profile, existing.and_then(|status| status.install_path))
+    let checked = remote_helper::check_helper(&profile, existing.and_then(|status| status.install_path), password.as_deref())
         .unwrap_or_else(|error| RemoteHelperStatus {
             profile_id: profile.id.clone(),
             helper_version: None,
@@ -812,7 +818,8 @@ fn install_remote_helper(
     state: tauri::State<'_, AppState>,
 ) -> Result<RemoteHelperStatus, String> {
     let profile = remote_profile_by_id(&state, &profile_id)?;
-    let installed = remote_helper::install_helper(&profile).unwrap_or_else(|error| RemoteHelperStatus {
+    let password = state.credentials.get(&profile_id);
+    let installed = remote_helper::install_helper(&profile, password.as_deref()).unwrap_or_else(|error| RemoteHelperStatus {
         profile_id: profile.id.clone(),
         helper_version: None,
         status: if error.to_string().to_ascii_lowercase().contains("permission") {
@@ -853,6 +860,7 @@ fn scan_engines_on_target(
                 .ok_or_else(|| "远程 helper 缺少安装路径。".to_string())?;
             let target_id = format!("remote:{profile_id}");
             let target_label = profile.name.clone();
+            let password = state.credentials.get(&profile_id);
             let mut found_records = Vec::new();
             for engine in engine_registry::detect_all() {
                 if let Some(platform) = &helper_status.platform {
@@ -860,7 +868,7 @@ fn scan_engines_on_target(
                         continue;
                     }
                 }
-                if let Some(probe) = remote_helper::scan_engine(&profile, install_path, &engine.executable_names)
+                if let Some(probe) = remote_helper::scan_engine(&profile, install_path, &engine.executable_names, password.as_deref())
                     .map_err(|error| error.to_string())?
                 {
                     found_records.push(EngineInstallationRecord {
@@ -1147,12 +1155,14 @@ async fn install_or_build_engine(
                     return Err(format!("{} 不支持该远程平台 {}。", capability.name, platform_label(platform)));
                 }
             }
+            let password = state.credentials.get(&profile_id);
             let probe = remote_helper::install_engine_with_helper(
                 &profile,
                 install_path,
                 &request.engine_id,
                 package,
                 &capability.executable_names,
+                password.as_deref(),
             )
             .map_err(|error| error.to_string())?;
             let record = EngineInstallationRecord {
@@ -1214,12 +1224,13 @@ async fn install_or_build_engine(
                     warnings,
                 });
             }
+            let password = state.credentials.get(&profile_id);
             let build = recipes::build_recipe(request.build_options.clone());
-            let stdout = remote_helper::run_build_engine_with_helper(&profile, install_path, &request.engine_id, &build.script)
+            let stdout = remote_helper::run_build_engine_with_helper(&profile, install_path, &request.engine_id, &build.script, password.as_deref())
                 .map_err(|error| error.to_string())?;
             let capability = engine_registry::detect_engine_by_id(&request.engine_id)
                 .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
-            let record = remote_helper::scan_engine(&profile, install_path, &capability.executable_names)
+            let record = remote_helper::scan_engine(&profile, install_path, &capability.executable_names, password.as_deref())
                 .map_err(|error| error.to_string())?
                 .map(|probe| EngineInstallationRecord {
                     target_kind: EngineTargetKind::Remote,
@@ -1840,6 +1851,560 @@ fn run_remote_workflow_step(request: RemoteWorkflowStepRequest) -> Result<Remote
     remote_runner::run_remote_workflow_step(request).map_err(|error| error.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// In-app SSH/HPC: connect → (helper) → preflight → submit → monitor → fetch.
+// Every command runs the blocking ssh/rsync work on the blocking pool so the UI
+// thread never freezes (same pattern as install_engine). The raw command export
+// (generate_remote_execution_package etc.) stays as an advanced fallback.
+// ---------------------------------------------------------------------------
+
+/// The scheduler submit script's path, relative to the remote workdir.
+fn remote_scheduler_filename(scheduler: &ExecutionMode) -> &'static str {
+    match scheduler {
+        ExecutionMode::Slurm => "remote/submit.slurm",
+        ExecutionMode::Pbs => "remote/submit.pbs",
+        ExecutionMode::Lsf => "remote/submit.lsf",
+        _ => "remote/run-ssh.sh",
+    }
+}
+
+/// Inner remote command (no `ssh host` wrapper) that submits the job. Workdir is
+/// left unquoted so the remote shell expands `$USER`-style paths.
+fn remote_submit_inner(scheduler: &ExecutionMode, workdir: &str, script: &str) -> String {
+    match scheduler {
+        ExecutionMode::Slurm => format!("cd {workdir} && sbatch --parsable {script}"),
+        ExecutionMode::Pbs => format!("cd {workdir} && qsub {script}"),
+        ExecutionMode::Lsf => format!("cd {workdir} && bsub < {script}"),
+        _ => format!(
+            "cd {workdir} && mkdir -p logs && nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err & echo $!"
+        ),
+    }
+}
+
+fn remote_status_inner(scheduler: &ExecutionMode, job_id: &str) -> String {
+    match scheduler {
+        ExecutionMode::Slurm => format!("squeue -j {job_id} 2>/dev/null || sacct -j {job_id} --format=JobID,State,Elapsed -n 2>/dev/null"),
+        ExecutionMode::Pbs => format!("qstat {job_id}"),
+        ExecutionMode::Lsf => format!("bjobs {job_id}"),
+        _ => format!("ps -p {job_id} -o pid,etime,cmd 2>/dev/null || echo 'not-running'"),
+    }
+}
+
+fn remote_cancel_inner(scheduler: &ExecutionMode, job_id: &str) -> String {
+    match scheduler {
+        ExecutionMode::Slurm => format!("scancel {job_id}"),
+        ExecutionMode::Pbs => format!("qdel {job_id}"),
+        ExecutionMode::Lsf => format!("bkill {job_id}"),
+        _ => format!("kill {job_id}"),
+    }
+}
+
+fn remote_tail_inner(workdir: &str) -> String {
+    format!("cd {workdir} 2>/dev/null && tail -n 200 logs/*.out logs/*.err runs/*/*.log analysis/*.log 2>/dev/null || true")
+}
+
+/// Resolve the effective password for a profile: the one passed in, else the
+/// session store (set during a successful connection test). Empty → None.
+fn resolve_remote_password(
+    state: &tauri::State<'_, AppState>,
+    profile: &RemoteProfile,
+    explicit: Option<String>,
+) -> Option<String> {
+    explicit
+        .filter(|value| !value.is_empty())
+        .or_else(|| state.credentials.get(&profile.id))
+}
+
+#[tauri::command]
+async fn test_remote_connection(
+    profile: RemoteProfile,
+    password: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteConnectionTest, String> {
+    let host = profile.host.clone();
+    if host.trim().is_empty() {
+        return Err("请先填写主机/IP。".to_string());
+    }
+    let password_for_probe = resolve_remote_password(&state, &profile, password.clone());
+    if profile.auth_method == RemoteAuthMethod::Password && password_for_probe.is_none() {
+        return Err("该 profile 使用密码认证，请输入密码后再测试连接。".to_string());
+    }
+    let user = {
+        let trimmed = profile.username.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    let probe_profile = profile.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        // One non-retrying probe: identity + uname + scheduler + hostname.
+        ssh::run_remote(
+            &probe_profile,
+            password_for_probe.as_deref(),
+            "echo automd-ok; uname -srm; echo ---AUTOMD---; (command -v sbatch || command -v qsub || command -v bsub) 2>/dev/null; echo ---AUTOMD---; hostname 2>/dev/null",
+        )
+    })
+    .await
+    .map_err(|error| format!("连接任务执行失败：{error}"))?;
+
+    let test = match outcome {
+        Ok(out) => build_connection_test(&host, user, &out),
+        Err(error) => RemoteConnectionTest {
+            ok: false,
+            user: None,
+            host: host.clone(),
+            os: None,
+            arch: None,
+            hostname: None,
+            scheduler: None,
+            linux: false,
+            message: error,
+            checked_at: chrono::Utc::now(),
+        },
+    };
+
+    // Cache the password for this session only on success, so the helper /
+    // submit / poll steps can reuse it without re-prompting.
+    if test.ok && profile.auth_method == RemoteAuthMethod::Password {
+        if let Some(pw) = password.filter(|value| !value.is_empty()) {
+            state.credentials.put(&profile.id, &pw);
+        }
+    }
+    Ok(test)
+}
+
+fn build_connection_test(host: &str, user: Option<String>, out: &ssh::SshOutcome) -> RemoteConnectionTest {
+    let stdout = out.stdout.clone();
+    let ok = out.success && stdout.contains("automd-ok");
+    if !ok {
+        return RemoteConnectionTest {
+            ok: false,
+            user,
+            host: host.to_string(),
+            os: None,
+            arch: None,
+            hostname: None,
+            scheduler: None,
+            linux: false,
+            message: ssh::classify_connection_error(&out.combined()),
+            checked_at: chrono::Utc::now(),
+        };
+    }
+    let sections: Vec<&str> = stdout.split("---AUTOMD---").collect();
+    let mut os = None;
+    let mut arch = None;
+    let mut linux = false;
+    if let Some(first) = sections.first() {
+        for line in first.lines() {
+            let line = line.trim();
+            if line.is_empty() || line == "automd-ok" {
+                continue;
+            }
+            // `uname -srm` => "Linux 5.15.0-… x86_64".
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(kernel) = parts.first() {
+                os = Some(kernel.to_string());
+                linux = kernel.eq_ignore_ascii_case("Linux");
+            }
+            if let Some(machine) = parts.last() {
+                arch = Some(machine.to_string());
+            }
+        }
+    }
+    let scheduler = sections.get(1).and_then(|section| {
+        let text = section.to_ascii_lowercase();
+        if text.contains("sbatch") {
+            Some(ExecutionMode::Slurm)
+        } else if text.contains("qsub") {
+            Some(ExecutionMode::Pbs)
+        } else if text.contains("bsub") {
+            Some(ExecutionMode::Lsf)
+        } else {
+            None
+        }
+    });
+    let hostname = sections.get(2).and_then(|section| {
+        section
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(ToString::to_string)
+    });
+    let where_at = match &user {
+        Some(u) => format!("{u}@{host}"),
+        None => host.to_string(),
+    };
+    let sched_label = match &scheduler {
+        Some(ExecutionMode::Slurm) => "检测到 SLURM",
+        Some(ExecutionMode::Pbs) => "检测到 PBS",
+        Some(ExecutionMode::Lsf) => "检测到 LSF",
+        _ => "未检测到调度器（可用 SSH 直接运行）",
+    };
+    let os_label = os.clone().unwrap_or_else(|| "未知系统".to_string());
+    let message = if linux {
+        format!("已连接 {where_at} · {os_label} · {sched_label}")
+    } else {
+        format!("已连接 {where_at} · {os_label}（非 Linux 远程：检测可用，但提交/同步/编译不保证同等体验）· {sched_label}")
+    };
+    RemoteConnectionTest {
+        ok: true,
+        user,
+        host: host.to_string(),
+        os,
+        arch,
+        hostname,
+        scheduler,
+        linux,
+        message,
+        checked_at: chrono::Utc::now(),
+    }
+}
+
+/// Build the 7-point preflight checklist. Mixes cheap DB/plan checks with two
+/// live ssh probes (workdir writable, scheduler present).
+async fn run_remote_preflight(
+    profile: &RemoteProfile,
+    plan: &SimulationPlan,
+    project_id: &Option<String>,
+    project_path: &Option<String>,
+    structure_id: &Option<String>,
+    password: Option<String>,
+    state: &tauri::State<'_, AppState>,
+) -> RemoteSubmitPreflight {
+    let mut checks = Vec::new();
+
+    let has_project = project_id.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false)
+        && project_path.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false);
+    checks.push(PreflightCheck {
+        id: "project".to_string(),
+        label: "已选择项目".to_string(),
+        ok: has_project,
+        detail: if has_project { "已绑定当前项目目录。".to_string() } else { "请先在“项目”页创建或打开一个项目。".to_string() },
+    });
+
+    let has_structure = structure_id.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false)
+        && require_plan_structure(plan).is_ok();
+    checks.push(PreflightCheck {
+        id: "structure".to_string(),
+        label: "已选择结构".to_string(),
+        ok: has_structure,
+        detail: if has_structure { "当前计划已绑定一个结构。".to_string() } else { "请先在“项目”页导入并选中一个结构（无结构不允许提交）。".to_string() },
+    });
+
+    let has_stage = plan.stages.iter().any(|stage| stage.enabled);
+    checks.push(PreflightCheck {
+        id: "plan".to_string(),
+        label: "运行计划就绪".to_string(),
+        ok: has_stage,
+        detail: if has_stage { format!("引擎 {} · 至少一个阶段已启用。", plan.engine_id) } else { "当前计划没有启用任何阶段，请到“流程”页配置。".to_string() },
+    });
+
+    let target_id = format!("remote:{}", profile.id);
+    let engine_ok = {
+        match state.db.lock() {
+            Ok(db) => db
+                .list_engine_installations()
+                .map(|records| {
+                    records.iter().any(|record| {
+                        record.target_id == target_id && record.engine_id == plan.engine_id
+                    })
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    };
+    checks.push(PreflightCheck {
+        id: "engine".to_string(),
+        label: "目标设备已有该引擎".to_string(),
+        ok: engine_ok,
+        detail: if engine_ok { format!("{} 已在目标设备登记。", plan.engine_id) } else { format!("目标设备尚未检测到 {}，请先用远程助手扫描/安装。", plan.engine_id) },
+    });
+
+    let helper_ready = remote_helper_status_by_profile(state, &profile.id)
+        .map(|status| matches!(status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated))
+        .unwrap_or(false);
+    checks.push(PreflightCheck {
+        id: "helper".to_string(),
+        label: "远程助手已安装".to_string(),
+        ok: helper_ready,
+        detail: if helper_ready { "远程助手就绪，可自动扫描/监控。".to_string() } else { "远程助手未安装。可在上一步安装，或用“无 helper 高级直连”覆盖。".to_string() },
+    });
+
+    // Live probe: workdir writable + scheduler present.
+    let password = resolve_remote_password(state, profile, password);
+    let probe_profile = profile.clone();
+    let workdir = profile.workdir.clone();
+    let probe_cmd = format!(
+        "mkdir -p {workdir} 2>/dev/null && test -w {workdir} && echo WRITABLE; echo ---AUTOMD---; (command -v sbatch || command -v qsub || command -v bsub) 2>/dev/null"
+    );
+    let probe = tauri::async_runtime::spawn_blocking(move || {
+        ssh::run_remote(&probe_profile, password.as_deref(), &probe_cmd)
+    })
+    .await
+    .ok()
+    .and_then(|result| result.ok());
+
+    let (workdir_ok, workdir_detail, scheduler_detected) = match &probe {
+        Some(out) if out.success => {
+            let writable = out.stdout.contains("WRITABLE");
+            let sched_section = out.stdout.split("---AUTOMD---").nth(1).unwrap_or("").to_ascii_lowercase();
+            let detected = sched_section.contains("sbatch")
+                || sched_section.contains("qsub")
+                || sched_section.contains("bsub");
+            (
+                writable,
+                if writable { format!("{} 可写。", profile.workdir) } else { format!("{} 不可写或无法创建。", profile.workdir) },
+                detected,
+            )
+        }
+        Some(out) => (false, ssh::classify_connection_error(&out.combined()), false),
+        None => (false, "无法连接以检查工作目录（请先在第1步测试连接）。".to_string(), false),
+    };
+    checks.push(PreflightCheck {
+        id: "workdir".to_string(),
+        label: "远程工作目录可写".to_string(),
+        ok: workdir_ok,
+        detail: workdir_detail,
+    });
+
+    let scheduler_ok = profile.scheduler == ExecutionMode::Ssh || scheduler_detected;
+    checks.push(PreflightCheck {
+        id: "scheduler".to_string(),
+        label: "调度器可用 / SSH 直接运行".to_string(),
+        ok: scheduler_ok,
+        detail: if profile.scheduler == ExecutionMode::Ssh {
+            "使用 SSH direct 模式，后台直接运行。".to_string()
+        } else if scheduler_detected {
+            "目标设备检测到匹配的调度器命令。".to_string()
+        } else {
+            "未检测到所选调度器命令，请改用 SSH direct 或更换调度器。".to_string()
+        },
+    });
+
+    let all_ok = checks.iter().all(|check| check.ok);
+    // Overridable only when the *single* failing check is the helper one.
+    let can_override = checks.iter().all(|check| check.ok || check.id == "helper");
+    RemoteSubmitPreflight { checks, all_ok, can_override }
+}
+
+#[tauri::command]
+async fn preflight_remote_submit(
+    request: RemotePreflightRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteSubmitPreflight, String> {
+    Ok(run_remote_preflight(
+        &request.profile,
+        &request.plan,
+        &request.project_id,
+        &request.project_path,
+        &request.structure_id,
+        request.password,
+        &state,
+    )
+    .await)
+}
+
+#[tauri::command]
+async fn submit_remote_job(
+    request: RemoteSubmitRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteJobSubmission, String> {
+    // Hard gate: never submit without a structure (closes the "project but no
+    // structure" hole). Engine/helper are required unless the advanced
+    // no-helper override is explicitly set.
+    require_plan_structure(&request.plan)?;
+    let project_path = request
+        .project_path
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "缺少项目路径：请先选择当前项目。".to_string())?;
+
+    let preflight = run_remote_preflight(
+        &request.profile,
+        &request.plan,
+        &request.project_id,
+        &request.project_path,
+        &request.structure_id,
+        request.password.clone(),
+        &state,
+    )
+    .await;
+    if !preflight.all_ok && !(preflight.can_override && request.allow_no_helper) {
+        let failing: Vec<String> = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.ok)
+            .map(|check| format!("• {}：{}", check.label, check.detail))
+            .collect();
+        return Err(format!("预检未通过，已阻止提交：\n{}", failing.join("\n")));
+    }
+
+    let profile = request.profile.clone();
+    let plan = request.plan.clone();
+    let password = resolve_remote_password(&state, &profile, request.password.clone());
+    let scheduler = profile.scheduler.clone();
+    let engine_id = plan.engine_id.clone();
+
+    let submission = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSubmission, String> {
+        // 1. Generate the remote package (scheduler script + sync scripts).
+        let package = recipes::remote_execution_package(RemoteExecutionRequest {
+            plan: plan.clone(),
+            profile: profile.clone(),
+            local_project_path: Some(project_path.clone()),
+            include_submit: true,
+        });
+        // 2. Materialize the generated files into the local project staging dir.
+        let project_root = std::path::Path::new(&project_path);
+        for file in &package.files {
+            let dest = project_root.join(&file.path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| format!("写入远程脚本失败：{error}"))?;
+            }
+            std::fs::write(&dest, &file.contents).map_err(|error| format!("写入 {} 失败：{error}", file.path))?;
+        }
+        // 3. Create the remote workdir and upload the project.
+        let mkdir = ssh::run_remote(&profile, password.as_deref(), &format!("mkdir -p {}", package.remote_workdir))?;
+        if !mkdir.success {
+            return Err(format!("创建远程目录失败：{}", ssh::classify_connection_error(&mkdir.combined())));
+        }
+        let upload = ssh::rsync_up(&profile, password.as_deref(), &project_path, &package.remote_workdir)?;
+        if !upload.success {
+            return Err(format!("上传失败：{}", upload.combined()));
+        }
+        let files_uploaded = upload
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with("sending") && !line.contains("total size"))
+            .count() as u32;
+        // 4. Submit.
+        let script = remote_scheduler_filename(&scheduler);
+        let submit_cmd = remote_submit_inner(&scheduler, &package.remote_workdir, script);
+        let submit = ssh::run_remote(&profile, password.as_deref(), &submit_cmd)?;
+        if !submit.success {
+            return Err(format!("提交失败：{}", submit.combined()));
+        }
+        // 5. Parse the job id with the existing monitor parser.
+        let snapshot = remote_monitor::parse_remote_status(RemoteStatusParseRequest {
+            engine_id: engine_id.clone(),
+            scheduler: scheduler.clone(),
+            submit_output: Some(submit.stdout.clone()),
+            status_output: None,
+            log_output: None,
+        });
+        Ok(RemoteJobSubmission {
+            job_id: snapshot.job_id,
+            scheduler: scheduler.clone(),
+            submit_output: submit.combined().trim().to_string(),
+            remote_run_dir: package.remote_workdir.clone(),
+            remote_workdir: package.remote_workdir.clone(),
+            files_uploaded,
+            warnings: package.warnings,
+            submitted_at: chrono::Utc::now(),
+        })
+    })
+    .await
+    .map_err(|error| format!("提交任务执行失败：{error}"))??;
+
+    Ok(submission)
+}
+
+#[tauri::command]
+async fn poll_remote_job(
+    request: RemotePollRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteJobSnapshot, String> {
+    let profile = request.profile.clone();
+    let password = resolve_remote_password(&state, &profile, request.password.clone());
+    let scheduler = request.scheduler.clone();
+    let engine_id = request.engine_id.clone();
+    let workdir = request.remote_run_dir.clone();
+    let job_id = request.job_id.clone().unwrap_or_default();
+
+    let snapshot = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSnapshot, String> {
+        let status_output = if job_id.is_empty() {
+            None
+        } else {
+            ssh::run_remote(&profile, password.as_deref(), &remote_status_inner(&scheduler, &job_id))
+                .ok()
+                .map(|out| out.combined())
+        };
+        let log_output = ssh::run_remote(&profile, password.as_deref(), &remote_tail_inner(&workdir))
+            .ok()
+            .map(|out| out.combined());
+        Ok(remote_monitor::parse_remote_status(RemoteStatusParseRequest {
+            engine_id,
+            scheduler,
+            submit_output: None,
+            status_output,
+            log_output,
+        }))
+    })
+    .await
+    .map_err(|error| format!("状态查询执行失败：{error}"))??;
+
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn cancel_remote_job(
+    request: RemotePollRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let profile = request.profile.clone();
+    let password = resolve_remote_password(&state, &profile, request.password.clone());
+    let scheduler = request.scheduler.clone();
+    let job_id = request
+        .job_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "缺少 job id / PID。".to_string())?;
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        ssh::run_remote(&profile, password.as_deref(), &remote_cancel_inner(&scheduler, &job_id))
+    })
+    .await
+    .map_err(|error| format!("取消任务执行失败：{error}"))?;
+    match outcome {
+        Ok(out) if out.success => Ok(format!("已发送取消命令：{}", out.combined().trim())),
+        Ok(out) => Err(format!("取消失败：{}", out.combined())),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+async fn fetch_remote_results(
+    request: RemoteFetchRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteFetchResult, String> {
+    let profile = request.profile.clone();
+    let password = resolve_remote_password(&state, &profile, request.password.clone());
+    let remote_dir = request.remote_run_dir.clone();
+    let local_dir = request.local_project_path.trim().to_string();
+    if local_dir.is_empty() {
+        return Err("缺少本地项目路径。".to_string());
+    }
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteFetchResult, String> {
+        std::fs::create_dir_all(&local_dir).map_err(|error| format!("创建本地目录失败：{error}"))?;
+        let download = ssh::rsync_down(&profile, password.as_deref(), &remote_dir, &local_dir)?;
+        if !download.success {
+            return Err(format!("下载失败：{}", download.combined()));
+        }
+        let files_downloaded = download
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with("receiving") && !line.contains("total size"))
+            .count() as u32;
+        Ok(RemoteFetchResult {
+            files_downloaded,
+            local_dir: local_dir.clone(),
+            message: format!("已从 {remote_dir} 回收结果到本地项目。"),
+            warnings: Vec::new(),
+        })
+    })
+    .await
+    .map_err(|error| format!("回收任务执行失败：{error}"))??;
+
+    Ok(result)
+}
+
 #[tauri::command]
 fn generate_container_recipe(engine_id: String) -> ContainerRecipe {
     recipes::container_recipe(&engine_id)
@@ -2064,6 +2629,7 @@ pub fn run() {
                 plugin_root,
                 engines_root,
                 task_manager: TaskManager::new(task_resource_root),
+                credentials: credentials::SessionMemoryStore::new(),
             });
 
             // Native macOS menu bar. Custom items emit a "menu-action" event that
@@ -2183,6 +2749,12 @@ pub fn run() {
             generate_remote_execution_package,
             parse_remote_job_status,
             run_remote_workflow_step,
+            test_remote_connection,
+            preflight_remote_submit,
+            submit_remote_job,
+            poll_remote_job,
+            cancel_remote_job,
+            fetch_remote_results,
             generate_container_recipe,
             generate_build_recipe,
             export_recipe_package,

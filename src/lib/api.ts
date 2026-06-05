@@ -45,11 +45,19 @@ import type {
   ProjectTextFileRequest,
   ProjectTextFileWriteRequest,
   ProjectSummary,
+  RemoteConnectionTest,
   RemoteExecutionPackage,
   RemoteExecutionRequest,
+  RemoteFetchRequest,
+  RemoteFetchResult,
   RemoteHelperStatus,
   RemoteJobSnapshot,
+  RemoteJobSubmission,
+  RemotePollRequest,
+  RemotePreflightRequest,
   RemoteProfile,
+  RemoteSubmitPreflight,
+  RemoteSubmitRequest,
   RemoteWorkflowStepRequest,
   RemoteWorkflowStepResult,
   RecipeExportRequest,
@@ -89,8 +97,11 @@ import {
   mockCreateProject,
   mockRecipeExportResult,
   mockDiagnostics,
+  mockRemoteConnectionTest,
   mockRemoteExecutionPackage,
   mockRemoteJobSnapshot,
+  mockRemotePreflight,
+  mockRemoteSubmission,
   mockRemoteWorkflowStep,
   mockRemoteProfiles,
   mockEngines,
@@ -371,6 +382,33 @@ export const api = {
     call<RemoteJobSnapshot>("parse_remote_job_status", { request }, () => mockRemoteJobSnapshot(request)),
   runRemoteWorkflowStep: (request: RemoteWorkflowStepRequest) =>
     call<RemoteWorkflowStepResult>("run_remote_workflow_step", { request }, () => mockRemoteWorkflowStep(request)),
+  testRemoteConnection: (profile: RemoteProfile, password?: string | null) =>
+    call<RemoteConnectionTest>("test_remote_connection", { profile, password: password ?? null }, () =>
+      mockRemoteConnectionTest(profile)
+    ),
+  preflightRemoteSubmit: (request: RemotePreflightRequest) =>
+    call<RemoteSubmitPreflight>("preflight_remote_submit", { request }, () => mockRemotePreflight(request)),
+  submitRemoteJob: (request: RemoteSubmitRequest) =>
+    call<RemoteJobSubmission>("submit_remote_job", { request }, () => mockRemoteSubmission(request)),
+  pollRemoteJob: (request: RemotePollRequest) =>
+    call<RemoteJobSnapshot>("poll_remote_job", { request }, () =>
+      mockRemoteJobSnapshot({
+        engineId: request.engineId,
+        scheduler: request.scheduler,
+        submitOutput: null,
+        statusOutput: null,
+        logOutput: null
+      })
+    ),
+  cancelRemoteJob: (request: RemotePollRequest) =>
+    call<string>("cancel_remote_job", { request }, () => "Web 预览模式：已模拟取消。"),
+  fetchRemoteResults: (request: RemoteFetchRequest) =>
+    call<RemoteFetchResult>("fetch_remote_results", { request }, () => ({
+      filesDownloaded: 0,
+      localDir: request.localProjectPath,
+      message: "Web 预览模式：未实际下载结果。",
+      warnings: []
+    })),
   containerRecipe: (engineId: string) =>
     call<ContainerRecipe>("generate_container_recipe", { engineId }, () => mockContainerRecipe(engineId)),
   buildRecipe: (options: BuildRecipeOptions) =>

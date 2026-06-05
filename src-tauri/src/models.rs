@@ -743,16 +743,146 @@ pub struct TaskRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How AutoMD authenticates the SSH connection to a remote target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteAuthMethod {
+    /// Use the system SSH agent / `~/.ssh/config` (no in-app credentials).
+    #[default]
+    Agent,
+    /// Use an explicit private-key file (`identity_file`).
+    Key,
+    /// Username + password, fed to ssh via a PTY. Session-only, never persisted.
+    Password,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteProfile {
     pub id: String,
     pub name: String,
     pub host: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub auth_method: RemoteAuthMethod,
+    #[serde(default)]
+    pub identity_file: Option<String>,
     pub scheduler: ExecutionMode,
     pub workdir: String,
     pub module_load: Vec<String>,
     pub default_queue: Option<String>,
+}
+
+/// Result of `test_remote_connection`: a single, non-retrying probe that reports
+/// who/where we connected as and what scheduler the login node exposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteConnectionTest {
+    pub ok: bool,
+    pub user: Option<String>,
+    pub host: String,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub hostname: Option<String>,
+    /// Detected scheduler on the target (slurm/pbs/lsf), or `Ssh` for none found.
+    pub scheduler: Option<ExecutionMode>,
+    /// True when the remote `uname` reports a Linux target (full support).
+    pub linux: bool,
+    pub message: String,
+    pub checked_at: DateTime<Utc>,
+}
+
+/// One line item in the remote-submit preflight checklist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightCheck {
+    pub id: String,
+    pub label: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSubmitPreflight {
+    pub checks: Vec<PreflightCheck>,
+    pub all_ok: bool,
+    /// True when the only failing check is "helper installed" (overridable via
+    /// the advanced no-helper direct-submit mode).
+    pub can_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePreflightRequest {
+    pub profile: RemoteProfile,
+    pub plan: SimulationPlan,
+    pub project_id: Option<String>,
+    pub project_path: Option<String>,
+    pub structure_id: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSubmitRequest {
+    pub profile: RemoteProfile,
+    pub plan: SimulationPlan,
+    pub project_id: Option<String>,
+    pub project_path: Option<String>,
+    pub structure_id: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub allow_no_helper: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteJobSubmission {
+    pub job_id: Option<String>,
+    pub scheduler: ExecutionMode,
+    pub submit_output: String,
+    pub remote_run_dir: String,
+    pub remote_workdir: String,
+    pub files_uploaded: u32,
+    pub warnings: Vec<String>,
+    pub submitted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePollRequest {
+    pub profile: RemoteProfile,
+    pub job_id: Option<String>,
+    pub scheduler: ExecutionMode,
+    pub engine_id: String,
+    pub remote_run_dir: String,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFetchRequest {
+    pub profile: RemoteProfile,
+    pub remote_run_dir: String,
+    pub local_project_path: String,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFetchResult {
+    pub files_downloaded: u32,
+    pub local_dir: String,
+    pub message: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

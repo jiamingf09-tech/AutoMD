@@ -2,8 +2,6 @@ use crate::models::*;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::Write;
-use std::process::{Command, Stdio};
 use thiserror::Error;
 
 pub const HELPER_VERSION: &str = "0.1.0";
@@ -243,7 +241,10 @@ if ($Command -eq "scan-engines" -or $Command -eq "find-executable") {
 "#
 }
 
-pub fn install_helper(profile: &RemoteProfile) -> Result<RemoteHelperStatus, RemoteHelperError> {
+pub fn install_helper(
+    profile: &RemoteProfile,
+    password: Option<&str>,
+) -> Result<RemoteHelperStatus, RemoteHelperError> {
     let install_path = default_install_path(profile);
     let bash_path = format!("{install_path}/automd-helper.sh");
     let ps_path = format!("{install_path}/automd-helper.ps1");
@@ -252,17 +253,17 @@ pub fn install_helper(profile: &RemoteProfile) -> Result<RemoteHelperStatus, Rem
         dir = shell_quote(&install_path),
         bash = shell_quote(&bash_path)
     );
-    match ssh_with_stdin(&profile.host, &bash_cmd, bash_helper_script()) {
-        Ok(_) => check_helper(profile, Some(install_path)),
+    match ssh_with_stdin(profile, password, &bash_cmd, bash_helper_script()) {
+        Ok(_) => check_helper(profile, Some(install_path), password),
         Err(bash_error) => {
             let ps_cmd = format!(
                 "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$d='{dir}'; $p='{path}'; New-Item -ItemType Directory -Force -Path $d | Out-Null; [Console]::In.ReadToEnd() | Set-Content -Encoding UTF8 -Path $p\"",
                 dir = ps_escape(&install_path),
                 path = ps_escape(&ps_path)
             );
-            ssh_with_stdin(&profile.host, &ps_cmd, powershell_helper_script())
+            ssh_with_stdin(profile, password, &ps_cmd, powershell_helper_script())
                 .map_err(|ps_error| RemoteHelperError::Command(format!("{bash_error}; {ps_error}")))?;
-            check_helper(profile, Some(install_path))
+            check_helper(profile, Some(install_path), password)
         }
     }
 }
@@ -270,20 +271,21 @@ pub fn install_helper(profile: &RemoteProfile) -> Result<RemoteHelperStatus, Rem
 pub fn check_helper(
     profile: &RemoteProfile,
     install_path: Option<String>,
+    password: Option<&str>,
 ) -> Result<RemoteHelperStatus, RemoteHelperError> {
     let install_path = install_path.unwrap_or_else(|| default_install_path(profile));
     let bash_cmd = format!(
         "bash {}/automd-helper.sh probe",
         shell_quote(&install_path)
     );
-    let output = match ssh_capture(&profile.host, &bash_cmd) {
+    let output = match ssh_capture(profile, password, &bash_cmd) {
         Ok(output) => output,
         Err(bash_error) => {
             let ps_cmd = format!(
                 "powershell -NoProfile -ExecutionPolicy Bypass -File {} probe",
                 ps_remote_quote(&format!("{install_path}/automd-helper.ps1"))
             );
-            ssh_capture(&profile.host, &ps_cmd)
+            ssh_capture(profile, password, &ps_cmd)
                 .map_err(|ps_error| RemoteHelperError::Command(format!("{bash_error}; {ps_error}")))?
         }
     };
@@ -294,6 +296,7 @@ pub fn scan_engine(
     profile: &RemoteProfile,
     install_path: &str,
     commands: &[String],
+    password: Option<&str>,
 ) -> Result<Option<RemoteEngineProbe>, RemoteHelperError> {
     let args = commands
         .iter()
@@ -305,7 +308,7 @@ pub fn scan_engine(
         shell_quote(install_path),
         args
     );
-    let output = match ssh_capture(&profile.host, &bash_cmd) {
+    let output = match ssh_capture(profile, password, &bash_cmd) {
         Ok(output) => output,
         Err(_) => {
             let ps_args = commands
@@ -318,7 +321,7 @@ pub fn scan_engine(
                 ps_remote_quote(&format!("{install_path}/automd-helper.ps1")),
                 ps_args
             );
-            ssh_capture(&profile.host, &ps_cmd)?
+            ssh_capture(profile, password, &ps_cmd)?
         }
     };
     let parsed: HelperScanOutput = serde_json::from_str(output.trim())?;
@@ -339,6 +342,7 @@ pub fn install_engine_with_helper(
     engine_id: &str,
     package: &str,
     executable_names: &[String],
+    password: Option<&str>,
 ) -> Result<RemoteEngineProbe, RemoteHelperError> {
     let args = executable_names
         .iter()
@@ -352,7 +356,7 @@ pub fn install_engine_with_helper(
         shell_quote(package),
         args
     );
-    let output = ssh_capture(&profile.host, &command)?;
+    let output = ssh_capture(profile, password, &command)?;
     let parsed: HelperInstallOutput = serde_json::from_str(output.trim())?;
     if parsed.status.as_deref() == Some("failed") {
         return Err(RemoteHelperError::Command(
@@ -360,7 +364,7 @@ pub fn install_engine_with_helper(
         ));
     }
     let location = parsed.path.ok_or(RemoteHelperError::MissingInstallPath)?;
-    let probe = scan_engine(profile, install_path, executable_names)?.unwrap_or(RemoteEngineProbe {
+    let probe = scan_engine(profile, install_path, executable_names, password)?.unwrap_or(RemoteEngineProbe {
         location,
         version: parsed.version,
         platform: None,
@@ -374,13 +378,14 @@ pub fn run_build_engine_with_helper(
     install_path: &str,
     engine_id: &str,
     script: &str,
+    password: Option<&str>,
 ) -> Result<String, RemoteHelperError> {
     let command = format!(
         "bash {}/automd-helper.sh build-engine {}",
         shell_quote(install_path),
         shell_quote(engine_id)
     );
-    ssh_with_stdin(&profile.host, &command, script)
+    ssh_with_stdin(profile, password, &command, script)
 }
 
 fn parse_probe(profile: &RemoteProfile, install_path: &str, output: &str) -> Result<RemoteHelperStatus, RemoteHelperError> {
@@ -404,39 +409,35 @@ fn parse_probe(profile: &RemoteProfile, install_path: &str, output: &str) -> Res
     })
 }
 
-fn ssh_capture(host: &str, remote_command: &str) -> Result<String, RemoteHelperError> {
-    let output = Command::new("ssh")
-        .arg(host)
-        .arg(remote_command)
-        .output()
-        .map_err(|error| RemoteHelperError::Command(format!("无法启动 ssh：{error}")))?;
-    if !output.status.success() {
-        return Err(RemoteHelperError::Command(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+fn ssh_capture(
+    profile: &RemoteProfile,
+    password: Option<&str>,
+    remote_command: &str,
+) -> Result<String, RemoteHelperError> {
+    let outcome = crate::ssh::run_remote(profile, password, remote_command)
+        .map_err(RemoteHelperError::Command)?;
+    if !outcome.success {
+        return Err(RemoteHelperError::Command(
+            crate::ssh::classify_connection_error(&outcome.combined()),
+        ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(outcome.stdout)
 }
 
-fn ssh_with_stdin(host: &str, remote_command: &str, stdin_text: &str) -> Result<String, RemoteHelperError> {
-    let mut child = Command::new("ssh")
-        .arg(host)
-        .arg(remote_command)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| RemoteHelperError::Command(format!("无法启动 ssh：{error}")))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(stdin_text.as_bytes())
-            .map_err(|error| RemoteHelperError::Command(format!("无法写入 helper：{error}")))?;
+fn ssh_with_stdin(
+    profile: &RemoteProfile,
+    password: Option<&str>,
+    remote_command: &str,
+    stdin_text: &str,
+) -> Result<String, RemoteHelperError> {
+    let outcome = crate::ssh::run_remote_stdin(profile, password, remote_command, stdin_text)
+        .map_err(RemoteHelperError::Command)?;
+    if !outcome.success {
+        return Err(RemoteHelperError::Command(
+            crate::ssh::classify_connection_error(&outcome.combined()),
+        ));
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| RemoteHelperError::Command(format!("ssh 执行失败：{error}")))?;
-    if !output.status.success() {
-        return Err(RemoteHelperError::Command(String::from_utf8_lossy(&output.stderr).trim().to_string()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(outcome.stdout)
 }
 
 fn platform_from_helper(value: &str) -> Option<Platform> {
@@ -482,6 +483,10 @@ mod tests {
             id: "cluster".to_string(),
             name: "Cluster".to_string(),
             host: "login.example".to_string(),
+            username: String::new(),
+            port: 22,
+            auth_method: RemoteAuthMethod::Agent,
+            identity_file: None,
             scheduler: ExecutionMode::Ssh,
             workdir: "/scratch/noir/automd/".to_string(),
             module_load: vec![],

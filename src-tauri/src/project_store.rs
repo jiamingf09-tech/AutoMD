@@ -171,7 +171,8 @@ impl ProjectDatabase {
 
     pub fn list_remote_profiles(&self) -> Result<Vec<RemoteProfile>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, name, host, scheduler, workdir, module_load_json, default_queue
+            "SELECT id, name, host, scheduler, workdir, module_load_json, default_queue,
+                    username, port, auth_method, identity_file
              FROM remote_profiles
              ORDER BY name ASC",
         )?;
@@ -181,10 +182,16 @@ impl ProjectDatabase {
             let module_load_json: String = row.get(5)?;
             let module_load = serde_json::from_str::<Vec<String>>(&module_load_json)
                 .map_err(|err| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err)))?;
+            let auth_method: String = row.get(9)?;
+            let port: i64 = row.get(8)?;
             Ok(RemoteProfile {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 host: row.get(2)?,
+                username: row.get(7)?,
+                port: u16::try_from(port).unwrap_or(22),
+                auth_method: remote_auth_method_from_str(&auth_method),
+                identity_file: row.get(10)?,
                 scheduler: execution_mode_from_str(&scheduler).map_err(to_sql_conversion_error)?,
                 workdir: row.get(4)?,
                 module_load,
@@ -200,15 +207,20 @@ impl ProjectDatabase {
         let module_load_json = serde_json::to_string(&profile.module_load)?;
         self.connection.execute(
             "INSERT INTO remote_profiles
-                (id, name, host, scheduler, workdir, module_load_json, default_queue)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (id, name, host, scheduler, workdir, module_load_json, default_queue,
+                 username, port, auth_method, identity_file)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 host = excluded.host,
                 scheduler = excluded.scheduler,
                 workdir = excluded.workdir,
                 module_load_json = excluded.module_load_json,
-                default_queue = excluded.default_queue",
+                default_queue = excluded.default_queue,
+                username = excluded.username,
+                port = excluded.port,
+                auth_method = excluded.auth_method,
+                identity_file = excluded.identity_file",
             params![
                 profile.id,
                 profile.name,
@@ -217,6 +229,10 @@ impl ProjectDatabase {
                 profile.workdir,
                 module_load_json,
                 profile.default_queue,
+                profile.username,
+                profile.port as i64,
+                remote_auth_method_to_str(&profile.auth_method),
+                profile.identity_file,
             ],
         )?;
         Ok(profile)
@@ -866,6 +882,10 @@ impl ProjectDatabase {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 host TEXT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                port INTEGER NOT NULL DEFAULT 22,
+                auth_method TEXT NOT NULL DEFAULT 'agent',
+                identity_file TEXT,
                 scheduler TEXT NOT NULL,
                 workdir TEXT NOT NULL,
                 module_load_json TEXT NOT NULL,
@@ -931,6 +951,36 @@ impl ProjectDatabase {
             ",
         )?;
         self.migrate_engine_installation_targets()?;
+        self.migrate_remote_profile_connection()?;
+        Ok(())
+    }
+
+    /// Add the SSH connection columns (username/port/auth_method/identity_file)
+    /// to pre-existing `remote_profiles` tables. Idempotent — only adds what's
+    /// missing, so older databases upgrade in place without losing saved hosts.
+    fn migrate_remote_profile_connection(&self) -> Result<(), StoreError> {
+        let columns = self
+            .connection
+            .prepare("PRAGMA table_info(remote_profiles)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has = |name: &str| columns.iter().any(|column| column == name);
+        if !has("username") {
+            self.connection
+                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN username TEXT NOT NULL DEFAULT ''")?;
+        }
+        if !has("port") {
+            self.connection
+                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN port INTEGER NOT NULL DEFAULT 22")?;
+        }
+        if !has("auth_method") {
+            self.connection
+                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'agent'")?;
+        }
+        if !has("identity_file") {
+            self.connection
+                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN identity_file TEXT")?;
+        }
         Ok(())
     }
 
@@ -1051,6 +1101,16 @@ fn normalize_remote_profile(mut profile: RemoteProfile) -> Result<RemoteProfile,
     profile.id = profile.id.trim().to_string();
     profile.name = profile.name.trim().to_string();
     profile.host = profile.host.trim().to_string();
+    profile.username = profile.username.trim().to_string();
+    if profile.port == 0 {
+        profile.port = 22;
+    }
+    profile.identity_file = profile
+        .identity_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     profile.workdir = profile.workdir.trim().to_string();
     profile.default_queue = profile
         .default_queue
@@ -1271,6 +1331,22 @@ fn execution_mode_from_str(value: &str) -> Result<ExecutionMode, StoreError> {
     }
 }
 
+fn remote_auth_method_to_str(value: &RemoteAuthMethod) -> &'static str {
+    match value {
+        RemoteAuthMethod::Agent => "agent",
+        RemoteAuthMethod::Key => "key",
+        RemoteAuthMethod::Password => "password",
+    }
+}
+
+fn remote_auth_method_from_str(value: &str) -> RemoteAuthMethod {
+    match value {
+        "key" => RemoteAuthMethod::Key,
+        "password" => RemoteAuthMethod::Password,
+        _ => RemoteAuthMethod::Agent,
+    }
+}
+
 fn engine_target_kind_to_str(value: &EngineTargetKind) -> &'static str {
     match value {
         EngineTargetKind::Local => "local",
@@ -1373,6 +1449,10 @@ mod tests {
             id: "custom-slurm".to_string(),
             name: "Custom SLURM".to_string(),
             host: "login.example".to_string(),
+            username: "noir".to_string(),
+            port: 2222,
+            auth_method: RemoteAuthMethod::Key,
+            identity_file: Some("~/.ssh/id_ed25519".to_string()),
             scheduler: ExecutionMode::Slurm,
             workdir: "/scratch/noir/automd".to_string(),
             module_load: vec!["module load gromacs".to_string(), " ".to_string()],
@@ -1386,6 +1466,10 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].scheduler, ExecutionMode::Slurm);
         assert_eq!(profiles[0].default_queue.as_deref(), Some("gpu"));
+        assert_eq!(profiles[0].username, "noir");
+        assert_eq!(profiles[0].port, 2222);
+        assert_eq!(profiles[0].auth_method, RemoteAuthMethod::Key);
+        assert_eq!(profiles[0].identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
 
         let mut updated = profiles[0].clone();
         updated.scheduler = ExecutionMode::Pbs;

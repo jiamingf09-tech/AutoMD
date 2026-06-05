@@ -490,14 +490,99 @@ export interface TaskRecord {
   updatedAt: string;
 }
 
+export type RemoteAuthMethod = "agent" | "key" | "password";
+
 export interface RemoteProfile {
   id: string;
   name: string;
   host: string;
+  username: string;
+  port: number;
+  authMethod: RemoteAuthMethod;
+  identityFile?: string | null;
   scheduler: ExecutionMode;
   workdir: string;
   moduleLoad: string[];
   defaultQueue?: string | null;
+}
+
+export interface RemoteConnectionTest {
+  ok: boolean;
+  user?: string | null;
+  host: string;
+  os?: string | null;
+  arch?: string | null;
+  hostname?: string | null;
+  scheduler?: ExecutionMode | null;
+  linux: boolean;
+  message: string;
+  checkedAt: string;
+}
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface RemoteSubmitPreflight {
+  checks: PreflightCheck[];
+  allOk: boolean;
+  canOverride: boolean;
+}
+
+export interface RemotePreflightRequest {
+  profile: RemoteProfile;
+  plan: SimulationPlan;
+  projectId?: string | null;
+  projectPath?: string | null;
+  structureId?: string | null;
+  password?: string | null;
+}
+
+export interface RemoteSubmitRequest {
+  profile: RemoteProfile;
+  plan: SimulationPlan;
+  projectId?: string | null;
+  projectPath?: string | null;
+  structureId?: string | null;
+  password?: string | null;
+  allowNoHelper?: boolean;
+}
+
+export interface RemoteJobSubmission {
+  jobId?: string | null;
+  scheduler: ExecutionMode;
+  submitOutput: string;
+  remoteRunDir: string;
+  remoteWorkdir: string;
+  filesUploaded: number;
+  warnings: string[];
+  submittedAt: string;
+}
+
+export interface RemotePollRequest {
+  profile: RemoteProfile;
+  jobId?: string | null;
+  scheduler: ExecutionMode;
+  engineId: string;
+  remoteRunDir: string;
+  password?: string | null;
+}
+
+export interface RemoteFetchRequest {
+  profile: RemoteProfile;
+  remoteRunDir: string;
+  localProjectPath: string;
+  password?: string | null;
+}
+
+export interface RemoteFetchResult {
+  filesDownloaded: number;
+  localDir: string;
+  message: string;
+  warnings: string[];
 }
 
 export interface RemoteExecutionRequest {

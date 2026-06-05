@@ -31,10 +31,15 @@ import type {
   ProjectTextFilePayload,
   ProjectTextFileRequest,
   ProjectSummary,
+  RemoteConnectionTest,
   RemoteExecutionPackage,
   RemoteExecutionRequest,
   RemoteJobSnapshot,
+  RemoteJobSubmission,
+  RemotePreflightRequest,
   RemoteProfile,
+  RemoteSubmitPreflight,
+  RemoteSubmitRequest,
   RemoteWorkflowStepRequest,
   RemoteWorkflowStepResult,
   RecipeExportRequest,
@@ -307,6 +312,10 @@ export const mockRemoteProfiles: RemoteProfile[] = [
     id: "slurm-gpu-template",
     name: "SLURM GPU cluster",
     host: "login.cluster.example",
+    username: "",
+    port: 22,
+    authMethod: "agent",
+    identityFile: null,
     scheduler: "slurm",
     workdir: "/scratch/$USER/automd",
     moduleLoad: ["module load gcc openmpi cuda", "module load gromacs plumed"],
@@ -316,12 +325,60 @@ export const mockRemoteProfiles: RemoteProfile[] = [
     id: "ssh-workstation-template",
     name: "SSH workstation",
     host: "workstation.example",
+    username: "",
+    port: 22,
+    authMethod: "agent",
+    identityFile: null,
     scheduler: "ssh",
     workdir: "/data/automd",
     moduleLoad: ["source ~/.bashrc"],
     defaultQueue: null
   }
 ];
+
+export function mockRemoteConnectionTest(profile: RemoteProfile): RemoteConnectionTest {
+  const user = profile.username.trim() || "root";
+  return {
+    ok: true,
+    user,
+    host: profile.host || "1.2.3.4",
+    os: "Linux",
+    arch: "x86_64",
+    hostname: "mock-node01",
+    scheduler: profile.scheduler === "ssh" ? null : profile.scheduler,
+    linux: true,
+    message: `Web 预览模式：已模拟连接 ${user}@${profile.host || "1.2.3.4"} · Linux x86_64`,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+export function mockRemotePreflight(request: RemotePreflightRequest): RemoteSubmitPreflight {
+  const hasStructure = Boolean(request.structureId) && Boolean(request.plan.system.sourcePath);
+  const checks = [
+    { id: "project", label: "已选择项目", ok: Boolean(request.projectId), detail: "Web 预览模拟。" },
+    { id: "structure", label: "已选择结构", ok: hasStructure, detail: hasStructure ? "已绑定结构。" : "请先导入并选中结构。" },
+    { id: "plan", label: "运行计划就绪", ok: request.plan.stages.some((stage) => stage.enabled), detail: "至少一个阶段已启用。" },
+    { id: "engine", label: "目标设备已有该引擎", ok: true, detail: "Web 预览模拟为可用。" },
+    { id: "helper", label: "远程助手已安装", ok: true, detail: "Web 预览模拟为已安装。" },
+    { id: "workdir", label: "远程工作目录可写", ok: true, detail: "Web 预览模拟为可写。" },
+    { id: "scheduler", label: "调度器可用 / SSH 直接运行", ok: true, detail: "Web 预览模拟。" }
+  ];
+  const allOk = checks.every((check) => check.ok);
+  return { checks, allOk, canOverride: checks.every((check) => check.ok || check.id === "helper") };
+}
+
+export function mockRemoteSubmission(request: RemoteSubmitRequest): RemoteJobSubmission {
+  return {
+    jobId: "1234567",
+    scheduler: request.profile.scheduler,
+    submitOutput: "1234567 (Web 预览模拟提交)",
+    remoteRunDir: `${request.profile.workdir}/${request.plan.name || "automd"}`,
+    remoteWorkdir: `${request.profile.workdir}/${request.plan.name || "automd"}`,
+    filesUploaded: 12,
+    warnings: ["Web 预览模式：未实际连接远程主机。"],
+    submittedAt: new Date().toISOString()
+  };
+}
 
 function pluginManifest(partial: Partial<PluginManifest> & Pick<PluginManifest, "id" | "name" | "kind" | "entrypoint" | "capabilities">): PluginManifest {
   return {

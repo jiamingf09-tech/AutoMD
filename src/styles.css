@@ -3646,3 +3646,190 @@ ul {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+
+/* ----- Remote in-app SSH: linear numbered flow ----- */
+.remote-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.flow-step > * {
+  margin-top: 12px;
+}
+.flow-step > :first-child {
+  margin-top: 0;
+}
+
+.flow-step-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.flow-step-head h3 {
+  margin: 0;
+}
+.flow-step-head .muted {
+  margin: 4px 0 0;
+}
+
+.step-number {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: var(--text-on-brand);
+  font-weight: 800;
+  font-size: 15px;
+  display: grid;
+  place-items: center;
+  box-shadow: var(--shadow-1);
+}
+
+.flow-step-pending {
+  opacity: 0.75;
+}
+
+.flow-step .profile-loader {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.connection-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md, 10px);
+  background: var(--surface-2);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.connection-card .form-grid {
+  margin: 0;
+}
+
+.connection-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--r-md, 10px);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.connection-result span {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.connection-result.ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+}
+.connection-result.ok strong {
+  color: var(--ok-fg);
+}
+.connection-result.fail {
+  background: var(--bad-bg);
+  border-color: var(--bad-border);
+}
+.connection-result.fail strong {
+  color: var(--bad-fg);
+}
+
+.warn-text {
+  color: var(--warn-fg);
+  font-weight: 600;
+}
+
+.preflight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.preflight-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--r-md, 10px);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.preflight-check strong {
+  display: block;
+  font-size: 13px;
+}
+.preflight-check small {
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+.preflight-mark {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 12px;
+  margin-top: 1px;
+}
+.preflight-check.ok {
+  border-color: var(--ok-border);
+}
+.preflight-check.ok .preflight-mark {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+.preflight-check.fail {
+  border-color: var(--bad-border);
+}
+.preflight-check.fail .preflight-mark {
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.check-row.inline {
+  margin: 0;
+  white-space: nowrap;
+}
+.job-id-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.job-id-edit input {
+  width: 160px;
+}
+
+.flow-advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  padding: 16px;
+  box-shadow: var(--shadow-1);
+}
+.flow-advanced > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.flow-advanced[open] > summary {
+  margin-bottom: 12px;
+}
+.flow-advanced h4 {
+  margin: 18px 0 8px;
+  color: var(--text-strong);
+}
+.flow-advanced > :first-of-type {
+  margin-top: 0;
+}

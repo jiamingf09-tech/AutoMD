@@ -43,10 +43,14 @@ import type {
   ProjectSummary,
   ReportFormat,
   ExportedReport,
+  RemoteAuthMethod,
+  RemoteConnectionTest,
   RemoteExecutionPackage,
   RemoteHelperStatus,
   RemoteJobSnapshot,
+  RemoteJobSubmission,
   RemoteProfile,
+  RemoteSubmitPreflight,
   RemoteWorkflowMode,
   RemoteWorkflowStepResult,
   RecipeExportResult,
@@ -648,13 +652,26 @@ function App() {
   const [remoteWorkflowResult, setRemoteWorkflowResult] = useState<RemoteWorkflowStepResult | null>(null);
   const [remoteProfileDraft, setRemoteProfileDraft] = useState<RemoteProfile>({
     id: "custom-hpc",
-    name: "Custom HPC",
-    host: "login.example.edu",
+    name: "我的 HPC / 服务器",
+    host: "",
+    username: "root",
+    port: 22,
+    authMethod: "password",
+    identityFile: null,
     scheduler: "slurm",
-    workdir: "/scratch/$USER/automd",
-    moduleLoad: ["module load gcc openmpi cuda", "module load gromacs"],
-    defaultQueue: "gpu"
+    workdir: "/root/automd",
+    moduleLoad: [],
+    defaultQueue: null
   });
+  // In-app SSH connect → submit → monitor → fetch (session-only password).
+  const [remotePassword, setRemotePassword] = useState("");
+  const [remoteConnectionTest, setRemoteConnectionTest] = useState<RemoteConnectionTest | null>(null);
+  const [remoteConnecting, setRemoteConnecting] = useState(false);
+  const [remotePreflight, setRemotePreflight] = useState<RemoteSubmitPreflight | null>(null);
+  const [remoteAllowNoHelper, setRemoteAllowNoHelper] = useState(false);
+  const [remoteSubmission, setRemoteSubmission] = useState<RemoteJobSubmission | null>(null);
+  const [remoteBusy, setRemoteBusy] = useState<null | "preflight" | "submit" | "poll" | "fetch">(null);
+  const [remoteAutoPoll, setRemoteAutoPoll] = useState(true);
   const [remoteSubmitOutput, setRemoteSubmitOutput] = useState("123456;cluster");
   const [remoteStatusOutput, setRemoteStatusOutput] = useState("JOBID PARTITION NAME USER ST TIME NODES NODELIST\n123456 gpu automd noir R 00:10 1 node01");
   const [remoteLogOutput, setRemoteLogOutput] = useState("step 5000 of 10000\nPerformance: 82.125 ns/day");
@@ -2558,6 +2575,196 @@ function App() {
     }
   }
 
+  // --- In-app SSH: connect → (helper) → preflight → submit → monitor → fetch ---
+  const remotePasswordArg = () =>
+    remoteProfileDraft.authMethod === "password" ? remotePassword : null;
+
+  async function testRemoteConnection() {
+    if (!remoteProfileDraft.host.trim()) {
+      setError("请先填写主机/IP，再测试连接。");
+      return;
+    }
+    if (remoteProfileDraft.authMethod === "password" && !remotePassword) {
+      setError("密码认证：请先输入密码再测试连接。");
+      return;
+    }
+    setRemoteConnecting(true);
+    setRemoteConnectionTest(null);
+    try {
+      const result = await api.testRemoteConnection(remoteProfileDraft, remotePasswordArg());
+      setRemoteConnectionTest(result);
+      if (result.ok) {
+        if (result.scheduler && result.scheduler !== remoteProfileDraft.scheduler) {
+          setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: result.scheduler });
+        }
+        notifySuccess(result.message, "已连接");
+      } else {
+        pushNotification({ severity: "error", title: "连接失败", message: result.message });
+      }
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setRemoteConnecting(false);
+    }
+  }
+
+  async function runRemotePreflight() {
+    if (!plan) {
+      setError("需要先在「流程」生成 SimulationPlan，才能预检。");
+      return;
+    }
+    const activeProject = currentProject ?? projects[0] ?? null;
+    setRemoteBusy("preflight");
+    setRemotePreflight(null);
+    try {
+      const result = await api.preflightRemoteSubmit({
+        profile: remoteProfileDraft,
+        plan,
+        projectId: activeProject?.id ?? null,
+        projectPath: activeProject?.path ?? null,
+        structureId: activeStructureId,
+        password: remotePasswordArg()
+      });
+      setRemotePreflight(result);
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setRemoteBusy(null);
+    }
+  }
+
+  async function submitRemoteJob() {
+    if (!plan) {
+      setError("需要先在「流程」生成 SimulationPlan。");
+      return;
+    }
+    if (!requireActiveStructure("提交远程作业")) {
+      return;
+    }
+    const activeProject = currentProject ?? projects[0] ?? null;
+    if (!activeProject) {
+      setError("请先选择当前项目。");
+      return;
+    }
+    setRemoteBusy("submit");
+    const taskId = startBackgroundTask("提交远程作业", "install", `${remoteProfileDraft.name} · ${remoteProfileDraft.host}`);
+    notifyInstalling(`远程作业（${remoteProfileDraft.host}）`);
+    try {
+      updateBackgroundTask(taskId, { progress: 45, detail: "上传项目并提交到调度器…" });
+      const submission = await api.submitRemoteJob({
+        profile: remoteProfileDraft,
+        plan,
+        projectId: activeProject.id,
+        projectPath: activeProject.path,
+        structureId: activeStructureId,
+        password: remotePasswordArg(),
+        allowNoHelper: remoteAllowNoHelper
+      });
+      setRemoteSubmission(submission);
+      setRemoteWorkflowJobId(submission.jobId ?? "");
+      setRemoteJobSnapshot(null);
+      finishBackgroundTask(taskId, submission.jobId ? `已提交：job ${submission.jobId}` : "已提交", "completed");
+      notifySuccess(
+        submission.jobId ? `作业已提交（job ${submission.jobId}），开始自动监控。` : "作业已提交。",
+        "已提交"
+      );
+    } catch (caught) {
+      finishBackgroundTask(taskId, "远程提交失败", "failed");
+      reportError(caught);
+    } finally {
+      setRemoteBusy(null);
+    }
+  }
+
+  async function pollRemoteJobNow() {
+    if (!remoteSubmission || !plan) {
+      return;
+    }
+    setRemoteBusy((busy) => (busy === null ? "poll" : busy));
+    try {
+      const snapshot = await api.pollRemoteJob({
+        profile: remoteProfileDraft,
+        jobId: remoteSubmission.jobId ?? remoteWorkflowJobId ?? null,
+        scheduler: remoteSubmission.scheduler,
+        engineId: plan.engineId,
+        remoteRunDir: remoteSubmission.remoteRunDir,
+        password: remotePasswordArg()
+      });
+      setRemoteJobSnapshot(snapshot);
+    } catch (caught) {
+      reportError(caught);
+    } finally {
+      setRemoteBusy((busy) => (busy === "poll" ? null : busy));
+    }
+  }
+
+  async function cancelRemoteJob() {
+    if (!remoteSubmission || !plan) {
+      return;
+    }
+    try {
+      const message = await api.cancelRemoteJob({
+        profile: remoteProfileDraft,
+        jobId: remoteSubmission.jobId ?? remoteWorkflowJobId ?? null,
+        scheduler: remoteSubmission.scheduler,
+        engineId: plan.engineId,
+        remoteRunDir: remoteSubmission.remoteRunDir,
+        password: remotePasswordArg()
+      });
+      notifySuccess(message, "已取消");
+      void pollRemoteJobNow();
+    } catch (caught) {
+      reportError(caught);
+    }
+  }
+
+  async function fetchRemoteResults() {
+    if (!remoteSubmission) {
+      return;
+    }
+    const activeProject = currentProject ?? projects[0] ?? null;
+    if (!activeProject) {
+      setError("请先选择当前项目。");
+      return;
+    }
+    setRemoteBusy("fetch");
+    const taskId = startBackgroundTask("回收远程结果", "search", remoteSubmission.remoteRunDir);
+    try {
+      const result = await api.fetchRemoteResults({
+        profile: remoteProfileDraft,
+        remoteRunDir: remoteSubmission.remoteRunDir,
+        localProjectPath: activeProject.path,
+        password: remotePasswordArg()
+      });
+      finishBackgroundTask(taskId, `已回收 ${result.filesDownloaded} 个文件`, "completed");
+      notifySuccess(result.message, "已回收结果");
+      await refreshArtifacts();
+    } catch (caught) {
+      finishBackgroundTask(taskId, "回收结果失败", "failed");
+      reportError(caught);
+    } finally {
+      setRemoteBusy(null);
+    }
+  }
+
+  // Auto-poll an active remote job every 8s until it reaches a terminal state.
+  useEffect(() => {
+    if (!remoteSubmission || !remoteAutoPoll) {
+      return;
+    }
+    const terminal = remoteJobSnapshot
+      ? ["completed", "failed", "cancelled"].includes(remoteJobSnapshot.status)
+      : false;
+    if (terminal) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void pollRemoteJobNow();
+    }, 8000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteSubmission, remoteAutoPoll, remoteJobSnapshot?.status]);
+
   function updatePlan(updater: (current: SimulationPlan) => SimulationPlan) {
     setPlan((current) => (current ? updater(current) : current));
   }
@@ -2965,24 +3172,49 @@ function App() {
 
         {activeTab === "remote" && (
           <RemotePanel
-            diagnostics={diagnostics}
             plan={plan}
+            diagnostics={diagnostics}
             remoteProfiles={remoteProfiles}
             selectedRemoteProfileId={selectedRemoteProfileId}
             setSelectedRemoteProfileId={setSelectedRemoteProfileId}
-            remotePackage={remotePackage}
+            remoteProfileDraft={remoteProfileDraft}
+            setRemoteProfileDraft={setRemoteProfileDraft}
+            remotePassword={remotePassword}
+            setRemotePassword={setRemotePassword}
+            remoteConnectionTest={remoteConnectionTest}
+            remoteConnecting={remoteConnecting}
+            testRemoteConnection={testRemoteConnection}
+            saveRemoteProfile={saveRemoteProfile}
+            deleteRemoteProfile={deleteRemoteProfile}
+            engineTargets={engineTargets}
+            installRemoteHelper={installRemoteHelperForProfile}
+            checkRemoteHelper={checkRemoteHelperForProfile}
+            projectName={(currentProject ?? projects[0] ?? null)?.name ?? null}
+            structureName={activeStructure?.name ?? null}
+            updatePlan={updatePlan}
+            remotePreflight={remotePreflight}
+            runRemotePreflight={runRemotePreflight}
+            remoteAllowNoHelper={remoteAllowNoHelper}
+            setRemoteAllowNoHelper={setRemoteAllowNoHelper}
+            submitRemoteJob={submitRemoteJob}
+            remoteSubmission={remoteSubmission}
+            remoteBusy={remoteBusy}
             remoteJobSnapshot={remoteJobSnapshot}
-            remoteWorkflowMode={remoteWorkflowMode}
-            setRemoteWorkflowMode={setRemoteWorkflowMode}
+            pollRemoteJobNow={pollRemoteJobNow}
+            cancelRemoteJob={cancelRemoteJob}
+            fetchRemoteResults={fetchRemoteResults}
+            remoteAutoPoll={remoteAutoPoll}
+            setRemoteAutoPoll={setRemoteAutoPoll}
             remoteWorkflowJobId={remoteWorkflowJobId}
             setRemoteWorkflowJobId={setRemoteWorkflowJobId}
+            remotePackage={remotePackage}
+            generateRemotePackage={generateRemotePackage}
+            remoteWorkflowMode={remoteWorkflowMode}
+            setRemoteWorkflowMode={setRemoteWorkflowMode}
             remoteWorkflowTimeout={remoteWorkflowTimeout}
             setRemoteWorkflowTimeout={setRemoteWorkflowTimeout}
             remoteWorkflowResult={remoteWorkflowResult}
-            remoteProfileDraft={remoteProfileDraft}
-            setRemoteProfileDraft={setRemoteProfileDraft}
-            saveRemoteProfile={saveRemoteProfile}
-            deleteRemoteProfile={deleteRemoteProfile}
+            runRemoteStep={runRemoteStep}
             remoteSubmitOutput={remoteSubmitOutput}
             setRemoteSubmitOutput={setRemoteSubmitOutput}
             remoteStatusOutput={remoteStatusOutput}
@@ -2990,16 +3222,10 @@ function App() {
             remoteLogOutput={remoteLogOutput}
             setRemoteLogOutput={setRemoteLogOutput}
             parseRemoteStatus={parseRemoteStatus}
-            runRemoteStep={runRemoteStep}
-            updatePlan={updatePlan}
-            generateRemotePackage={generateRemotePackage}
             autoFindTool={autoFindTool}
             manualFindTool={manualFindTool}
             autoInstallTool={autoInstallTool}
             installableTools={installableTools}
-            engineTargets={engineTargets}
-            installRemoteHelper={installRemoteHelperForProfile}
-            checkRemoteHelper={checkRemoteHelperForProfile}
           />
         )}
 
@@ -5689,24 +5915,49 @@ function ResumePlanCard({
 }
 
 function RemotePanel({
-  diagnostics,
   plan,
+  diagnostics,
   remoteProfiles,
   selectedRemoteProfileId,
   setSelectedRemoteProfileId,
-  remotePackage,
+  remoteProfileDraft,
+  setRemoteProfileDraft,
+  remotePassword,
+  setRemotePassword,
+  remoteConnectionTest,
+  remoteConnecting,
+  testRemoteConnection,
+  saveRemoteProfile,
+  deleteRemoteProfile,
+  engineTargets,
+  installRemoteHelper,
+  checkRemoteHelper,
+  projectName,
+  structureName,
+  updatePlan,
+  remotePreflight,
+  runRemotePreflight,
+  remoteAllowNoHelper,
+  setRemoteAllowNoHelper,
+  submitRemoteJob,
+  remoteSubmission,
+  remoteBusy,
   remoteJobSnapshot,
-  remoteWorkflowMode,
-  setRemoteWorkflowMode,
+  pollRemoteJobNow,
+  cancelRemoteJob,
+  fetchRemoteResults,
+  remoteAutoPoll,
+  setRemoteAutoPoll,
   remoteWorkflowJobId,
   setRemoteWorkflowJobId,
+  remotePackage,
+  generateRemotePackage,
+  remoteWorkflowMode,
+  setRemoteWorkflowMode,
   remoteWorkflowTimeout,
   setRemoteWorkflowTimeout,
   remoteWorkflowResult,
-  remoteProfileDraft,
-  setRemoteProfileDraft,
-  saveRemoteProfile,
-  deleteRemoteProfile,
+  runRemoteStep,
   remoteSubmitOutput,
   setRemoteSubmitOutput,
   remoteStatusOutput,
@@ -5714,35 +5965,54 @@ function RemotePanel({
   remoteLogOutput,
   setRemoteLogOutput,
   parseRemoteStatus,
-  runRemoteStep,
-  updatePlan,
-  generateRemotePackage,
   autoFindTool,
   manualFindTool,
   autoInstallTool,
-  installableTools,
-  engineTargets,
-  installRemoteHelper,
-  checkRemoteHelper
+  installableTools
 }: {
-  diagnostics: RuntimeDiagnostics | null;
   plan: SimulationPlan | null;
+  diagnostics: RuntimeDiagnostics | null;
   remoteProfiles: RemoteProfile[];
   selectedRemoteProfileId: string | null;
   setSelectedRemoteProfileId: (value: string) => void;
-  remotePackage: RemoteExecutionPackage | null;
+  remoteProfileDraft: RemoteProfile;
+  setRemoteProfileDraft: (value: RemoteProfile) => void;
+  remotePassword: string;
+  setRemotePassword: (value: string) => void;
+  remoteConnectionTest: RemoteConnectionTest | null;
+  remoteConnecting: boolean;
+  testRemoteConnection: () => void;
+  saveRemoteProfile: (profile: RemoteProfile) => void;
+  deleteRemoteProfile: (id: string) => void;
+  engineTargets: EngineTarget[];
+  installRemoteHelper: (profileId: string) => void;
+  checkRemoteHelper: (profileId: string) => void;
+  projectName: string | null;
+  structureName: string | null;
+  updatePlan: (updater: (current: SimulationPlan) => SimulationPlan) => void;
+  remotePreflight: RemoteSubmitPreflight | null;
+  runRemotePreflight: () => void;
+  remoteAllowNoHelper: boolean;
+  setRemoteAllowNoHelper: (value: boolean) => void;
+  submitRemoteJob: () => void;
+  remoteSubmission: RemoteJobSubmission | null;
+  remoteBusy: null | "preflight" | "submit" | "poll" | "fetch";
   remoteJobSnapshot: RemoteJobSnapshot | null;
-  remoteWorkflowMode: RemoteWorkflowMode;
-  setRemoteWorkflowMode: (value: RemoteWorkflowMode) => void;
+  pollRemoteJobNow: () => void;
+  cancelRemoteJob: () => void;
+  fetchRemoteResults: () => void;
+  remoteAutoPoll: boolean;
+  setRemoteAutoPoll: (value: boolean) => void;
   remoteWorkflowJobId: string;
   setRemoteWorkflowJobId: (value: string) => void;
+  remotePackage: RemoteExecutionPackage | null;
+  generateRemotePackage: (profileId?: string | null) => void;
+  remoteWorkflowMode: RemoteWorkflowMode;
+  setRemoteWorkflowMode: (value: RemoteWorkflowMode) => void;
   remoteWorkflowTimeout: number;
   setRemoteWorkflowTimeout: (value: number) => void;
   remoteWorkflowResult: RemoteWorkflowStepResult | null;
-  remoteProfileDraft: RemoteProfile;
-  setRemoteProfileDraft: (value: RemoteProfile) => void;
-  saveRemoteProfile: (profile: RemoteProfile) => void;
-  deleteRemoteProfile: (id: string) => void;
+  runRemoteStep: (stepId: string) => void;
   remoteSubmitOutput: string;
   setRemoteSubmitOutput: (value: string) => void;
   remoteStatusOutput: string;
@@ -5750,30 +6020,456 @@ function RemotePanel({
   remoteLogOutput: string;
   setRemoteLogOutput: (value: string) => void;
   parseRemoteStatus: () => void;
-  runRemoteStep: (stepId: string) => void;
-  updatePlan: (updater: (current: SimulationPlan) => SimulationPlan) => void;
-  generateRemotePackage: (profileId?: string | null) => void;
   autoFindTool: (tool: ToolDiagnostic) => void;
   manualFindTool: (tool: ToolDiagnostic) => void;
   autoInstallTool: (tool: ToolDiagnostic) => void;
   installableTools: string[];
-  engineTargets: EngineTarget[];
-  installRemoteHelper: (profileId: string) => void;
-  checkRemoteHelper: (profileId: string) => void;
 }) {
-  const selectedProfile = remoteProfiles.find((profile) => profile.id === selectedRemoteProfileId) ?? remoteProfiles[0];
-  const selectedIsTemplate = selectedProfile?.id.endsWith("-template") ?? true;
-  const selectedEngineTarget = selectedProfile
-    ? engineTargets.find((target) => target.id === `remote:${selectedProfile.id}`)
-    : null;
+  const draft = remoteProfileDraft;
+  const update = (patch: Partial<RemoteProfile>) => setRemoteProfileDraft({ ...draft, ...patch });
+  const connected = remoteConnectionTest?.ok ?? false;
+  const draftSaved = remoteProfiles.some((profile) => profile.id === draft.id);
+  const isTemplate = draft.id.endsWith("-template");
+  const helperTarget = engineTargets.find((target) => target.id === `remote:${draft.id}`) ?? null;
+  const helperState = helperTarget?.status ?? "missing";
+  const helperReady = helperState === "ready" || helperState === "outdated";
+  const submitReady = Boolean(remotePreflight?.allOk || (remotePreflight?.canOverride && remoteAllowNoHelper));
+  const jobActive = Boolean(
+    remoteJobSnapshot && !["completed", "failed", "cancelled"].includes(remoteJobSnapshot.status)
+  );
+
   return (
-    <div className="content-grid">
-      <section className="panel">
-        <h3>本机运行环境</h3>
+    <div className="remote-flow">
+      {/* Step 1 — Connect */}
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">1</span>
+          <div>
+            <h3>连接服务器 / HPC</h3>
+            <p className="muted">
+              填好连接信息后点「测试连接」。GPU 租用（AutoDL / RunPod）一般是 IP/域名 + 端口 + root + 密码；
+              高校超算一般是 用户名@登录节点 + 密钥或密码。远程目标以 Linux 为主。
+            </p>
+          </div>
+        </div>
+
+        {remoteProfiles.length > 0 ? (
+          <label className="profile-loader">
+            载入已保存的连接
+            <select
+              value={draftSaved ? draft.id : ""}
+              onChange={(event) => {
+                const picked = remoteProfiles.find((profile) => profile.id === event.target.value);
+                if (picked) {
+                  setSelectedRemoteProfileId(picked.id);
+                  setRemoteProfileDraft(picked);
+                }
+              }}
+            >
+              <option value="">— 新连接 —</option>
+              {remoteProfiles.map((profile) => (
+                <option value={profile.id} key={profile.id}>
+                  {profile.name}（{profile.host || "未填主机"}）
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
+        <div className="connection-card">
+          <div className="form-grid three">
+            <label>
+              名称
+              <input value={draft.name} onChange={(event) => update({ name: event.target.value })} placeholder="我的 HPC" />
+            </label>
+            <label className="span-2">
+              主机 / IP
+              <input
+                value={draft.host}
+                onChange={(event) => update({ host: event.target.value })}
+                placeholder="connect.region.seetacloud.com 或 123.45.67.89 或 login.cluster.edu"
+              />
+            </label>
+            <label>
+              端口
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={draft.port}
+                onChange={(event) => update({ port: Number(event.target.value) || 22 })}
+              />
+            </label>
+            <label>
+              用户名
+              <input value={draft.username} onChange={(event) => update({ username: event.target.value })} placeholder="root / 你的账号" />
+            </label>
+            <label>
+              认证方式
+              <select value={draft.authMethod} onChange={(event) => update({ authMethod: event.target.value as RemoteAuthMethod })}>
+                <option value="password">用户名 + 密码（本会话内）</option>
+                <option value="key">SSH 私钥文件</option>
+                <option value="agent">系统 SSH 配置 / agent（~/.ssh/config）</option>
+              </select>
+            </label>
+          </div>
+
+          {draft.authMethod === "password" ? (
+            <label>
+              密码（仅本次会话保存，不写入磁盘）
+              <input
+                type="password"
+                value={remotePassword}
+                onChange={(event) => setRemotePassword(event.target.value)}
+                placeholder="实例/账号密码"
+                autoComplete="off"
+              />
+            </label>
+          ) : draft.authMethod === "key" ? (
+            <label>
+              私钥文件路径
+              <input
+                value={draft.identityFile ?? ""}
+                onChange={(event) => update({ identityFile: event.target.value || null })}
+                placeholder="~/.ssh/id_ed25519"
+              />
+            </label>
+          ) : (
+            <p className="hint-text">将使用系统 ssh 与你的 ~/.ssh/config / 密钥 / agent，无需在此填写凭据。</p>
+          )}
+
+          <div className="button-row">
+            <button type="button" className="primary" onClick={testRemoteConnection} disabled={remoteConnecting}>
+              {remoteConnecting ? "连接中…" : "测试连接"}
+            </button>
+            <button type="button" onClick={() => saveRemoteProfile(draft)}>
+              保存为 profile
+            </button>
+          </div>
+
+          {remoteConnectionTest ? (
+            <div className={`connection-result ${remoteConnectionTest.ok ? "ok" : "fail"}`}>
+              <strong>{remoteConnectionTest.ok ? "✅ 已连接" : "❌ 连接失败"}</strong>
+              <span>{remoteConnectionTest.message}</span>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      {/* Step 2 — Remote helper (main flow, not advanced) */}
+      <section className={`panel flow-step ${connected ? "" : "flow-step-pending"}`}>
+        <div className="flow-step-head">
+          <span className="step-number">2</span>
+          <div>
+            <h3>远程助手</h3>
+            <p className="muted">助手让软件能自动扫描引擎、远程安装和监控。连接成功后若未安装，这里直接装上即可。</p>
+          </div>
+        </div>
+        {!connected ? (
+          <EmptyState title="先完成第 1 步" text="测试连接成功后再安装远程助手。" />
+        ) : !draftSaved ? (
+          <div className="connection-result fail">
+            <strong>请先保存为 profile</strong>
+            <span>远程助手按已保存的连接（含端口/认证）工作，请在第 1 步点「保存为 profile」。</span>
+          </div>
+        ) : (
+          <>
+            <dl className="definition-list">
+              <div><dt>状态</dt><dd>{remoteHelperStateText[helperState]}</dd></div>
+              <div><dt>平台</dt><dd>{helperTarget?.platform ?? "未检测"}</dd></div>
+              <div><dt>架构</dt><dd>{helperTarget?.arch ?? "未检测"}</dd></div>
+            </dl>
+            {helperReady ? (
+              <div className="connection-result ok">
+                <strong>✅ 助手已就绪</strong>
+                <span>可在下一步确认引擎并提交作业。</span>
+              </div>
+            ) : (
+              <p className="hint-text">未安装：点下方「安装远程助手」，AutoMD 会通过 SSH 写入并探测远程环境。</p>
+            )}
+            <div className="button-row">
+              <button type="button" className={helperReady ? "" : "primary"} onClick={() => installRemoteHelper(draft.id)}>
+                {helperReady ? "重新安装 / 更新助手" : "安装远程助手"}
+              </button>
+              <button type="button" onClick={() => checkRemoteHelper(draft.id)}>
+                检测助手
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* Step 3 — Confirm plan + engine */}
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">3</span>
+          <div>
+            <h3>确认要跑的计划</h3>
+            <p className="muted">远程作业会使用当前项目、结构与计划。缺哪一项就回「项目 / 流程」补上。</p>
+          </div>
+        </div>
         <dl className="definition-list">
-          <div><dt>OS</dt><dd>{diagnostics?.os ?? "unknown"}</dd></div>
-          <div><dt>Arch</dt><dd>{diagnostics?.arch ?? "unknown"}</dd></div>
+          <div><dt>项目</dt><dd>{projectName ?? <span className="warn-text">未选择</span>}</dd></div>
+          <div><dt>结构</dt><dd>{structureName ?? <span className="warn-text">未选择</span>}</dd></div>
+          <div><dt>引擎</dt><dd>{plan?.engineId ?? "未生成计划"}</dd></div>
+          <div><dt>体系</dt><dd>{plan?.system.name ?? "—"}</dd></div>
         </dl>
+        {plan ? (
+          <div className="form-grid three">
+            <label>
+              远程工作目录
+              <input value={draft.workdir} onChange={(event) => update({ workdir: event.target.value })} placeholder="/root/automd 或 /scratch/$USER/automd" />
+            </label>
+            <label>
+              调度器
+              <select value={draft.scheduler} onChange={(event) => update({ scheduler: event.target.value as ExecutionMode })}>
+                <option value="ssh">SSH 直接运行</option>
+                <option value="slurm">SLURM</option>
+                <option value="pbs">PBS</option>
+                <option value="lsf">LSF</option>
+              </select>
+            </label>
+            <label>
+              队列
+              <input
+                value={plan.resources.queue ?? ""}
+                placeholder="gpu / normal"
+                onChange={(event) =>
+                  updatePlan((current) => ({ ...current, resources: { ...current.resources, queue: event.target.value || null } }))
+                }
+              />
+            </label>
+          </div>
+        ) : (
+          <EmptyState title="尚无计划" text="先到「流程」页生成 SimulationPlan。" />
+        )}
+      </section>
+
+      {/* Step 4 — Preflight + submit */}
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">4</span>
+          <div>
+            <h3>预检并提交</h3>
+            <p className="muted">提交前逐项核对：项目 / 结构 / 计划 / 引擎 / 助手 / 工作目录 / 调度器。全部通过才允许提交。</p>
+          </div>
+        </div>
+        <div className="button-row">
+          <button type="button" onClick={runRemotePreflight} disabled={remoteBusy === "preflight"}>
+            {remoteBusy === "preflight" ? "预检中…" : "运行预检"}
+          </button>
+        </div>
+        {remotePreflight ? (
+          <ul className="preflight-list">
+            {remotePreflight.checks.map((check) => (
+              <li className={`preflight-check ${check.ok ? "ok" : "fail"}`} key={check.id}>
+                <span className="preflight-mark">{check.ok ? "✓" : "✗"}</span>
+                <div>
+                  <strong>{check.label}</strong>
+                  <small>{check.detail}</small>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState title="尚未预检" text="点「运行预检」检查是否满足提交条件。" />
+        )}
+        {remotePreflight && !remotePreflight.allOk && remotePreflight.canOverride ? (
+          <label className="check-row">
+            <input type="checkbox" checked={remoteAllowNoHelper} onChange={() => setRemoteAllowNoHelper(!remoteAllowNoHelper)} />
+            <span>高级：跳过远程助手，直接 SSH 提交（仅在你确认远程已就绪时）</span>
+          </label>
+        ) : null}
+        <div className="button-row">
+          <button
+            type="button"
+            className="primary"
+            onClick={submitRemoteJob}
+            disabled={!submitReady || remoteBusy === "submit"}
+          >
+            {remoteBusy === "submit" ? "提交中…" : "上传并提交作业"}
+          </button>
+          {!submitReady ? <span className="hint-text">预检通过后才能提交。</span> : null}
+        </div>
+      </section>
+
+      {/* Step 5 — Monitor */}
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">5</span>
+          <div>
+            <h3>监控</h3>
+            <p className="muted">提交后自动每 8 秒拉取一次状态与日志，无需手动粘贴。</p>
+          </div>
+        </div>
+        {remoteSubmission ? (
+          <>
+            <dl className="definition-list">
+              <div><dt>Job ID</dt><dd className="mono">{remoteSubmission.jobId ?? "未解析"}</dd></div>
+              <div><dt>远程目录</dt><dd className="mono">{remoteSubmission.remoteRunDir}</dd></div>
+              <div><dt>上传文件</dt><dd>{remoteSubmission.filesUploaded}</dd></div>
+            </dl>
+            <div className="button-row">
+              <label className="check-row inline">
+                <input type="checkbox" checked={remoteAutoPoll} onChange={() => setRemoteAutoPoll(!remoteAutoPoll)} />
+                <span>自动刷新</span>
+              </label>
+              <button type="button" onClick={pollRemoteJobNow} disabled={remoteBusy === "poll"}>
+                {remoteBusy === "poll" ? "查询中…" : "刷新状态"}
+              </button>
+              <button type="button" onClick={cancelRemoteJob} disabled={!jobActive}>
+                取消作业
+              </button>
+              <label className="job-id-edit">
+                Job ID
+                <input value={remoteWorkflowJobId} onChange={(event) => setRemoteWorkflowJobId(event.target.value)} placeholder={remoteSubmission.jobId ?? "<job-id>"} />
+              </label>
+            </div>
+            {remoteJobSnapshot ? (
+              <div className="remote-snapshot">
+                {remoteJobSnapshot.progressPercent != null ? (
+                  <div className="progress-shell">
+                    <div className="progress-bar" style={{ width: `${remoteJobSnapshot.progressPercent}%` }} />
+                  </div>
+                ) : null}
+                <dl className="definition-list">
+                  <div><dt>状态</dt><dd>{remoteJobSnapshot.status}</dd></div>
+                  <div><dt>队列态</dt><dd>{remoteJobSnapshot.queueState ?? "未检测"}</dd></div>
+                  <div><dt>步数</dt><dd>{remoteJobSnapshot.currentStep ?? "未检测"}</dd></div>
+                  <div><dt>性能</dt><dd>{remoteJobSnapshot.nsPerDay ? `${remoteJobSnapshot.nsPerDay.toFixed(3)} ns/day` : "未检测"}</dd></div>
+                </dl>
+                {remoteJobSnapshot.reason ? <p className="hint-text">{remoteJobSnapshot.reason}</p> : null}
+                {remoteJobSnapshot.logReport?.events.length ? (
+                  <div className="event-list compact-events">
+                    {remoteJobSnapshot.logReport.events.slice(0, 8).map((event) => (
+                      <div className={`event-row ${event.kind}`} key={`${event.lineNumber}-${event.message}`}>
+                        <span>{event.kind}</span>
+                        <p>{event.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="hint-text">正在等待第一次状态返回…</p>
+            )}
+          </>
+        ) : (
+          <EmptyState title="尚未提交" text="完成第 4 步提交后，这里会自动显示作业状态与进度。" />
+        )}
+      </section>
+
+      {/* Step 6 — Fetch results */}
+      <section className="panel flow-step">
+        <div className="flow-step-head">
+          <span className="step-number">6</span>
+          <div>
+            <h3>回收结果</h3>
+            <p className="muted">把远程的 runs / 轨迹 / 分析 / 报告同步回本地项目，随后到「运行 / 报告」查看。</p>
+          </div>
+        </div>
+        <div className="button-row">
+          <button type="button" className="primary" onClick={fetchRemoteResults} disabled={!remoteSubmission || remoteBusy === "fetch"}>
+            {remoteBusy === "fetch" ? "下载中…" : "下载结果到本地"}
+          </button>
+          {!remoteSubmission ? <span className="hint-text">提交作业后可用。</span> : null}
+        </div>
+      </section>
+
+      {/* Advanced — command export + manual parse + extras (fallback) */}
+      <details className="panel flow-advanced">
+        <summary>高级 / 备用手段：导出命令、脚本、手动解析、本机工具</summary>
+
+        <h4>自定义 profile（module load 等）</h4>
+        <label className="span-all">
+          Module / setup commands
+          <textarea
+            value={draft.moduleLoad.join("\n")}
+            onChange={(event) => update({ moduleLoad: event.target.value.split("\n") })}
+            rows={3}
+            spellCheck={false}
+          />
+        </label>
+        <div className="button-row">
+          <button type="button" onClick={() => saveRemoteProfile(draft)}>保存 profile</button>
+          <button type="button" onClick={() => deleteRemoteProfile(draft.id)} disabled={!draftSaved || isTemplate}>
+            删除已保存
+          </button>
+        </div>
+
+        <h4>导出命令 / 脚本（手动跑）</h4>
+        <div className="button-row">
+          <button type="button" onClick={() => generateRemotePackage(draft.id)} disabled={!plan}>
+            生成远程命令包
+          </button>
+        </div>
+        {remotePackage ? (
+          <>
+            <div className="remote-runner-controls">
+              <label>
+                执行模式
+                <select value={remoteWorkflowMode} onChange={(event) => setRemoteWorkflowMode(event.target.value as RemoteWorkflowMode)}>
+                  <option value="dryRun">Dry run：只预览命令</option>
+                  <option value="writeFiles">只写脚本：写入 remote/ 文件</option>
+                  <option value="execute">执行：运行本地 ssh/rsync</option>
+                </select>
+              </label>
+              <label>
+                超时 (秒)
+                <input type="number" min={1} max={3600} value={remoteWorkflowTimeout} onChange={(event) => setRemoteWorkflowTimeout(Number(event.target.value))} />
+              </label>
+            </div>
+            <div className="remote-command-grid">
+              {remotePackage.commands.map((command) => (
+                <div className="remote-command-row" key={command.id}>
+                  <div>
+                    <strong>{command.label}</strong>
+                    <span>{command.description}</span>
+                  </div>
+                  <code>{command.command}</code>
+                  <button type="button" onClick={() => runRemoteStep(command.id)}>运行步骤</button>
+                </div>
+              ))}
+            </div>
+            <div className="command-list">
+              {remotePackage.files.map((file) => (
+                <details key={file.path}>
+                  <summary>{file.path}</summary>
+                  <CodeBlock value={file.contents} />
+                </details>
+              ))}
+            </div>
+            {remoteWorkflowResult ? (
+              <details open>
+                <summary>上次步骤结果：{remoteWorkflowResult.label}（{remoteWorkflowResult.status}）</summary>
+                <CodeBlock value={remoteWorkflowResult.stdout || remoteWorkflowResult.stderr || "(empty)"} />
+              </details>
+            ) : null}
+          </>
+        ) : (
+          <p className="hint-text">生成后会列出 ssh / rsync / 提交 / 状态 / 回收命令，供你复制到终端手动执行。</p>
+        )}
+
+        <h4>手动状态解析（离线 / 隔离网备用）</h4>
+        <div className="remote-status-grid">
+          <label>
+            Submit 输出
+            <textarea value={remoteSubmitOutput} onChange={(event) => setRemoteSubmitOutput(event.target.value)} rows={3} spellCheck={false} />
+          </label>
+          <label>
+            队列状态输出
+            <textarea value={remoteStatusOutput} onChange={(event) => setRemoteStatusOutput(event.target.value)} rows={3} spellCheck={false} />
+          </label>
+          <label>
+            远程日志片段
+            <textarea value={remoteLogOutput} onChange={(event) => setRemoteLogOutput(event.target.value)} rows={3} spellCheck={false} />
+          </label>
+        </div>
+        <div className="button-row">
+          <button type="button" onClick={parseRemoteStatus} disabled={!remotePackage}>解析状态</button>
+        </div>
+
+        <h4>本机 ssh / rsync 等工具</h4>
         <div className="tool-list local-runtime-tools">
           {diagnostics?.tools.map((tool) => {
             const showActions = tool.status === "missingInstall" || tool.status === "missingLicense";
@@ -5800,388 +6496,7 @@ function RemotePanel({
             );
           })}
         </div>
-      </section>
-      <section className="panel">
-        <h3>远程 profile 模板</h3>
-        <div className="form-grid">
-          <label>
-            Profile
-            <select
-              value={selectedProfile?.id ?? ""}
-              onChange={(event) => {
-                setSelectedRemoteProfileId(event.target.value);
-                void generateRemotePackage(event.target.value);
-              }}
-            >
-              {remoteProfiles.map((profile) => (
-                <option value={profile.id} key={profile.id}>
-                  {profile.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            调度器
-            <select
-              value={plan?.resources.executionMode ?? "localProcess"}
-              onChange={(event) =>
-                updatePlan((current) => ({
-                  ...current,
-                  resources: { ...current.resources, executionMode: event.target.value as ExecutionMode }
-                }))
-              }
-            >
-              <option value="localProcess">本地进程</option>
-              <option value="ssh">SSH</option>
-              <option value="slurm">SLURM</option>
-              <option value="pbs">PBS</option>
-              <option value="lsf">LSF</option>
-              <option value="container">容器</option>
-            </select>
-          </label>
-          <label>
-            远程主机
-            <input value={selectedProfile?.host ?? ""} readOnly />
-          </label>
-          <label>
-            工作目录
-            <input value={selectedProfile?.workdir ?? ""} readOnly />
-          </label>
-          <label>
-            队列
-            <input
-              value={plan?.resources.queue ?? ""}
-              placeholder="gpu, normal, short"
-              onChange={(event) =>
-                updatePlan((current) => ({
-                  ...current,
-                  resources: { ...current.resources, queue: event.target.value || null }
-                }))
-              }
-            />
-          </label>
-          <label>
-            CPU threads
-            <input
-              type="number"
-              min="1"
-              value={plan?.resources.cpuThreads ?? 1}
-              onChange={(event) =>
-                updatePlan((current) => ({
-                  ...current,
-                  resources: { ...current.resources, cpuThreads: Number(event.target.value) }
-                }))
-              }
-            />
-          </label>
-        </div>
-        <button type="button" className="primary fill" onClick={() => generateRemotePackage(selectedProfile?.id)}>
-          生成远程执行包
-        </button>
-        <div className="script-surface">
-          {(selectedProfile?.moduleLoad ?? []).map((line) => (
-            <p className="mono" key={line}>{line}</p>
-          ))}
-          <p className="mono">workdir={remotePackage?.remoteWorkdir ?? selectedProfile?.workdir ?? "未生成"}</p>
-          <p className="mono">sync=rsync --partial --append-verify</p>
-        </div>
-      </section>
-      <section className="panel">
-        <h3>AutoMD 远程助手</h3>
-        {selectedProfile ? (
-          <>
-            <dl className="definition-list">
-              <div><dt>目标</dt><dd>{selectedProfile.name}</dd></div>
-              <div><dt>主机</dt><dd className="mono">{selectedProfile.host}</dd></div>
-              <div><dt>状态</dt><dd>{remoteHelperStateText[selectedEngineTarget?.status ?? "missing"]}</dd></div>
-              <div><dt>平台</dt><dd>{selectedEngineTarget?.platform ?? "未检测"}</dd></div>
-              <div><dt>架构</dt><dd>{selectedEngineTarget?.arch ?? "未检测"}</dd></div>
-            </dl>
-            <div className="button-row">
-              <button type="button" onClick={() => checkRemoteHelper(selectedProfile.id)}>
-                检测 SSH/helper
-              </button>
-              <button type="button" className="primary" onClick={() => installRemoteHelper(selectedProfile.id)}>
-                安装/更新 helper
-              </button>
-            </div>
-            <p className="hint-text">
-              helper 安装到远程 workdir 下的 .automd/helper，用于扫描远程引擎、检测硬件、执行包管理安装和源码构建。
-            </p>
-          </>
-        ) : (
-          <EmptyState title="未选择 profile" text="先选择或保存一个远程 profile，再安装 helper。" />
-        )}
-      </section>
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <h3>自定义远程 Profile</h3>
-          <div className="button-row compact">
-            <button type="button" onClick={() => selectedProfile && setRemoteProfileDraft(selectedProfile)}>
-              从当前填充
-            </button>
-            <button type="button" className="primary" onClick={() => saveRemoteProfile(remoteProfileDraft)}>
-              保存 profile
-            </button>
-            <button
-              type="button"
-              onClick={() => selectedProfile && deleteRemoteProfile(selectedProfile.id)}
-              disabled={!selectedProfile || selectedIsTemplate}
-            >
-              删除已保存
-            </button>
-          </div>
-        </div>
-        <div className="remote-profile-form">
-          <label>
-            ID
-            <input
-              value={remoteProfileDraft.id}
-              onChange={(event) => setRemoteProfileDraft({ ...remoteProfileDraft, id: event.target.value })}
-              placeholder="custom-slurm-gpu"
-            />
-          </label>
-          <label>
-            名称
-            <input
-              value={remoteProfileDraft.name}
-              onChange={(event) => setRemoteProfileDraft({ ...remoteProfileDraft, name: event.target.value })}
-              placeholder="Lab SLURM GPU"
-            />
-          </label>
-          <label>
-            主机
-            <input
-              value={remoteProfileDraft.host}
-              onChange={(event) => setRemoteProfileDraft({ ...remoteProfileDraft, host: event.target.value })}
-              placeholder="login.cluster.edu"
-            />
-          </label>
-          <label>
-            调度器
-            <select
-              value={remoteProfileDraft.scheduler}
-              onChange={(event) =>
-                setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: event.target.value as ExecutionMode })
-              }
-            >
-              <option value="ssh">SSH</option>
-              <option value="slurm">SLURM</option>
-              <option value="pbs">PBS</option>
-              <option value="lsf">LSF</option>
-            </select>
-          </label>
-          <label>
-            工作目录
-            <input
-              value={remoteProfileDraft.workdir}
-              onChange={(event) => setRemoteProfileDraft({ ...remoteProfileDraft, workdir: event.target.value })}
-              placeholder="/scratch/$USER/automd"
-            />
-          </label>
-          <label>
-            默认队列
-            <input
-              value={remoteProfileDraft.defaultQueue ?? ""}
-              onChange={(event) =>
-                setRemoteProfileDraft({ ...remoteProfileDraft, defaultQueue: event.target.value || null })
-              }
-              placeholder="gpu"
-            />
-          </label>
-          <label className="span-all">
-            Module / setup commands
-            <textarea
-              value={remoteProfileDraft.moduleLoad.join("\n")}
-              onChange={(event) =>
-                setRemoteProfileDraft({
-                  ...remoteProfileDraft,
-                  moduleLoad: event.target.value.split("\n")
-                })
-              }
-              rows={4}
-              spellCheck={false}
-            />
-          </label>
-        </div>
-      </section>
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <h3>远程命令</h3>
-          <button type="button" onClick={() => generateRemotePackage(selectedProfile?.id)}>
-            刷新
-          </button>
-        </div>
-        {remotePackage ? (
-          <>
-            <dl className="definition-list">
-              <div><dt>调度器</dt><dd>{executionModeText[remotePackage.scheduler]}</dd></div>
-              <div><dt>Run 目录</dt><dd className="mono">{remotePackage.runDirectory}</dd></div>
-              <div><dt>远程目录</dt><dd className="mono">{remotePackage.remoteWorkdir}</dd></div>
-            </dl>
-            <div className="remote-runner-controls">
-              <label>
-                执行模式
-                <select value={remoteWorkflowMode} onChange={(event) => setRemoteWorkflowMode(event.target.value as RemoteWorkflowMode)}>
-                  <option value="dryRun">Dry run：只预览命令</option>
-                  <option value="writeFiles">只写脚本：写入 remote/ 文件，不连接</option>
-                  <option value="execute">执行：运行本地 ssh/rsync 命令</option>
-                </select>
-              </label>
-              <label>
-                Job id / PID
-                <input
-                  value={remoteWorkflowJobId}
-                  onChange={(event) => setRemoteWorkflowJobId(event.target.value)}
-                  placeholder={remoteJobSnapshot?.jobId ?? "<job-id>"}
-                />
-              </label>
-              <label>
-                超时 (秒)
-                <input
-                  type="number"
-                  min={1}
-                  max={3600}
-                  value={remoteWorkflowTimeout}
-                  onChange={(event) => setRemoteWorkflowTimeout(Number(event.target.value))}
-                />
-              </label>
-            </div>
-            {remotePackage.warnings.length ? (
-              <div className="warning-stack">
-                {remotePackage.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-              </div>
-            ) : null}
-            <div className="remote-command-grid">
-              {remotePackage.commands.map((command) => (
-                <div className="remote-command-row" key={command.id}>
-                  <div>
-                    <strong>{command.label}</strong>
-                    <span>{command.description}</span>
-                  </div>
-                  <code>{command.command}</code>
-                  <button type="button" onClick={() => runRemoteStep(command.id)}>
-                    运行步骤
-                  </button>
-                </div>
-              ))}
-            </div>
-            {remoteWorkflowResult ? (
-              <div className="remote-runner-result">
-                <dl className="definition-list">
-                  <div><dt>步骤</dt><dd>{remoteWorkflowResult.label}</dd></div>
-                  <div><dt>模式</dt><dd>{remoteWorkflowModeText[remoteWorkflowResult.mode]}</dd></div>
-                  <div><dt>状态</dt><dd>{remoteWorkflowResult.status}</dd></div>
-                  <div><dt>退出码</dt><dd>{remoteWorkflowResult.exitCode ?? "n/a"}</dd></div>
-                  <div><dt>写入文件</dt><dd>{remoteWorkflowResult.filesWritten.length}</dd></div>
-                  <div><dt>耗时</dt><dd>{remoteWorkflowResult.durationMs ?? 0} ms</dd></div>
-                </dl>
-                {remoteWorkflowResult.warnings.length ? (
-                  <div className="warning-stack">
-                    {remoteWorkflowResult.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-                  </div>
-                ) : null}
-                <details>
-                  <summary>执行命令</summary>
-                  <CodeBlock value={remoteWorkflowResult.command} />
-                </details>
-                <details open={Boolean(remoteWorkflowResult.stdout)}>
-                  <summary>stdout</summary>
-                  <CodeBlock value={remoteWorkflowResult.stdout || "(empty)"} />
-                </details>
-                <details open={Boolean(remoteWorkflowResult.stderr)}>
-                  <summary>stderr</summary>
-                  <CodeBlock value={remoteWorkflowResult.stderr || "(empty)"} />
-                </details>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <EmptyState title="未生成远程包" text="选择 profile 后生成 SSH/rsync、提交、状态、取消和回收命令。" />
-        )}
-      </section>
-      <section className="panel span-3">
-        <h3>远程脚本</h3>
-        {remotePackage ? (
-          <div className="command-list">
-            {remotePackage.files.map((file) => (
-              <details key={file.path} open={file.path.includes("submit") || file.path.includes("run-ssh")}>
-                <summary>{file.path}</summary>
-                <CodeBlock value={file.contents} />
-              </details>
-            ))}
-          </div>
-        ) : (
-          <EmptyState title="等待生成" text="脚本会包含调度器 directives、module load、运行命令和同步脚本。" />
-        )}
-      </section>
-      <section className="panel span-3">
-        <div className="panel-title-row">
-          <h3>远程状态解析</h3>
-          <button type="button" onClick={parseRemoteStatus} disabled={!remotePackage}>
-            解析状态
-          </button>
-        </div>
-        <div className="remote-status-grid">
-          <label>
-            Submit output
-            <textarea
-              value={remoteSubmitOutput}
-              onChange={(event) => setRemoteSubmitOutput(event.target.value)}
-              rows={4}
-              spellCheck={false}
-            />
-          </label>
-          <label>
-            Scheduler status output
-            <textarea
-              value={remoteStatusOutput}
-              onChange={(event) => setRemoteStatusOutput(event.target.value)}
-              rows={4}
-              spellCheck={false}
-            />
-          </label>
-          <label>
-            Remote log tail
-            <textarea
-              value={remoteLogOutput}
-              onChange={(event) => setRemoteLogOutput(event.target.value)}
-              rows={4}
-              spellCheck={false}
-            />
-          </label>
-        </div>
-        {remoteJobSnapshot ? (
-          <div className="remote-snapshot">
-            <dl className="definition-list">
-              <div><dt>Job id</dt><dd className="mono">{remoteJobSnapshot.jobId ?? "未提取"}</dd></div>
-              <div><dt>状态</dt><dd>{remoteJobSnapshot.status}</dd></div>
-              <div><dt>队列状态</dt><dd>{remoteJobSnapshot.queueState ?? "未检测"}</dd></div>
-              <div><dt>当前步数</dt><dd>{remoteJobSnapshot.currentStep ?? "未检测"}</dd></div>
-              <div><dt>性能</dt><dd>{remoteJobSnapshot.nsPerDay ? `${remoteJobSnapshot.nsPerDay.toFixed(3)} ns/day` : "未检测"}</dd></div>
-              <div><dt>进度</dt><dd>{remoteJobSnapshot.progressPercent ? `${remoteJobSnapshot.progressPercent.toFixed(1)}%` : "未检测"}</dd></div>
-            </dl>
-            {remoteJobSnapshot.reason ? <p className="hint-text">{remoteJobSnapshot.reason}</p> : null}
-            {remoteJobSnapshot.warnings.length ? (
-              <div className="warning-stack">
-                {remoteJobSnapshot.warnings.map((warning) => <p key={warning}>{warning}</p>)}
-              </div>
-            ) : null}
-            {remoteJobSnapshot.logReport?.events.length ? (
-              <div className="event-list compact-events">
-                {remoteJobSnapshot.logReport.events.slice(0, 8).map((event) => (
-                  <div className={`event-row ${event.kind}`} key={`${event.lineNumber}-${event.message}`}>
-                    <span>{event.kind}</span>
-                    <p>{event.message}</p>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <EmptyState title="等待解析" text="粘贴 sbatch/qsub/bsub 返回、队列查询和远程日志片段后，AutoMD 会生成统一远程作业快照。" />
-        )}
-      </section>
+      </details>
     </div>
   );
 }
