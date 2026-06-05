@@ -2950,7 +2950,7 @@ function GuidePanel({
             <p className="muted">AutoMD 会把复杂的引擎文件藏到后台，但这些词决定你知道自己正在操作什么。</p>
           </div>
         </div>
-        <dl className="definition-list">
+        <dl className="definition-list guide-glossary">
           {conceptRows.map((row) => (
             <div key={row.term}>
               <dt>{row.term}</dt>
