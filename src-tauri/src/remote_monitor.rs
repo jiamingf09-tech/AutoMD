@@ -316,4 +316,27 @@ mod tests {
         assert_eq!(snapshot.status, TaskStatus::Completed);
         assert_eq!(snapshot.queue_state.as_deref(), Some("process-missing"));
     }
+
+    #[test]
+    fn parses_ssh_missing_process_with_fatal_log_as_failed() {
+        let snapshot = parse_remote_status(RemoteStatusParseRequest {
+            engine_id: "gromacs".to_string(),
+            scheduler: ExecutionMode::Ssh,
+            submit_output: Some("2441".to_string()),
+            status_output: Some("not-running".to_string()),
+            log_output: Some(
+                "AutoMD remote SSH job started at 2026-06-06T22:00:00+08:00\nFatal error: mock failure\n"
+                    .to_string(),
+            ),
+        });
+
+        assert_eq!(snapshot.job_id.as_deref(), Some("2441"));
+        assert_eq!(snapshot.status, TaskStatus::Failed);
+        assert_eq!(snapshot.queue_state.as_deref(), Some("process-missing"));
+        assert!(snapshot
+            .log_report
+            .as_ref()
+            .and_then(|report| report.fatal_error.as_ref())
+            .is_some());
+    }
 }

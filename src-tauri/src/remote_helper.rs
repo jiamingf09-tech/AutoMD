@@ -102,7 +102,7 @@ case "$cmd" in
     cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
     memory_bytes="$(detect_memory_bytes)"
     if command -v nvidia-smi >/dev/null 2>&1; then
-      gpu_summary="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -n 8 | json_escape)"
+      gpu_summary="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -n 8 | json_escape || true)"
     else
       gpu_summary=""
     fi
@@ -496,5 +496,47 @@ mod tests {
             default_install_path(&profile),
             format!("/scratch/noir/automd/.automd/helper/{HELPER_VERSION}")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_probe_survives_broken_nvidia_smi() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!("automd-helper-test-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let fake_nvidia_smi = bin.join("nvidia-smi");
+        fs::write(
+            &fake_nvidia_smi,
+            "#!/usr/bin/env sh\necho 'driver unavailable' >&2\nexit 9\n",
+        )
+        .expect("write fake nvidia-smi");
+        fs::set_permissions(&fake_nvidia_smi, fs::Permissions::from_mode(0o755)).expect("chmod fake");
+
+        let helper = root.join("automd-helper.sh");
+        fs::write(&helper, bash_helper_script()).expect("write helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("chmod helper");
+
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let output = Command::new("bash")
+            .arg(&helper)
+            .arg("probe")
+            .env("PATH", path)
+            .output()
+            .expect("run helper");
+
+        let _ = fs::remove_dir_all(root);
+        assert!(
+            output.status.success(),
+            "helper failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: HelperProbeOutput =
+            serde_json::from_slice(&output.stdout).expect("probe output should be json");
+        assert_eq!(parsed.helper_version.as_deref(), Some(HELPER_VERSION));
     }
 }

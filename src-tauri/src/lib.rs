@@ -1876,7 +1876,7 @@ fn remote_submit_inner(scheduler: &ExecutionMode, workdir: &str, script: &str) -
         ExecutionMode::Pbs => format!("cd {workdir} && qsub {script}"),
         ExecutionMode::Lsf => format!("cd {workdir} && bsub < {script}"),
         _ => format!(
-            "cd {workdir} && mkdir -p logs && nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err & echo $!"
+            "cd {workdir} && mkdir -p logs && (nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err < /dev/null & echo $!)"
         ),
     }
 }
@@ -2109,6 +2109,15 @@ mod remote_preflight_override_tests {
         let checks = vec![check("structure", false), check("helper", false)];
 
         assert!(!remote_preflight_can_override(&checks, &ExecutionMode::Ssh));
+    }
+
+    #[test]
+    fn ssh_direct_submit_detaches_nohup_process() {
+        let command = remote_submit_inner(&ExecutionMode::Ssh, "/scratch/noir/automd/run-1", "remote/run-ssh.sh");
+
+        assert!(command.contains("mkdir -p logs"));
+        assert!(command.contains("(nohup bash remote/run-ssh.sh"));
+        assert!(command.contains("< /dev/null & echo $!)"));
     }
 }
 

@@ -385,7 +385,7 @@ fn submit_command(profile: &RemoteProfile, remote_workdir: &str, scheduler_filen
             "ssh {host} {remote_cmd}",
             host = shell_quote(&profile.host),
             remote_cmd = shell_quote(&format!(
-                "cd {} && nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err & echo $!",
+                "cd {} && mkdir -p logs && (nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err < /dev/null & echo $!)",
                 shell_quote(remote_workdir)
             )),
         ),
@@ -892,6 +892,43 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.id == "sync-up" && command.command.contains("rsync -az")));
+    }
+
+    #[test]
+    fn remote_ssh_submit_command_detaches_job() {
+        let plan = planner::default_simulation_plan(PlanRequest {
+            project_id: None,
+            name: "ssh demo".to_string(),
+            engine_id: "gromacs".to_string(),
+            domain: ProjectDomain::Biomolecular,
+        });
+        let package = remote_execution_package(RemoteExecutionRequest {
+            plan,
+            profile: RemoteProfile {
+                id: "ssh-test".to_string(),
+                name: "SSH test".to_string(),
+                host: "workstation.example".to_string(),
+                username: String::new(),
+                port: 22,
+                auth_method: RemoteAuthMethod::Agent,
+                identity_file: None,
+                scheduler: ExecutionMode::Ssh,
+                workdir: "/scratch/$USER/automd".to_string(),
+                module_load: vec![],
+                default_queue: None,
+            },
+            local_project_path: Some("/tmp/AutoMD project".to_string()),
+            include_submit: true,
+        });
+
+        let submit = package
+            .commands
+            .iter()
+            .find(|command| command.id == "submit")
+            .expect("submit command");
+        assert!(submit.command.contains("mkdir -p logs"));
+        assert!(submit.command.contains("(nohup bash remote/run-ssh.sh"));
+        assert!(submit.command.contains("< /dev/null & echo $!)"));
     }
 
     #[test]
