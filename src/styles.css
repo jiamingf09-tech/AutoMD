@@ -117,10 +117,20 @@ select {
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 14px;
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
   background: var(--surface);
   color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease,
     box-shadow 0.15s ease, color 0.15s ease, transform 0.12s ease;
@@ -1412,6 +1422,7 @@ ul {
 .plugin-import-box {
   display: grid;
   gap: 12px;
+  align-content: start;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
@@ -1458,6 +1469,7 @@ ul {
 .plugin-config-row {
   display: grid;
   gap: 12px;
+  align-content: start;
   min-width: 0;
 }
 
@@ -1561,11 +1573,19 @@ ul {
   gap: 8px;
 }
 
+/* One compact tier for every dense action row, so buttons across engine cards,
+   plugin cards, tool rows and the science sidecar are the same size. flex lets
+   the (usually 3-4) buttons in a row share the width evenly instead of being
+   text-sized and ragged. */
 .engine-card-actions button,
-.tool-action-row button {
-  padding: 6px 9px;
+.tool-action-row button,
+.science-tool-actions button,
+.plugin-card-actions button {
+  flex: 1 1 auto;
+  min-height: 32px;
+  padding: 6px 10px;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .engine-advanced {
@@ -1633,13 +1653,14 @@ ul {
 }
 
 .chip-row span {
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: var(--surface-2);
-  padding: 3px 8px;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 700;
+  padding: 2px 9px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .compact-dl {
@@ -3118,6 +3139,7 @@ ul {
   align-self: start;
   width: 24px;
   height: 24px;
+  min-height: 0;
   padding: 0;
   border-color: transparent;
   background: transparent;
@@ -3514,12 +3536,6 @@ ul {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-
-.science-tool-actions button {
-  min-height: 32px;
-  padding: 6px 12px;
-  font-size: 12px;
 }
 
 .science-tool-detail {
