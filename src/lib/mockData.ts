@@ -792,7 +792,7 @@ export function mockRemoteExecutionPackage(request: RemoteExecutionRequest): Rem
       ? `ssh ${request.profile.host} 'cd ${remoteWorkdir} && qsub ${schedulerFile}'`
       : request.profile.scheduler === "lsf"
         ? `ssh ${request.profile.host} 'cd ${remoteWorkdir} && bsub < ${schedulerFile}'`
-        : `ssh ${request.profile.host} 'cd ${remoteWorkdir} && nohup bash ${schedulerFile} > logs/automd-ssh.out 2> logs/automd-ssh.err & echo $!'`;
+        : `ssh ${request.profile.host} 'cd ${remoteWorkdir} && mkdir -p logs && (nohup bash ${schedulerFile} > logs/automd-ssh.out 2> logs/automd-ssh.err < /dev/null & echo $!)'`;
   return {
     engineId: request.plan.engineId,
     scheduler: request.profile.scheduler,
