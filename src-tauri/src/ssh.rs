@@ -238,6 +238,7 @@ pub fn rsync_up(
     remote_dir: &str,
 ) -> Result<SshOutcome, String> {
     let local = format!("{}/", local_dir.trim_end_matches('/'));
+    let remote_dir = expand_remote_path_vars(profile, remote_dir);
     let remote = format!("{}:{}", target(profile), remote_dir);
     rsync_transfer(profile, password, &local, &remote, upload_filter_args())
 }
@@ -249,9 +250,18 @@ pub fn rsync_down(
     remote_dir: &str,
     local_dir: &str,
 ) -> Result<SshOutcome, String> {
+    let remote_dir = expand_remote_path_vars(profile, remote_dir);
     let remote = format!("{}:{}/", target(profile), remote_dir.trim_end_matches('/'));
     let local = format!("{}/", local_dir.trim_end_matches('/'));
     rsync_transfer(profile, password, &remote, &local, result_filter_args())
+}
+
+fn expand_remote_path_vars(profile: &RemoteProfile, remote_dir: &str) -> String {
+    let user = profile.username.trim();
+    if user.is_empty() {
+        return remote_dir.to_string();
+    }
+    remote_dir.replace("${USER}", user).replace("$USER", user)
 }
 
 pub fn transferred_regular_file_count(output: &str) -> Option<u32> {
@@ -488,6 +498,16 @@ mod tests {
         // Password auth should not attach the identity file.
         let pwd = dial_opts(&profile(RemoteAuthMethod::Password));
         assert!(!pwd.iter().any(|o| o == "-i"));
+    }
+
+    #[test]
+    fn expands_user_placeholder_in_remote_rsync_paths() {
+        let profile = profile(RemoteAuthMethod::Agent);
+
+        assert_eq!(
+            expand_remote_path_vars(&profile, "/scratch/$USER/automd/${USER}"),
+            "/scratch/noir/automd/noir"
+        );
     }
 
     #[test]
