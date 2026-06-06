@@ -185,7 +185,7 @@ fn parse_lsf_status(output: &str, job_id: Option<&str>) -> Option<ParsedQueueSta
 
 fn parse_ssh_status(output: &str) -> Option<ParsedQueueStatus> {
     let lower = output.to_ascii_lowercase();
-    if lower.contains("no such process") || lower.contains("not found") {
+    if lower.contains("no such process") || lower.contains("not found") || lower.contains("not-running") {
         Some(ParsedQueueStatus {
             status: TaskStatus::Completed,
             queue_state: Some("process-missing".to_string()),
@@ -300,5 +300,20 @@ mod tests {
         assert_eq!(snapshot.job_id.as_deref(), Some("2468"));
         assert_eq!(snapshot.status, TaskStatus::Failed);
         assert_eq!(snapshot.queue_state.as_deref(), Some("EXIT"));
+    }
+
+    #[test]
+    fn parses_ssh_not_running_sentinel_as_terminal() {
+        let snapshot = parse_remote_status(RemoteStatusParseRequest {
+            engine_id: "gromacs".to_string(),
+            scheduler: ExecutionMode::Ssh,
+            submit_output: Some("2441".to_string()),
+            status_output: Some("not-running".to_string()),
+            log_output: None,
+        });
+
+        assert_eq!(snapshot.job_id.as_deref(), Some("2441"));
+        assert_eq!(snapshot.status, TaskStatus::Completed);
+        assert_eq!(snapshot.queue_state.as_deref(), Some("process-missing"));
     }
 }

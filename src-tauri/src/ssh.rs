@@ -239,7 +239,7 @@ pub fn rsync_up(
 ) -> Result<SshOutcome, String> {
     let local = format!("{}/", local_dir.trim_end_matches('/'));
     let remote = format!("{}:{}", target(profile), remote_dir);
-    rsync_transfer(profile, password, &local, &remote)
+    rsync_transfer(profile, password, &local, &remote, upload_filter_args())
 }
 
 /// rsync results down from `remote_dir` into `local_dir`.
@@ -251,7 +251,56 @@ pub fn rsync_down(
 ) -> Result<SshOutcome, String> {
     let remote = format!("{}:{}/", target(profile), remote_dir.trim_end_matches('/'));
     let local = format!("{}/", local_dir.trim_end_matches('/'));
-    rsync_transfer(profile, password, &remote, &local)
+    rsync_transfer(profile, password, &remote, &local, result_filter_args())
+}
+
+pub fn transferred_regular_file_count(output: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if !label.trim().eq_ignore_ascii_case("Number of regular files transferred") {
+            return None;
+        }
+        value
+            .trim()
+            .replace(',', "")
+            .parse::<u32>()
+            .ok()
+    })
+}
+
+fn upload_filter_args() -> &'static [&'static str] {
+    &[
+        "--exclude=.git/",
+        "--exclude=.claude/",
+        "--exclude=.omc/",
+        "--exclude=node_modules/",
+        "--exclude=src-tauri/target/",
+        "--exclude=dist/",
+        "--exclude=target/",
+        "--exclude=runs/",
+        "--exclude=trajectories/",
+        "--exclude=analysis/",
+        "--exclude=reports/",
+        "--exclude=checkpoints/",
+        "--exclude=build-recipes/",
+        "--exclude=*.dmg",
+        "--exclude=.DS_Store",
+    ]
+}
+
+fn result_filter_args() -> &'static [&'static str] {
+    &[
+        "--prune-empty-dirs",
+        "--include=*/",
+        "--include=runs/***",
+        "--include=trajectories/***",
+        "--include=analysis/***",
+        "--include=reports/***",
+        "--include=checkpoints/***",
+        "--include=logs/***",
+        "--include=remote/***",
+        "--exclude=*",
+    ]
 }
 
 fn rsync_transfer(
@@ -259,6 +308,7 @@ fn rsync_transfer(
     password: Option<&str>,
     src: &str,
     dst: &str,
+    filter_args: &[&str],
 ) -> Result<SshOutcome, String> {
     ensure_session(profile, password)?;
     let rsync = rsync_program()
@@ -277,6 +327,8 @@ fn rsync_transfer(
     let output = Command::new(rsync)
         .arg("-az")
         .arg("--partial")
+        .arg("--stats")
+        .args(filter_args)
         .arg("-e")
         .arg(&ssh_transport)
         .arg(src)
@@ -443,5 +495,16 @@ mod tests {
         assert!(classify_connection_error("Permission denied (publickey,password).").contains("认证失败"));
         assert!(classify_connection_error("ssh: connect to host x port 22: Connection refused").contains("端口"));
         assert!(classify_connection_error("Connection timed out").contains("超时"));
+    }
+
+    #[test]
+    fn parses_rsync_regular_file_transfer_count() {
+        let output = "\
+Number of files: 42 (reg: 31, dir: 11)
+Number of regular files transferred: 1,234
+Total transferred file size: 10,240 bytes
+";
+
+        assert_eq!(transferred_regular_file_count(output), Some(1234));
     }
 }

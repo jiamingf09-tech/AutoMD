@@ -2594,8 +2594,9 @@ function App() {
       const result = await api.testRemoteConnection(remoteProfileDraft, remotePasswordArg());
       setRemoteConnectionTest(result);
       if (result.ok) {
-        if (result.scheduler && result.scheduler !== remoteProfileDraft.scheduler) {
-          setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: result.scheduler });
+        const nextScheduler = result.scheduler ?? "ssh";
+        if (nextScheduler !== remoteProfileDraft.scheduler) {
+          setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: nextScheduler });
         }
         notifySuccess(result.message, "已连接");
       } else {
@@ -6295,7 +6296,7 @@ function RemotePanel({
         {remotePreflight && !remotePreflight.allOk && remotePreflight.canOverride ? (
           <label className="check-row">
             <input type="checkbox" checked={remoteAllowNoHelper} onChange={() => setRemoteAllowNoHelper(!remoteAllowNoHelper)} />
-            <span>高级：跳过远程助手，直接 SSH 提交（仅在你确认远程已就绪时）</span>
+            <span>高级：跳过远程助手/引擎登记，直接 SSH 提交（仅在你确认远程已装好所需引擎时）</span>
           </label>
         ) : null}
         <div className="button-row">

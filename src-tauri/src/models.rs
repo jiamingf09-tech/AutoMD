@@ -814,8 +814,8 @@ pub struct PreflightCheck {
 pub struct RemoteSubmitPreflight {
     pub checks: Vec<PreflightCheck>,
     pub all_ok: bool,
-    /// True when the only failing check is "helper installed" (overridable via
-    /// the advanced no-helper direct-submit mode).
+    /// True when failing checks are safe for the explicit advanced SSH-direct
+    /// override: helper only for schedulers, helper/engine for SSH direct.
     pub can_override: bool,
 }
 

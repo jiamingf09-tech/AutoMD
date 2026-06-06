@@ -2058,6 +2058,60 @@ fn build_connection_test(host: &str, user: Option<String>, out: &ssh::SshOutcome
     }
 }
 
+fn remote_preflight_can_override(checks: &[PreflightCheck], scheduler: &ExecutionMode) -> bool {
+    checks.iter().filter(|check| !check.ok).all(|check| {
+        if scheduler == &ExecutionMode::Ssh {
+            matches!(check.id.as_str(), "helper" | "engine")
+        } else {
+            check.id == "helper"
+        }
+    })
+}
+
+#[cfg(test)]
+mod remote_preflight_override_tests {
+    use super::*;
+
+    fn check(id: &str, ok: bool) -> PreflightCheck {
+        PreflightCheck {
+            id: id.to_string(),
+            label: id.to_string(),
+            ok,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn ssh_direct_can_override_missing_helper_and_engine() {
+        let checks = vec![
+            check("project", true),
+            check("structure", true),
+            check("plan", true),
+            check("engine", false),
+            check("helper", false),
+            check("workdir", true),
+            check("scheduler", true),
+        ];
+
+        assert!(remote_preflight_can_override(&checks, &ExecutionMode::Ssh));
+    }
+
+    #[test]
+    fn scheduled_hpc_can_only_override_missing_helper() {
+        let checks = vec![check("engine", false), check("helper", false)];
+
+        assert!(!remote_preflight_can_override(&checks, &ExecutionMode::Slurm));
+        assert!(remote_preflight_can_override(&[check("helper", false)], &ExecutionMode::Slurm));
+    }
+
+    #[test]
+    fn ssh_direct_cannot_override_missing_structure() {
+        let checks = vec![check("structure", false), check("helper", false)];
+
+        assert!(!remote_preflight_can_override(&checks, &ExecutionMode::Ssh));
+    }
+}
+
 /// Build the 7-point preflight checklist. Mixes cheap DB/plan checks with two
 /// live ssh probes (workdir writable, scheduler present).
 async fn run_remote_preflight(
@@ -2115,7 +2169,13 @@ async fn run_remote_preflight(
         id: "engine".to_string(),
         label: "目标设备已有该引擎".to_string(),
         ok: engine_ok,
-        detail: if engine_ok { format!("{} 已在目标设备登记。", plan.engine_id) } else { format!("目标设备尚未检测到 {}，请先用远程助手扫描/安装。", plan.engine_id) },
+        detail: if engine_ok {
+            format!("{} 已在目标设备登记。", plan.engine_id)
+        } else if profile.scheduler == ExecutionMode::Ssh {
+            format!("目标设备尚未检测到 {}。建议先用远程助手扫描/安装；如果你确认远程已自行装好，也可用高级直连覆盖。", plan.engine_id)
+        } else {
+            format!("目标设备尚未检测到 {}，请先用远程助手扫描/安装。", plan.engine_id)
+        },
     });
 
     let helper_ready = remote_helper_status_by_profile(state, &profile.id)
@@ -2180,8 +2240,7 @@ async fn run_remote_preflight(
     });
 
     let all_ok = checks.iter().all(|check| check.ok);
-    // Overridable only when the *single* failing check is the helper one.
-    let can_override = checks.iter().all(|check| check.ok || check.id == "helper");
+    let can_override = remote_preflight_can_override(&checks, &profile.scheduler);
     RemoteSubmitPreflight { checks, all_ok, can_override }
 }
 
@@ -2269,11 +2328,7 @@ async fn submit_remote_job(
         if !upload.success {
             return Err(format!("上传失败：{}", upload.combined()));
         }
-        let files_uploaded = upload
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty() && !line.starts_with("sending") && !line.contains("total size"))
-            .count() as u32;
+        let files_uploaded = ssh::transferred_regular_file_count(&upload.combined()).unwrap_or(0);
         // 4. Submit.
         let script = remote_scheduler_filename(&scheduler);
         let submit_cmd = remote_submit_inner(&scheduler, &package.remote_workdir, script);
@@ -2387,11 +2442,7 @@ async fn fetch_remote_results(
         if !download.success {
             return Err(format!("下载失败：{}", download.combined()));
         }
-        let files_downloaded = download
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty() && !line.starts_with("receiving") && !line.contains("total size"))
-            .count() as u32;
+        let files_downloaded = ssh::transferred_regular_file_count(&download.combined()).unwrap_or(0);
         Ok(RemoteFetchResult {
             files_downloaded,
             local_dir: local_dir.clone(),
