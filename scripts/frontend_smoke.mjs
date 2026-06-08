@@ -81,6 +81,9 @@ for (const text of requiredUiText) {
   check(app.includes(text), `missing workflow UI text: ${text}`);
 }
 check(!app.includes("远程 profile 模板"), "old remote profile-template panel should not be present");
+check(app.includes("function defaultRemoteWorkdir"), "missing username-aware remote workdir defaulting");
+check(app.includes("/home/${user}/automd"), "non-root remote users should default to their home workdir");
+check(app.includes("isAutoManagedRemoteWorkdir"), "remote username changes should preserve manually edited workdirs");
 
 check(
   mockData.includes("mkdir -p logs && (nohup bash") && mockData.includes("< /dev/null & echo $!)"),

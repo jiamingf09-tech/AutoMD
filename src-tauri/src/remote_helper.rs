@@ -253,9 +253,14 @@ pub fn install_helper(
         dir = shell_quote(&install_path),
         bash = shell_quote(&bash_path)
     );
+    let remote_is_posix = remote_looks_posix(profile, password);
     match ssh_with_stdin(profile, password, &bash_cmd, bash_helper_script()) {
         Ok(_) => check_helper(profile, Some(install_path), password),
         Err(bash_error) => {
+            let bash_error_text = bash_error.to_string();
+            if remote_is_posix || !should_try_powershell_after_bash_error(&bash_error_text) {
+                return Err(bash_error);
+            }
             let ps_cmd = format!(
                 "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$d='{dir}'; $p='{path}'; New-Item -ItemType Directory -Force -Path $d | Out-Null; [Console]::In.ReadToEnd() | Set-Content -Encoding UTF8 -Path $p\"",
                 dir = ps_escape(&install_path),
@@ -274,6 +279,7 @@ pub fn check_helper(
     password: Option<&str>,
 ) -> Result<RemoteHelperStatus, RemoteHelperError> {
     let install_path = install_path.unwrap_or_else(|| default_install_path(profile));
+    let remote_is_posix = remote_looks_posix(profile, password);
     let bash_cmd = format!(
         "bash {}/automd-helper.sh probe",
         shell_quote(&install_path)
@@ -281,6 +287,10 @@ pub fn check_helper(
     let output = match ssh_capture(profile, password, &bash_cmd) {
         Ok(output) => output,
         Err(bash_error) => {
+            let bash_error_text = bash_error.to_string();
+            if remote_is_posix || !should_try_powershell_after_bash_error(&bash_error_text) {
+                return Err(bash_error);
+            }
             let ps_cmd = format!(
                 "powershell -NoProfile -ExecutionPolicy Bypass -File {} probe",
                 ps_remote_quote(&format!("{install_path}/automd-helper.ps1"))
@@ -290,6 +300,29 @@ pub fn check_helper(
         }
     };
     parse_probe(profile, &install_path, &output)
+}
+
+fn remote_looks_posix(profile: &RemoteProfile, password: Option<&str>) -> bool {
+    ssh_capture(profile, password, "uname -s 2>/dev/null")
+        .map(|output| is_posix_uname_output(&output))
+        .unwrap_or(false)
+}
+
+fn is_posix_uname_output(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("linux") || lower.contains("darwin") || lower.contains("freebsd")
+}
+
+fn should_try_powershell_after_bash_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    !(
+        lower.contains("permission denied")
+            || lower.contains("权限")
+            || lower.contains("无法创建目录")
+            || lower.contains("mkdir:")
+            || lower.contains("chmod:")
+            || lower.contains("cat:")
+    )
 }
 
 pub fn scan_engine(
@@ -496,6 +529,26 @@ mod tests {
             default_install_path(&profile),
             format!("/scratch/noir/automd/.automd/helper/{HELPER_VERSION}")
         );
+    }
+
+    #[test]
+    fn posix_uname_output_is_detected() {
+        assert!(is_posix_uname_output("Linux\n"));
+        assert!(is_posix_uname_output("Darwin\n"));
+        assert!(!is_posix_uname_output("Microsoft Windows [Version 10.0]\n"));
+    }
+
+    #[test]
+    fn posix_permission_errors_do_not_try_powershell_fallback() {
+        assert!(!should_try_powershell_after_bash_error(
+            "mkdir: 无法创建目录 \"/root\": 权限不够"
+        ));
+        assert!(!should_try_powershell_after_bash_error(
+            "mkdir: cannot create directory '/root': Permission denied"
+        ));
+        assert!(should_try_powershell_after_bash_error(
+            "bash command unavailable on remote shell"
+        ));
     }
 
     #[cfg(unix)]

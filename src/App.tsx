@@ -463,6 +463,18 @@ const remoteHelperStateText: Record<RemoteHelperStatus["status"], string> = {
   permissionDenied: "权限不足"
 };
 
+function defaultRemoteWorkdir(username: string): string {
+  const user = username.trim();
+  if (!user || user === "root") return "/root/automd";
+  if (/^[A-Za-z0-9._-]+$/.test(user)) return `/home/${user}/automd`;
+  return "~/automd";
+}
+
+function isAutoManagedRemoteWorkdir(workdir: string, username: string): boolean {
+  const value = workdir.trim();
+  return value === "/root/automd" || value === "~/automd" || value === defaultRemoteWorkdir(username);
+}
+
 function isEnginePlatformBlocked(engine: EngineCapability): boolean {
   return engine.detection.status === "notApplicable" || engine.detection.status === "platformUnsupported";
 }
@@ -659,7 +671,7 @@ function App() {
     authMethod: "password",
     identityFile: null,
     scheduler: "slurm",
-    workdir: "/root/automd",
+    workdir: defaultRemoteWorkdir("root"),
     moduleLoad: [],
     defaultQueue: null
   });
@@ -2598,6 +2610,10 @@ function App() {
         if (nextScheduler !== remoteProfileDraft.scheduler) {
           setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: nextScheduler });
         }
+        removeNotificationsMatching((item) =>
+          item.severity === "error" &&
+          (item.message.includes("密码认证：请先输入密码再测试连接") || item.message.includes("请先填写主机/IP，再测试连接"))
+        );
         notifySuccess(result.message, "已连接");
       } else {
         pushNotification({ severity: "error", title: "连接失败", message: result.message });
@@ -2805,6 +2821,10 @@ function App() {
 
   function removeNotification(id: string) {
     setNotifications((items) => items.filter((item) => item.id !== id));
+  }
+
+  function removeNotificationsMatching(predicate: (item: AppNotification) => boolean) {
+    setNotifications((items) => items.filter((item) => !predicate(item)));
   }
 
   // Close (×): minimize a persistent problem (stays counted in the status bar); drop ephemeral notices.
@@ -6121,7 +6141,17 @@ function RemotePanel({
             </label>
             <label>
               用户名
-              <input value={draft.username} onChange={(event) => update({ username: event.target.value })} placeholder="root / 你的账号" />
+              <input
+                value={draft.username}
+                onChange={(event) => {
+                  const username = event.target.value;
+                  update({
+                    username,
+                    workdir: isAutoManagedRemoteWorkdir(draft.workdir, draft.username) ? defaultRemoteWorkdir(username) : draft.workdir
+                  });
+                }}
+                placeholder="root / 你的账号"
+              />
             </label>
             <label>
               认证方式
@@ -6237,7 +6267,7 @@ function RemotePanel({
           <div className="form-grid three">
             <label>
               远程工作目录
-              <input value={draft.workdir} onChange={(event) => update({ workdir: event.target.value })} placeholder="/root/automd 或 /scratch/$USER/automd" />
+              <input value={draft.workdir} onChange={(event) => update({ workdir: event.target.value })} placeholder="/home/用户名/automd 或 /scratch/$USER/automd" />
             </label>
             <label>
               调度器
