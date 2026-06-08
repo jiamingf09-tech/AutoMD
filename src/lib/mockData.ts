@@ -808,19 +808,19 @@ export function mockRemoteExecutionPackage(request: RemoteExecutionRequest): Rem
       {
         path: "remote/sync-up.sh",
         language: "bash",
-        contents: `rsync -az --delete --partial --append-verify ${request.localProjectPath ?? "."}/ ${request.profile.host}:${remoteWorkdir}/\n`
+        contents: `rsync -az --delete --partial --stats ${request.localProjectPath ?? "."}/ ${request.profile.host}:${remoteWorkdir}/\n`
       },
       {
         path: "remote/sync-down.sh",
         language: "bash",
-        contents: `rsync -az --partial --append-verify ${request.profile.host}:${remoteWorkdir}/runs/ ${request.localProjectPath ?? "."}/runs/\n`
+        contents: `rsync -az --partial --stats ${request.profile.host}:${remoteWorkdir}/runs/ ${request.localProjectPath ?? "."}/runs/\n`
       }
     ],
     commands: [
       {
         id: "sync-up",
         label: "同步到远程",
-        command: `rsync -az --delete --partial --append-verify ${request.localProjectPath ?? "."}/ ${request.profile.host}:${remoteWorkdir}/`,
+        command: `rsync -az --delete --partial --stats ${request.localProjectPath ?? "."}/ ${request.profile.host}:${remoteWorkdir}/`,
         description: "Web 预览模式远程同步命令。"
       },
       {
@@ -862,7 +862,7 @@ export function mockRemoteExecutionPackage(request: RemoteExecutionRequest): Rem
       {
         id: "sync-down",
         label: "回收结果",
-        command: `rsync -az --partial --append-verify ${request.profile.host}:${remoteWorkdir}/analysis/ ${request.localProjectPath ?? "."}/analysis/`,
+        command: `rsync -az --partial --stats ${request.profile.host}:${remoteWorkdir}/analysis/ ${request.localProjectPath ?? "."}/analysis/`,
         description: "回收分析结果。"
       }
     ],

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "smoke:frontend": "node scripts/frontend_smoke.mjs",
+    "smoke:remote": "node scripts/remote_acceptance.mjs",
     "check": "npm run build && npm run smoke:frontend && cargo test --manifest-path src-tauri/Cargo.toml",
     "icons": "node scripts/generate_icons.mjs && tauri icon src-tauri/icons/icon.png",
     "preview": "vite preview",

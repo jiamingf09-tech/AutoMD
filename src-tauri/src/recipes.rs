@@ -49,7 +49,7 @@ pub fn remote_execution_package(request: RemoteExecutionRequest) -> RemoteExecut
 set -euo pipefail
 
 ssh {host} {mkdir}
-rsync -az --delete --partial --append-verify \
+rsync -az --delete --partial --stats \
   --exclude 'src-tauri/target' \
   --exclude 'node_modules' \
   {local}/ {target}/
@@ -68,15 +68,15 @@ rsync -az --delete --partial --append-verify \
 set -euo pipefail
 
 mkdir -p {local}
-rsync -az --partial --append-verify \
+rsync -az --partial --stats \
   {target}/runs/ {local}/runs/
-rsync -az --partial --append-verify \
+rsync -az --partial --stats \
   {target}/checkpoints/ {local}/checkpoints/
-rsync -az --partial --append-verify \
+rsync -az --partial --stats \
   {target}/trajectories/ {local}/trajectories/
-rsync -az --partial --append-verify \
+rsync -az --partial --stats \
   {target}/analysis/ {local}/analysis/
-rsync -az --partial --append-verify \
+rsync -az --partial --stats \
   {target}/reports/ {local}/reports/
 "#,
                     local = shell_quote(&local_project),
@@ -89,7 +89,7 @@ rsync -az --partial --append-verify \
                 id: "sync-up".to_string(),
                 label: "同步到远程".to_string(),
                 command: format!(
-                    "ssh {host} {mkdir} && rsync -az --delete --partial --append-verify {local}/ {target}/",
+                    "ssh {host} {mkdir} && rsync -az --delete --partial --stats {local}/ {target}/",
                     host = shell_quote(&profile.host),
                     mkdir = shell_quote(&format!("mkdir -p {}", shell_quote(&remote_workdir))),
                     local = shell_quote(&local_project),
@@ -125,7 +125,7 @@ rsync -az --partial --append-verify \
                 id: "sync-down".to_string(),
                 label: "回收结果".to_string(),
                 command: format!(
-                    "rsync -az --partial --append-verify {target}/runs/ {local}/runs/ && rsync -az --partial --append-verify {target}/analysis/ {local}/analysis/",
+                    "rsync -az --partial --stats {target}/runs/ {local}/runs/ && rsync -az --partial --stats {target}/analysis/ {local}/analysis/",
                     target = remote_target,
                     local = shell_quote(&local_project),
                 ),
@@ -892,6 +892,15 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.id == "sync-up" && command.command.contains("rsync -az")));
+        let generated_text = package
+            .files
+            .iter()
+            .map(|file| file.contents.as_str())
+            .chain(package.commands.iter().map(|command| command.command.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(generated_text.contains("--partial --stats"));
+        assert!(!generated_text.contains("--append-verify"));
     }
 
     #[test]

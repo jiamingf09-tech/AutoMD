@@ -91,7 +91,50 @@ This keeps the desktop app small and avoids shipping compiled scientific stacks 
 ## Release Checklist
 
 - Run `npm run check`.
+- Run `npm run smoke:remote` against a real SSH target when credentials are available. Without `AUTOMD_REMOTE_HOST` the command exits safely after printing a skip message.
 - Build platform installer with the appropriate `npm run tauri:build:*` command.
 - Launch the packaged app and verify project creation, engine capability display, Workflow parameter mapping, dry-run package generation, mock local run, remote package preview, build recipe export, and report export.
 - Confirm restricted/commercial engines show user-license/install guidance and are not bundled.
 - Include `README.md`, `docs/ENGINE_ADAPTERS.md`, `docs/PROJECT_FORMAT.md`, `docs/SCIENCE_SIDECAR.md`, `docs/PLUGIN_MANIFESTS.md`, and this release guide with the source distribution.
+
+## Remote Acceptance Smoke
+
+`npm run smoke:remote` is an optional live acceptance check for the in-app SSH/HPC workflow. It validates the current helper script, SSH/rsync upload filters, helper probe, GROMACS scan, SSH-direct detached submit/cancel, result fetch filters, and reconnect behavior. On a real cluster it can also exercise SLURM, PBS, or LSF submission when `AUTOMD_REMOTE_SCHEDULER` is set.
+
+Required:
+
+- `AUTOMD_REMOTE_HOST`
+
+Common options:
+
+- `AUTOMD_REMOTE_PORT`, default `22`.
+- `AUTOMD_REMOTE_USER`, optional when `~/.ssh/config` supplies the user.
+- `AUTOMD_REMOTE_AUTH`, one of `agent`, `key`, or `password`.
+- `AUTOMD_REMOTE_IDENTITY_FILE`, used with `AUTOMD_REMOTE_AUTH=key`.
+- `AUTOMD_REMOTE_PASSWORD`, used with `AUTOMD_REMOTE_AUTH=password`; this requires the local `expect` command so the script can create the same ControlMaster-style password session used by the app.
+- `AUTOMD_REMOTE_WORKDIR`, default `/tmp/automd-acceptance`.
+- `AUTOMD_REMOTE_SCHEDULER`, one of `auto`, `ssh`, `slurm`, `pbs`, or `lsf`; `auto` falls back to SSH direct when no scheduler command is found.
+- `AUTOMD_REMOTE_INSTALL_ENGINE=gromacs` to test a real helper-driven conda-forge GROMACS install on the target. Leave unset to scan only.
+- `AUTOMD_REMOTE_KEEP=1` to keep local, fetched, and remote evidence directories after the run.
+
+Example for an SSH-direct Linux machine:
+
+```bash
+AUTOMD_REMOTE_HOST=example.org \
+AUTOMD_REMOTE_USER=root \
+AUTOMD_REMOTE_AUTH=agent \
+AUTOMD_REMOTE_WORKDIR=/root/automd-acceptance \
+npm run smoke:remote
+```
+
+Example for a SLURM login node:
+
+```bash
+AUTOMD_REMOTE_HOST=login.cluster.edu \
+AUTOMD_REMOTE_USER=myuser \
+AUTOMD_REMOTE_AUTH=key \
+AUTOMD_REMOTE_IDENTITY_FILE=~/.ssh/id_ed25519 \
+AUTOMD_REMOTE_WORKDIR=/scratch/$USER/automd-acceptance \
+AUTOMD_REMOTE_SCHEDULER=slurm \
+npm run smoke:remote
+```

@@ -164,7 +164,7 @@ The index records byte ranges, frame numbers, optional atom counts, optional tim
 `RemoteExecutionPackage` records the selected remote profile, scheduler, remote working directory, run directory, generated scripts, commands, and warnings. The current generator produces:
 
 - `remote/submit.slurm`, `remote/submit.pbs`, `remote/submit.lsf`, or `remote/run-ssh.sh` depending on the profile scheduler.
-- `remote/sync-up.sh` for creating the remote workdir and pushing the project with `rsync --partial --append-verify`.
+- `remote/sync-up.sh` for creating the remote workdir and pushing the project with `rsync --partial --stats`.
 - `remote/sync-down.sh` for collecting `runs/`, `checkpoints/`, `trajectories/`, `analysis/`, and `reports/`.
 - GUI command previews for sync-up, submit, status, cancel, log-tail, and sync-down.
 
