@@ -50,8 +50,13 @@ const requiredUiText = [
   "生成远程执行包",
   "运行高级部署",
   "目标设备",
+  "连接服务器 / HPC",
   "远程助手",
   "安装远程助手",
+  "确认要跑的计划",
+  "预检并提交",
+  "上传并提交作业",
+  "下载结果到本地",
   "生成分析包",
   "导出 MD",
   "导出 HTML",
@@ -75,6 +80,16 @@ const requiredUiText = [
 for (const text of requiredUiText) {
   check(app.includes(text), `missing workflow UI text: ${text}`);
 }
+check(!app.includes("远程 profile 模板"), "old remote profile-template panel should not be present");
+
+check(
+  mockData.includes("mkdir -p logs && (nohup bash") && mockData.includes("< /dev/null & echo $!)"),
+  "mock SSH direct submit command must detach nohup from stdin and echo the PID inside the subshell"
+);
+check(
+  !mockData.includes("logs/automd-ssh.err & echo $!'"),
+  "mock SSH direct submit command still contains the old non-detaching nohup form"
+);
 
 const commandNames = [...api.matchAll(/call<[^>]+>\("([^"]+)"/g)].map((match) => match[1]);
 check(commandNames.length > 25, "expected many Tauri command calls in src/lib/api.ts");
