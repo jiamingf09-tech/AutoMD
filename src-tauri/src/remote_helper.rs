@@ -94,6 +94,68 @@ detect_memory_bytes() {
   echo 0
 }
 
+micromamba_subdir() {
+  platform="$(detect_platform)"
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$platform:$arch" in
+    linux:x86_64|linux:amd64) echo linux-64 ;;
+    linux:aarch64|linux:arm64) echo linux-aarch64 ;;
+    macos:x86_64|macos:amd64) echo osx-64 ;;
+    macos:aarch64|macos:arm64) echo osx-arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_managed_micromamba() {
+  tool_dir="$HOME/.automd/tools/micromamba"
+  micromamba_bin="$tool_dir/bin/micromamba"
+  if [ -x "$micromamba_bin" ]; then
+    echo "$micromamba_bin"
+    return 0
+  fi
+  subdir="$(micromamba_subdir)" || {
+    echo "micromamba is not available for this remote platform/architecture" >&2
+    return 1
+  }
+  mkdir -p "$tool_dir"
+  archive="$tool_dir/micromamba.tar.bz2"
+  url="https://micro.mamba.pm/api/micromamba/$subdir/latest"
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL "$url" -o "$archive"; then
+      echo "failed to download managed micromamba with curl" >&2
+      return 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! wget -qO "$archive" "$url"; then
+      echo "failed to download managed micromamba with wget" >&2
+      return 1
+    fi
+  else
+    echo "remote curl/wget not found; cannot download micromamba" >&2
+    return 1
+  fi
+  if ! tar -xjf "$archive" -C "$tool_dir" bin/micromamba; then
+    echo "failed to extract managed micromamba archive" >&2
+    return 1
+  fi
+  if [ ! -f "$micromamba_bin" ]; then
+    echo "managed micromamba archive did not contain bin/micromamba" >&2
+    return 1
+  fi
+  chmod +x "$micromamba_bin"
+  echo "$micromamba_bin"
+}
+
+find_package_manager() {
+  for candidate in micromamba mamba conda; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  install_managed_micromamba
+}
+
 case "$cmd" in
   probe)
     platform="$(detect_platform)"
@@ -138,6 +200,13 @@ PY
         printf '{"found":true,"path":"%s","version":"%s","platform":"%s","arch":"%s"}\n' "$path" "$version" "$platform" "$arch"
         exit 0
       fi
+      for managed_path in "$HOME"/.automd/engines/*/bin/"$candidate"; do
+        if [ -x "$managed_path" ]; then
+          version="$($managed_path --version 2>&1 | head -n 1 | json_escape || true)"
+          printf '{"found":true,"path":"%s","version":"%s","platform":"%s","arch":"%s"}\n' "$managed_path" "$version" "$platform" "$arch"
+          exit 0
+        fi
+      done
     done
     printf '{"found":false,"path":null,"version":null,"platform":"%s","arch":"%s"}\n' "$platform" "$arch"
     ;;
@@ -150,22 +219,21 @@ PY
       echo '{"status":"failed","stderr":"missing engine id or package"}'
       exit 2
     fi
-    manager=""
-    for candidate in micromamba mamba conda; do
-      if command -v "$candidate" >/dev/null 2>&1; then
-        manager="$candidate"
-        break
-      fi
-    done
+    manager_error="$(mktemp)"
+    manager="$(find_package_manager 2>"$manager_error" || true)"
     if [ -z "$manager" ]; then
-      echo '{"status":"failed","stderr":"remote conda/mamba/micromamba not found"}'
+      manager_message="$(cat "$manager_error" | json_escape)"
+      rm -f "$manager_error"
+      if [ -z "$manager_message" ]; then
+        manager_message="remote conda/mamba/micromamba not found and managed micromamba bootstrap failed"
+      fi
+      printf '{"status":"failed","stderr":"%s"}\n' "$manager_message"
       exit 3
     fi
-    if [ "$manager" = "conda" ] || [ "$manager" = "mamba" ]; then
-      "$manager" create -y -p "$prefix" -c conda-forge "$package"
-    else
-      "$manager" create -y -p "$prefix" -c conda-forge "$package"
-    fi
+    rm -f "$manager_error"
+    export MAMBA_ROOT_PREFIX="$HOME/.automd/micromamba-root"
+    mkdir -p "$MAMBA_ROOT_PREFIX"
+    "$manager" create -y -p "$prefix" -c conda-forge "$package"
     for candidate in "$@"; do
       if [ -x "$prefix/bin/$candidate" ]; then
         printf '{"status":"completed","path":"%s","version":"conda-forge"}\n' "$prefix/bin/$candidate"
@@ -266,8 +334,9 @@ pub fn install_helper(
                 dir = ps_escape(&install_path),
                 path = ps_escape(&ps_path)
             );
-            ssh_with_stdin(profile, password, &ps_cmd, powershell_helper_script())
-                .map_err(|ps_error| RemoteHelperError::Command(format!("{bash_error}; {ps_error}")))?;
+            ssh_with_stdin(profile, password, &ps_cmd, powershell_helper_script()).map_err(
+                |ps_error| RemoteHelperError::Command(format!("{bash_error}; {ps_error}")),
+            )?;
             check_helper(profile, Some(install_path), password)
         }
     }
@@ -280,10 +349,7 @@ pub fn check_helper(
 ) -> Result<RemoteHelperStatus, RemoteHelperError> {
     let install_path = install_path.unwrap_or_else(|| default_install_path(profile));
     let remote_is_posix = remote_looks_posix(profile, password);
-    let bash_cmd = format!(
-        "bash {}/automd-helper.sh probe",
-        shell_quote(&install_path)
-    );
+    let bash_cmd = format!("bash {}/automd-helper.sh probe", shell_quote(&install_path));
     let output = match ssh_capture(profile, password, &bash_cmd) {
         Ok(output) => output,
         Err(bash_error) => {
@@ -295,8 +361,9 @@ pub fn check_helper(
                 "powershell -NoProfile -ExecutionPolicy Bypass -File {} probe",
                 ps_remote_quote(&format!("{install_path}/automd-helper.ps1"))
             );
-            ssh_capture(profile, password, &ps_cmd)
-                .map_err(|ps_error| RemoteHelperError::Command(format!("{bash_error}; {ps_error}")))?
+            ssh_capture(profile, password, &ps_cmd).map_err(|ps_error| {
+                RemoteHelperError::Command(format!("{bash_error}; {ps_error}"))
+            })?
         }
     };
     parse_probe(profile, &install_path, &output)
@@ -315,14 +382,12 @@ fn is_posix_uname_output(output: &str) -> bool {
 
 fn should_try_powershell_after_bash_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    !(
-        lower.contains("permission denied")
-            || lower.contains("权限")
-            || lower.contains("无法创建目录")
-            || lower.contains("mkdir:")
-            || lower.contains("chmod:")
-            || lower.contains("cat:")
-    )
+    !(lower.contains("permission denied")
+        || lower.contains("权限")
+        || lower.contains("无法创建目录")
+        || lower.contains("mkdir:")
+        || lower.contains("chmod:")
+        || lower.contains("cat:"))
 }
 
 pub fn scan_engine(
@@ -390,19 +455,23 @@ pub fn install_engine_with_helper(
         args
     );
     let output = ssh_capture(profile, password, &command)?;
-    let parsed: HelperInstallOutput = serde_json::from_str(output.trim())?;
+    let parsed: HelperInstallOutput = serde_json::from_str(last_json_line(&output)?)?;
     if parsed.status.as_deref() == Some("failed") {
         return Err(RemoteHelperError::Command(
-            parsed.stderr.unwrap_or_else(|| "remote install failed".to_string()),
+            parsed
+                .stderr
+                .unwrap_or_else(|| "remote install failed".to_string()),
         ));
     }
     let location = parsed.path.ok_or(RemoteHelperError::MissingInstallPath)?;
-    let probe = scan_engine(profile, install_path, executable_names, password)?.unwrap_or(RemoteEngineProbe {
-        location,
-        version: parsed.version,
-        platform: None,
-        arch: None,
-    });
+    let probe = scan_engine(profile, install_path, executable_names, password)?.unwrap_or(
+        RemoteEngineProbe {
+            location,
+            version: parsed.version,
+            platform: None,
+            arch: None,
+        },
+    );
     Ok(probe)
 }
 
@@ -421,7 +490,22 @@ pub fn run_build_engine_with_helper(
     ssh_with_stdin(profile, password, &command, script)
 }
 
-fn parse_probe(profile: &RemoteProfile, install_path: &str, output: &str) -> Result<RemoteHelperStatus, RemoteHelperError> {
+fn last_json_line(output: &str) -> Result<&str, RemoteHelperError> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with('{') && line.ends_with('}'))
+        .ok_or_else(|| {
+            RemoteHelperError::Command("remote helper did not emit a JSON result".to_string())
+        })
+}
+
+fn parse_probe(
+    profile: &RemoteProfile,
+    install_path: &str,
+    output: &str,
+) -> Result<RemoteHelperStatus, RemoteHelperError> {
     let parsed: HelperProbeOutput = serde_json::from_str(output.trim())?;
     let status = if parsed.helper_version.as_deref() == Some(HELPER_VERSION) {
         RemoteHelperState::Ready
@@ -505,9 +589,21 @@ mod tests {
         assert!(bash.contains("scan-engines"));
         assert!(bash.contains("install-engine"));
         assert!(bash.contains("build-engine"));
+        assert!(bash.contains("install_managed_micromamba"));
+        assert!(bash.contains("micro.mamba.pm/api/micromamba"));
         let ps = powershell_helper_script();
         assert!(ps.contains("probe"));
         assert!(ps.contains("scan-engines"));
+    }
+
+    #[test]
+    fn install_output_parser_uses_last_json_line() {
+        let output = "Collecting package metadata...\nTransaction finished\n{\"status\":\"completed\",\"path\":\"/tmp/gmx\",\"version\":\"conda-forge\"}\n";
+        assert_eq!(
+            last_json_line(output).expect("json line"),
+            "{\"status\":\"completed\",\"path\":\"/tmp/gmx\",\"version\":\"conda-forge\"}"
+        );
+        assert!(last_json_line("no json here").is_err());
     }
 
     #[test]
@@ -558,7 +654,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
-        let root = std::env::temp_dir().join(format!("automd-helper-test-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("automd-helper-test-{}", uuid::Uuid::new_v4()));
         let bin = root.join("bin");
         fs::create_dir_all(&bin).expect("create bin");
         let fake_nvidia_smi = bin.join("nvidia-smi");
@@ -567,13 +664,18 @@ mod tests {
             "#!/usr/bin/env sh\necho 'driver unavailable' >&2\nexit 9\n",
         )
         .expect("write fake nvidia-smi");
-        fs::set_permissions(&fake_nvidia_smi, fs::Permissions::from_mode(0o755)).expect("chmod fake");
+        fs::set_permissions(&fake_nvidia_smi, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake");
 
         let helper = root.join("automd-helper.sh");
         fs::write(&helper, bash_helper_script()).expect("write helper");
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("chmod helper");
 
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let output = Command::new("bash")
             .arg(&helper)
             .arg("probe")
