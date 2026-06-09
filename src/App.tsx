@@ -1033,6 +1033,10 @@ function App() {
       setPluginRegistry(plugins);
       setRemoteProfiles(profiles);
       setSelectedRemoteProfileId((current) => current ?? profiles[0]?.id ?? null);
+      setRemoteProfileDraft((current) => {
+        const hydrated = profiles.find((profile) => profile.id === current.id) ?? profiles[0];
+        return hydrated ?? current;
+      });
       setProjects(storedProjects);
       setTaskRecords(storedTasks);
       let restoredStructures: StructureEntry[] = [];
@@ -2466,6 +2470,20 @@ function App() {
       const profiles = await api.remoteProfiles();
       setRemoteProfiles(profiles);
       setSelectedRemoteProfileId(profiles[0]?.id ?? null);
+      setRemoteProfileDraft((current) => profiles[0] ?? {
+        ...current,
+        id: "custom-hpc",
+        name: "我的 HPC / 服务器",
+        host: "",
+        username: "root",
+        port: 22,
+        authMethod: "password",
+        identityFile: null,
+        scheduler: "slurm",
+        workdir: defaultRemoteWorkdir("root"),
+        moduleLoad: [],
+        defaultQueue: null
+      });
       setRemotePackage(null);
       setRemoteJobSnapshot(null);
       setRemoteWorkflowResult(null);
