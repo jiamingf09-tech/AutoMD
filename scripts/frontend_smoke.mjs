@@ -43,7 +43,7 @@ const requiredUiText = [
   "一键安装/修复科学环境",
   "生产模拟长度 (ns)",
   "参数检查",
-  "生成 batch package",
+  "生成批量实验包",
   "启动本地任务",
   "取消任务",
   "刷新 artifact",

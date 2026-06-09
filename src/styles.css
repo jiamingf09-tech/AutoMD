@@ -324,18 +324,47 @@ ul {
 
 .nav-item {
   display: grid;
-  gap: 3px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  justify-items: stretch;
+  gap: 10px;
   width: 100%;
   padding: 11px 12px;
   text-align: left;
 }
 
-.nav-item span {
-  font-weight: 750;
+.nav-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--brand-strong);
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
 }
 
-.nav-item small {
+.nav-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.nav-copy > span {
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-copy small {
   color: var(--text-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-item.active {
@@ -344,7 +373,12 @@ ul {
   box-shadow: inset 3px 0 0 var(--brand);
 }
 
-.nav-item.active span {
+.nav-item.active .nav-icon {
+  border-color: color-mix(in srgb, var(--brand), transparent 40%);
+  background: var(--surface);
+}
+
+.nav-item.active .nav-copy > span {
   color: var(--brand-strong);
 }
 
@@ -367,7 +401,9 @@ ul {
 
 .guide-launch {
   display: grid;
-  gap: 3px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
   width: 100%;
   padding: 10px 12px;
   text-align: left;
@@ -375,12 +411,12 @@ ul {
   background: var(--surface-2);
 }
 
-.guide-launch span {
+.guide-launch .nav-copy > span {
   color: var(--text);
   font-weight: 800;
 }
 
-.guide-launch small {
+.guide-launch .nav-copy small {
   color: var(--text-4);
 }
 
@@ -390,7 +426,12 @@ ul {
   box-shadow: inset 3px 0 0 var(--brand);
 }
 
-.guide-launch.active span {
+.guide-launch.active .nav-icon {
+  border-color: color-mix(in srgb, var(--brand), transparent 40%);
+  background: var(--surface);
+}
+
+.guide-launch.active .nav-copy > span {
   color: var(--brand-strong);
 }
 
@@ -1392,7 +1433,7 @@ ul {
 
 .engine-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(390px, 100%), 1fr));
   gap: 12px;
   align-items: start;
 }
@@ -1594,6 +1635,11 @@ ul {
   color: var(--text-3);
   font-size: 13px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.engine-card .compact-dl div {
+  grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .engine-card-actions,
@@ -1872,6 +1918,10 @@ ul {
 .parameter-mapping-table {
   display: grid;
   gap: 6px;
+  max-height: 440px;
+  overflow: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
 }
 
 .parameter-mapping-head,
@@ -1883,10 +1933,14 @@ ul {
 }
 
 .parameter-mapping-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   color: var(--text-4);
   font-size: 12px;
   font-weight: 800;
   padding: 0 10px;
+  background: var(--surface);
 }
 
 .parameter-mapping-row {
@@ -2109,6 +2163,19 @@ ul {
 
 .field-grid.two {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.batch-controls {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr) minmax(180px, auto);
+  gap: 12px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.batch-controls button {
+  min-height: 42px;
+  padding-inline: 18px;
 }
 
 .replica-list {
@@ -2970,6 +3037,17 @@ ul {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  .nav-item,
+  .guide-launch {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .nav-icon {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+
   .content-grid,
   .overview-grid,
   .project-grid,
@@ -2986,6 +3064,7 @@ ul {
   .build-runner-controls,
   .remote-profile-form,
   .metric-grid,
+  .batch-controls,
   .plugin-metrics,
   .analysis-stats {
     grid-template-columns: 1fr;

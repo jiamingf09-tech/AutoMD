@@ -312,14 +312,14 @@ function DirectPluginRunModal({
 // Ordered to match the actual beginner workflow (top → bottom): create a
 // project & import a structure, configure, run, then view results. Advanced
 // infrastructure tabs (remote / engines / plugins) follow the separator.
-const tabs: Array<{ id: TabId; label: string; description: string }> = [
-  { id: "overview", label: "项目", description: "创建项目并导入结构" },
-  { id: "workflow", label: "流程", description: "参数、阶段和分析模块" },
-  { id: "run", label: "运行", description: "本地运行与任务监控" },
-  { id: "report", label: "报告", description: "可复现实验输出" },
-  { id: "remote", label: "远程", description: "SSH / HPC 集群执行" },
-  { id: "engines", label: "引擎", description: "本机/远程部署与检测" },
-  { id: "plugins", label: "插件", description: "扩展 manifest 和能力" }
+const tabs: Array<{ id: TabId; label: string; description: string; icon: string }> = [
+  { id: "overview", label: "项目", description: "创建项目并导入结构", icon: "⌂" },
+  { id: "workflow", label: "流程", description: "参数、阶段和分析模块", icon: "⇄" },
+  { id: "run", label: "运行", description: "本地运行与任务监控", icon: "▶" },
+  { id: "report", label: "报告", description: "可复现实验输出", icon: "▤" },
+  { id: "remote", label: "远程", description: "SSH / HPC 集群执行", icon: "⇡" },
+  { id: "engines", label: "引擎", description: "本机/远程部署与检测", icon: "⚙" },
+  { id: "plugins", label: "插件", description: "扩展 manifest 和能力", icon: "◇" }
 ];
 
 const guideTab = {
@@ -2965,8 +2965,11 @@ function App() {
               onClick={() => setActiveTab(tab.id)}
               type="button"
             >
-              <span>{tab.label}</span>
-              <small>{tab.description}</small>
+              <span className="nav-icon" aria-hidden="true">{tab.icon}</span>
+              <span className="nav-copy">
+                <span>{tab.label}</span>
+                <small>{tab.description}</small>
+              </span>
             </button>
           ))}
           {enabledUserPlugins.length ? (
@@ -2982,8 +2985,11 @@ function App() {
                   }}
                   type="button"
                 >
-                  <span>{plugin.name}</span>
-                  <small>{pluginKindText[plugin.kind]} · {plugin.integrationTargets.join(", ") || "通用"}</small>
+                  <span className="nav-icon" aria-hidden="true">✦</span>
+                  <span className="nav-copy">
+                    <span>{plugin.name}</span>
+                    <small>{pluginKindText[plugin.kind]} · {plugin.integrationTargets.join(", ") || "通用"}</small>
+                  </span>
                 </button>
               ))}
             </div>
@@ -2995,8 +3001,11 @@ function App() {
             className={`guide-launch ${activeTab === "guide" ? "active" : ""}`}
             onClick={() => setActiveTab("guide")}
           >
-            <span>使用指引</span>
-            <small>软件配置、引擎、插件和部署</small>
+            <span className="nav-icon" aria-hidden="true">?</span>
+            <span className="nav-copy">
+              <span>使用指引</span>
+              <small>软件配置、引擎、插件和部署</small>
+            </span>
           </button>
           <div className="sidebar-status-row">
             <button
@@ -3410,6 +3419,11 @@ function GuidePanel({
       where: "在项目、流程、运行、远程和报告页顶部固定显示。确认这里的项目名再点击任何运行类按钮。"
     },
     {
+      term: "左侧导航图标",
+      meaning: "每个图标对应一个主要工作区：项目、流程、运行、报告、远程、引擎和插件。图标用于快速扫视，文字标签仍然是判断模块用途的主依据。",
+      where: "按照从上到下的顺序使用：先项目，再流程，再运行和报告；远程、引擎、插件是配置和扩展区域。"
+    },
+    {
       term: "当前结构",
       meaning: "真正要拿去做模拟的分子结构。只有选中结构后，软件才允许生成结构准备文件、运行包、远程提交脚本或报告。",
       where: "在项目页的结构索引中选择。没有结构时，后续页面会警告并拒绝发送 MD 运行指令。"
@@ -3438,6 +3452,11 @@ function GuidePanel({
       term: "运行包",
       meaning: "可以执行或提交的一组文件，包含引擎输入、命令脚本、日志路径、checkpoint 路径和 artifact 约定。",
       where: "在运行页生成。先 Dry run 检查，再真实执行。"
+    },
+    {
+      term: "批量实验包",
+      meaning: "为同一个计划生成多个 replica 和不同 seed 的重复实验文件，适合检查随机种子、初始速度或重复模拟的一致性。",
+      where: "在运行页的“高级 / 更多”里设置 Replica 数和 Seed 起点。生成后只写 generated/batch 文件，不会直接启动模拟。"
     },
     {
       term: "Artifact",
@@ -3569,7 +3588,7 @@ function GuidePanel({
       title: "运行",
       target: "run",
       use: "执行本地任务、Dry run、Mock runner、日志解析、取消任务、checkpoint resume、批量重复实验、轨迹索引和分析包生成。",
-      fill: "选择本地运行模式，设置批量重复数量和 seed，必要时编辑原生参数文件，粘贴日志样本做解析。",
+      fill: "选择本地运行模式；普通用户先用 Dry run 生成运行包。需要重复实验时，打开“高级 / 更多”，填写 Replica 数和 Seed 起点，点击“生成批量实验包”。必要时再编辑原生参数文件或粘贴日志样本做解析。",
       check: "先确认当前项目固定条里显示了当前结构，再生成 run package；没有选中结构时 AutoMD 会直接拒绝运行。之后再看任务状态、日志尾部、失败分类、checkpoint 和 artifact。真实执行前最好先 Dry run。",
       next: "本地完成后刷新 artifact 并分析；集群任务去“远程”；需要报告去“报告”。"
     },
@@ -5652,7 +5671,7 @@ function RunPanel({
         <summary>高级 / 更多：批量实验、生成文件与脚本、原生编辑、资源、历史、日志解析</summary>
 
         <h4>批量重复实验</h4>
-        <div className="field-grid two">
+        <div className="batch-controls">
           <label>
             Replica 数
             <input
@@ -5672,10 +5691,11 @@ function RunPanel({
               onChange={(event) => setBatchSeedStart(Number(event.target.value))}
             />
           </label>
+          <button type="button" className="primary" onClick={generateBatchExperiment} disabled={!plan}>
+            生成批量实验包
+          </button>
         </div>
-        <button type="button" className="primary fill" onClick={generateBatchExperiment} disabled={!plan}>
-          生成 batch package
-        </button>
+        <p className="hint-text">用于多 seed / 多 replica 的重复实验；生成后会写入 generated/batch，不会立即启动模拟。</p>
         {batchPackage ? (
           <div className="run-package">
             <dl className="definition-list">
