@@ -995,6 +995,12 @@ pub struct ToolDiagnostic {
 pub struct FilePickRequest {
     pub title: Option<String>,
     pub extensions: Vec<String>,
+    /// Optional default directory to open the file dialog in.
+    #[serde(default)]
+    pub default_dir: Option<String>,
+    /// When true, the file dialog should show hidden files (dot-files).
+    #[serde(default)]
+    pub show_hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

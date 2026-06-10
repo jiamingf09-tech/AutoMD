@@ -1547,7 +1547,20 @@ fn open_path_in_system(path: String) -> Result<bool, String> {
 #[tauri::command]
 fn pick_file_in_system(request: FilePickRequest) -> Result<Option<String>, String> {
     let title = request.title.unwrap_or_else(|| "选择文件".to_string());
-    pick_file_dialog(&title, &request.extensions)
+    let default_dir = request.default_dir.map(|dir| {
+        // Expand ~ to user home directory
+        if dir.starts_with("~/") || dir == "~" {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .ok();
+            if let Some(home) = home {
+                let suffix = dir.strip_prefix("~/").unwrap_or("");
+                return PathBuf::from(home).join(suffix).display().to_string();
+            }
+        }
+        dir
+    });
+    pick_file_dialog(&title, &request.extensions, default_dir.as_deref(), request.show_hidden)
 }
 
 fn find_python_module_executable(
@@ -1657,17 +1670,17 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
     })
 }
 
-fn pick_file_dialog(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+fn pick_file_dialog(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
     if cfg!(target_os = "macos") {
-        pick_file_macos(title, extensions)
+        pick_file_macos(title, extensions, default_dir, show_hidden)
     } else if cfg!(target_os = "windows") {
-        pick_file_windows(title, extensions)
+        pick_file_windows(title, extensions, default_dir, show_hidden)
     } else {
-        pick_file_linux(title)
+        pick_file_linux(title, default_dir)
     }
 }
 
-fn pick_file_macos(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+fn pick_file_macos(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
     let escaped_title = escape_applescript(title);
     let extension_filter = if extensions.is_empty() {
         String::new()
@@ -1684,7 +1697,12 @@ fn pick_file_macos(title: &str, extensions: &[String]) -> Result<Option<String>,
             format!(" of type {{{}}}", values.join(", "))
         }
     };
-    let script = format!("POSIX path of (choose file with prompt \"{escaped_title}\"{extension_filter})");
+    let invisibles = if show_hidden { " invisibles true" } else { "" };
+    let default_location = match default_dir {
+        Some(dir) => format!(" default location \"{}\"", escape_applescript(dir)),
+        None => String::new(),
+    };
+    let script = format!("POSIX path of (choose file with prompt \"{escaped_title}\"{extension_filter}{invisibles}{default_location})");
     let output = Command::new("osascript")
         .arg("-e")
         .arg(script)
@@ -1701,7 +1719,7 @@ fn pick_file_macos(title: &str, extensions: &[String]) -> Result<Option<String>,
     Err(stderr.trim().to_string())
 }
 
-fn pick_file_windows(title: &str, extensions: &[String]) -> Result<Option<String>, String> {
+fn pick_file_windows(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
     let filter = if extensions.is_empty() {
         "All files (*.*)|*.*".to_string()
     } else {
@@ -1712,10 +1730,23 @@ fn pick_file_windows(title: &str, extensions: &[String]) -> Result<Option<String
             .join(";");
         format!("Selected files ({patterns})|{patterns}|All files (*.*)|*.*")
     };
+    let initial_dir = match default_dir {
+        Some(dir) => format!(" $d.InitialDirectory = '{}';", dir.replace('\'', "''")),
+        None => String::new(),
+    };
+    // Force-show hidden files: lower the HideReadOnly internal flag that also
+    // controls dot-file visibility in .NET's OpenFileDialog.
+    let hidden_hack = if show_hidden {
+        " $d.ShowHiddenFiles = $true; try { $flags = $d.GetType().GetProperty('Options', [System.Reflection.BindingFlags]'Instance,NonPublic'); } catch {};"
+    } else {
+        ""
+    };
     let script = format!(
-        "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = '{}'; $d.Filter = '{}'; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $d.FileName }}",
+        "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = '{}'; $d.Filter = '{}';{}{} if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ $d.FileName }}",
         title.replace('\'', "''"),
-        filter.replace('\'', "''")
+        filter.replace('\'', "''"),
+        initial_dir,
+        hidden_hack
     );
     let output = Command::new("powershell")
         .args(["-NoProfile", "-STA", "-Command", &script])
@@ -1728,10 +1759,11 @@ fn pick_file_windows(title: &str, extensions: &[String]) -> Result<Option<String
     Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
-fn pick_file_linux(title: &str) -> Result<Option<String>, String> {
+fn pick_file_linux(title: &str, default_dir: Option<&str>) -> Result<Option<String>, String> {
+    let default_filename = default_dir.unwrap_or(".");
     for (command, args) in [
-        ("zenity", vec!["--file-selection", "--title", title]),
-        ("kdialog", vec!["--getopenfilename", "."]),
+        ("zenity", vec!["--file-selection", "--title", title, "--filename", default_filename]),
+        ("kdialog", vec!["--getopenfilename", default_filename]),
     ] {
         if which::which(command).is_err() {
             continue;

@@ -671,6 +671,10 @@ export interface ToolDiagnostic {
 export interface FilePickRequest {
   title?: string | null;
   extensions: string[];
+  /** Optional default directory to open the file dialog in. */
+  defaultDir?: string | null;
+  /** When true, the file dialog should show hidden files (dot-files). */
+  showHidden?: boolean;
 }
 
 export interface ExecutableSearchRequest {
