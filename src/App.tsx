@@ -7286,7 +7286,9 @@ function PluginsPanel({
           <div className="guide-section">
             <p className="muted">插件目录由当前系统的应用数据目录动态生成，不会写死某个用户名或某台电脑的绝对路径。插件页会显示本机实际目录，也可以一键打开。</p>
             <div className="guide-table">
-              <div className="guide-table-head"><span>字段</span><span>用途</span><span>注意</span></div>
+              <div className="guide-table-head">字段</div>
+              <div className="guide-table-head">用途</div>
+              <div className="guide-table-head">注意</div>
               <div><strong>id / name / kind / version</strong></div><div>标识插件、显示名称、类型和版本。</div><div>ID 只能使用小写 ASCII、数字、短横线或下划线。</div>
               <div><strong>entrypoint</strong></div><div>插件入口脚本，相对插件目录。</div><div>沙盒模式禁止绝对路径和 .. 跳出目录。</div>
               <div><strong>actions</strong></div><div>声明可运行动作、命令和参数。</div><div>不写 action 时会生成默认动作。</div>
