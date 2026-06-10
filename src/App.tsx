@@ -3412,6 +3412,31 @@ function GuidePanel({
   engines: EngineCapability[];
   setActiveTab: (tab: TabId) => void;
 }) {
+  const guideContentRef = useRef<HTMLDivElement | null>(null);
+  const guideOutlineRef = useRef<HTMLElement | null>(null);
+  const [activeGuideSection, setActiveGuideSection] = useState("guide-quickstart");
+  const guideSections = useMemo(() => [
+    { id: "guide-quickstart", label: "快速开始" },
+    { id: "guide-concepts", label: "先弄懂这些词" },
+    { id: "guide-full-flow", label: "完整项目流程" },
+    { id: "guide-parameters", label: "常用参数" },
+    { id: "guide-science", label: "科学环境" },
+    { id: "guide-pages", label: "每个页面怎么用" },
+    { id: "guide-directories", label: "项目目录" },
+    { id: "guide-reproducibility", label: "索引与复现记录" },
+    { id: "guide-structure-import", label: "结构导入格式" },
+    { id: "guide-run-features", label: "运行功能" },
+    { id: "guide-status", label: "顶部与状态栏" },
+    { id: "guide-performance", label: "性能配置" },
+    { id: "guide-engines", label: "引擎配置" },
+    { id: "guide-deploy-build", label: "安装部署编译" },
+    { id: "guide-platform", label: "平台策略" },
+    { id: "guide-remote", label: "远程/HPC" },
+    { id: "guide-run-report", label: "分析和报告" },
+    { id: "guide-plugins", label: "插件管理" },
+    { id: "guide-failures", label: "故障处理" }
+  ], []);
+
   const conceptRows: Array<{ term: string; meaning: string; where: string }> = [
     {
       term: "当前项目",
@@ -3472,6 +3497,11 @@ function GuidePanel({
       term: "Walltime",
       meaning: "给本地/远程任务预留的实际机器运行时间，不等于模拟时间。模拟时间用 ns/us/ms 表示。",
       where: "生产模拟长度在流程页用 ns；HPC walltime 在远程或资源设置里用小时。"
+    },
+    {
+      term: "性能配置",
+      meaning: "左下角设置里的 CPU、GPU、内存和磁盘偏好。它决定 AutoMD 生成本地运行、远程模板、安装/分析任务时优先使用多少资源。",
+      where: "普通用户先用默认建议；要避免卡顿时减少 CPU 核心数，GPU 不确定时先选 CPU 模式或自动选择。"
     }
   ];
 
@@ -3626,9 +3656,198 @@ function GuidePanel({
     }
   ];
 
+  const projectDirectoryRows: Array<{ path: string; purpose: string; userAction: string }> = [
+    { path: "inputs/", purpose: "保存导入的原始结构、配体和已有引擎工程文件。", userAction: "导入结构后先检查这里是否有对应文件；不要直接把大型轨迹塞进 inputs。" },
+    { path: "generated/", purpose: "保存 AutoMD 生成的引擎输入、参数文件、Python 准备包和分析包。", userAction: "Dry run 后重点检查 generated/<engine>/；需要手工复核时从运行页打开原生文件编辑器。" },
+    { path: "generated/prep/", purpose: "结构准备包，包含 prepare_structure.py、environment.yml、准备报告和配体参数化说明。", userAction: "结构准备失败时先看这里的 README 和 structure-prep-report.json。" },
+    { path: "generated/analysis/", purpose: "MDAnalysis 分析包，包含 run_mdanalysis.py、environment.yml 和分析说明。", userAction: "轨迹出来后再生成；先确认 topology、trajectory 和 selection 能对应。" },
+    { path: "generated/batch/", purpose: "批量 replica/seed 实验包。每个 replica 有独立计划和独立原生文件。", userAction: "重复实验前生成；不要把单次运行的文件手动复制成批量实验。" },
+    { path: "runs/", purpose: "每次本地或远程运行的日志、命令、stdout/stderr、环境快照和任务状态。", userAction: "任务失败时先打开对应 run 目录的日志；checkpoint resume 也依赖这里。" },
+    { path: "checkpoints/", purpose: "集中保存或索引可恢复的 checkpoint/restart 文件。", userAction: "取消任务或 walltime 到期后先找 checkpoint，不要删除。" },
+    { path: "trajectories/", purpose: "保存轨迹文件和 .automd-index 分块索引。", userAction: "大轨迹先索引，再预览抽样帧；二进制轨迹通常交给 MDAnalysis 解码。" },
+    { path: "analysis/", purpose: "保存 RMSD/RMSF/Rg/氢键/距离/能量等 CSV、XVG 或 JSON 结果。", userAction: "刷新 artifact 后图表会读取这里的小型数值表。" },
+    { path: "reports/", purpose: "保存 Markdown、HTML 和 PDF 报告。", userAction: "项目阶段结束或要分享结果时导出；报告会引用 artifact 和环境快照。" },
+    { path: "remote/", purpose: "保存 SSH/rsync、SLURM/PBS/LSF 或 SSH 直跑脚本。", userAction: "远程任务先写脚本审阅，再执行连接、同步、提交和回收。" },
+    { path: "build-recipes/", purpose: "保存引擎部署、源码编译、容器 recipe 和构建日志。", userAction: "一键部署失败或平台特殊时，从这里查看脚本、stdout/stderr 和失败分析。" }
+  ];
+
+  const reproducibilityRows: Array<{ item: string; purpose: string; where: string; userAction: string }> = [
+    { item: "SQLite 项目索引", purpose: "保存项目列表、当前项目摘要、远程 profile、引擎安装记录、任务历史、artifact 元数据和分析缓存。", where: "软件自己的应用数据目录，不是项目科学结果本身。", userAction: "普通用户不需要手动打开；如果项目文件夹还在，科学输入和输出仍以项目目录为准。" },
+    { item: "engine_installations", purpose: "记住每个本机或远程目标设备上的引擎路径、版本、授权状态和检测时间。", where: "引擎页扫描、手动登记或一键部署后写入。", userAction: "换电脑、换远程机器或移动 Conda 环境后，重新自动扫描或手动登记。" },
+    { item: "remote_profiles", purpose: "记住 SSH/HPC 主机、端口、用户名、调度器、workdir、队列和 module/setup 命令。", where: "远程页保存 profile 后写入。", userAction: "密码或 key 变化、workdir 变化、集群 module 变化时重新测试连接。" },
+    { item: "local_tasks", purpose: "保存本地任务 id、计划 id、引擎、模式、状态、进度、运行目录、退出码、错误和日志尾部。", where: "运行页启动 Dry run、Mock 或真实本地执行时写入。", userAction: "任务失败时先看这里对应的任务卡，再打开 run 目录日志。" },
+    { item: "automd-run-manifest.json", purpose: "每次 Dry run、Mock 或真实执行都会写出的可复现快照，包含 OS/arch、环境变量片段、运行工具、命令、计划和 run directory。", where: "runs/<engine-plan>/automd-run-manifest.json。", userAction: "不要把它当参数文件手改；报告和排错会引用它来说明当时到底怎么跑。" },
+    { item: "artifact_records", purpose: "保存最近一次项目扫描得到的文件种类、路径、大小、修改时间和摘要。", where: "刷新 artifact 后写入 SQLite；真实文件仍在 inputs/generated/runs/trajectories/analysis/reports 等目录。", userAction: "如果列表和文件夹不一致，先点刷新 artifact；远程任务先 sync-down 再刷新。" },
+    { item: "analysis_cache", purpose: "保存解析出来的图表序列摘要，例如 x/y 轴、点数、最小值、最大值和最后值。", where: "解析 .xvg 或 CSV 后写入 SQLite。", userAction: "图表为空时先确认 analysis 文件存在且有数值列，再重新解析。" },
+    { item: "trajectory index manifest", purpose: "记录大轨迹的格式、抽样帧、字节范围、时间和警告，避免 UI 一次性读完整轨迹。", where: "trajectories/.automd-index/。", userAction: "文本轨迹可直接分块预览；XTC/TRR/DCD/NetCDF/GSD 通常先作为 metadata，再用 MDAnalysis 侧车分析。" },
+    { item: "报告文件", purpose: "把当前计划、任务状态、运行命令、环境 manifest、artifact、分析图表和错误记录整理成 Markdown/HTML/PDF。", where: "reports/。", userAction: "导出前确认当前项目、当前结构、artifact 和分析缓存已经刷新。" }
+  ];
+
+  const structureInputRows: Array<{ format: string; use: string; caution: string }> = [
+    { format: "PDB / mmCIF", use: "蛋白、核酸、蛋白-配体复合物、实验结构或 AlphaFold/建模结构。", caution: "常见问题是缺失原子、缺氢、非标准残基、altloc、断链、金属配位和配体没有参数；先用结构准备包修复，再检查力场支持。" },
+    { format: "SDF / MOL2", use: "单个小分子、配体或辅因子输入。", caution: "这只是化学结构，不等于可运行拓扑。要确认质子化、手性、电荷、atom type、mol2/frcmod 或对应力场参数。" },
+    { format: "SMILES", use: "快速登记配体或小分子草图。", caution: "SMILES 没有 3D 构象、质子化环境和力场参数；生产模拟前必须生成并复核 3D 构型和参数。" },
+    { format: "已有引擎工程", use: "已经有 GROMACS/OpenMM/AMBER/NAMD/LAMMPS/CP2K 等原生项目时做统一索引。", caution: "AutoMD 会登记和生成 manifest，但不会自动证明原生输入科学有效；仍要看原生日志和参数文件。" },
+    { format: "大型轨迹", use: "运行后分析和预览，不作为新结构导入入口。", caution: "XTC/TRR/DCD/NetCDF/GSD 会先作为 metadata-only artifact；需要帧内容时用轨迹索引或 MDAnalysis 包。" }
+  ];
+
+  const runFeatureRows: Array<{ feature: string; when: string; how: string; risk: string }> = [
+    { feature: "Dry run", when: "第一次配置新项目、新引擎、新远程 profile 或新参数时。", how: "只生成输入、命令、脚本和路径约定，不启动计算。检查 generated、runs、remote 和 expected outputs。", risk: "Dry run 成功只说明文件能生成，不说明结构/力场一定科学正确。" },
+    { feature: "Mock runner", when: "想测试 GUI 监控、日志刷新、进度条、artifact 和报告闭环时。", how: "运行内置模拟器，不调用真实引擎。适合验证 UI 和流程，不适合作为科学结果。", risk: "Mock completed 不是 MD 成功；不要把 mock 日志写进正式报告结论。" },
+    { feature: "真实本地执行", when: "引擎 ready、结构已选中、参数检查通过、机器资源足够时。", how: "AutoMD 调用 generated/runs 中的 run 脚本，轮询状态、日志尾部、checkpoint 和失败分类。", risk: "可能长时间占用 CPU/GPU；生产前确认线程数、GPU、输出频率和 checkpoint。" },
+    { feature: "原生文件编辑", when: "参数映射显示近似/需复核，或引擎需要 GUI 没覆盖的字段。", how: "在运行页打开 .mdp、.mdin、.conf、.inp、.key、.py、.sh、JSON/YAML 等项目内文本文件。", risk: "只允许编辑项目内安全路径；改完原生文件后要重新 Dry run 或确认命令仍引用正确文件。" },
+    { feature: "日志解析", when: "本地/远程/手工运行失败，或要从已有日志提取 step、ns/day、checkpoint、warning、fatal error。", how: "把 log 尾部或完整小日志粘贴到运行页解析器。AutoMD 会分类并给建议。", risk: "只看最后一行可能漏掉真正首个错误；优先找第一条 fatal/error/warning。" },
+    { feature: "Checkpoint resume", when: "任务中断、取消、walltime 到期、机器重启或远程连接断开后。", how: "刷新 artifact 或发现 resume plan，使用推荐 checkpoint 和 append/restart 命令恢复。", risk: "删除 run 目录、改 deffnm、移动 checkpoint 或换不兼容参数会导致不能续跑。" },
+    { feature: "批量实验包", when: "需要多 seed、多 replica 检查随机性、收敛性或重复性。", how: "在运行页高级区设置 replica 数和 seed 起点，生成 generated/batch 和 run-batch.sh。", risk: "批量包生成后不会自动启动；每个 replica 的输出要分开看，不要只看平均值。" },
+    { feature: "轨迹索引/分块预览", when: "轨迹太大，不适合一次加载到前端。", how: "先索引文本轨迹 PDB/XYZ/LAMMPS dump；二进制轨迹登记为 metadata，交给分析侧车。", risk: "预览帧只是抽样，不代表完整轨迹质量；正式分析要用完整轨迹和合理 selection。" },
+    { feature: "报告导出", when: "完成一次测试、生产模拟或阶段性分析后。", how: "刷新 artifact 和分析缓存，导出 Markdown/HTML/PDF。", risk: "报告反映当前项目状态；导出前要确认当前项目和当前结构没有切错。" }
+  ];
+
+  const performanceRows: Array<{ setting: string; meaning: string; recommendation: string; warning: string }> = [
+    { setting: "CPU 核心数", meaning: "限制本地任务、分析任务和模板资源字段使用的线程数。", recommendation: "保留 1 个逻辑核心给系统；不确定时用软件建议值。小测试 2-4 线程通常够用，大任务再按机器和引擎扩展。", warning: "核心数越多不一定越快，内存带宽、I/O、MPI/OpenMP 设置和引擎缩放效率都会影响性能。" },
+    { setting: "GPU 选择", meaning: "选择自动 GPU、某个具体 GPU，或强制 CPU。", recommendation: "NVIDIA/CUDA、AMD/ROCm、Apple/Metal 是否能用取决于引擎。遇到模型错误和 GPU 错误分不清时，先用 CPU 复现小测试。", warning: "底部显示 GPU 可用不代表所有引擎都能用这个 GPU；GROMACS/OpenMM/LAMMPS/CP2K 的 GPU 后端不同。" },
+    { setting: "GPU 数量", meaning: "告诉计划和远程模板预期使用几张可加速 GPU。", recommendation: "桌面单卡通常填 1；没有可用 GPU 或选择 CPU 时为 0；HPC 多 GPU 要和队列资源语法一致。", warning: "多 GPU 需要引擎、MPI/域分解、驱动和队列资源同时支持，否则可能比单 GPU 更慢或直接失败。" },
+    { setting: "内存上限", meaning: "给后台分析、安装和任务提示一个软限制。0 表示自动。", recommendation: "普通用户保持 0；大轨迹分析时按机器内存留出系统余量，例如 32 GB 机器不要把上限设满。", warning: "这不是操作系统硬限制，真正内存占用仍由引擎、Python 分析和轨迹大小决定。" },
+    { setting: "工作磁盘", meaning: "显示系统检测到的磁盘卷和可用空间，用于判断项目、轨迹和构建输出放在哪里。", recommendation: "轨迹和 build-recipes 放到空间充足的磁盘；HPC 远程优先 scratch/workdir，不要用很小的 home。", warning: "选择磁盘不会自动迁移已有项目目录；需要在项目页创建或打开正确位置。" },
+    { setting: "检测到的 GPU 列表", meaning: "列出每个 GPU 的名称、厂商、后端和显存/详情。", recommendation: "多个 GPU 时选目标设备；不可用设备会标记不适用。", warning: "外接 GPU、虚拟机、容器和远程机器的 GPU 不一定会出现在本机设置里，远程 GPU 要在远程页/helper 检测。" },
+    { setting: "外观主题", meaning: "浅色/深色显示偏好。", recommendation: "按阅读习惯选择；偏好会被记住。", warning: "主题只影响显示，不影响项目、参数或运行结果。" }
+  ];
+
+  const pluginGuideRows: Array<{ action: string; description: string; safety: string }> = [
+    { action: "打开插件目录", description: "查看 AutoMD 当前用户插件根目录。目录路径由系统应用数据目录动态生成，不应写死为某个用户名。", safety: "跨电脑迁移时以软件显示的目录为准，不要复制别人机器上的绝对路径。" },
+    { action: "导入插件", description: "选择插件目录或单个 .automd-plugin.json。目录导入会复制 manifest 和相对 entrypoint 到插件根目录。", safety: "id 冲突时默认拒绝；不能覆盖 built-in 插件。导入前先读 README 和 manifest。" },
+    { action: "新建/快速创建插件", description: "选择模板：引擎适配器、分析模块、远程调度器、构建 recipe 或报告模板；填写名称、id、目标模块和入口语言。", safety: "生成的是可编辑模板，不代表科学逻辑已经正确；要用小项目和 mock 数据测试。" },
+    { action: "启用/停用", description: "用户插件可停用，停用后左侧用户插件入口隐藏，但仍可在插件页重新启用。", safety: "built-in 插件只读，不允许删除或停用，避免破坏核心能力。" },
+    { action: "删除插件", description: "只能删除非 built-in 用户插件，同时移除状态和安装目录。", safety: "删除前确认没有报告、流程或项目依赖该插件生成的文件。" },
+    { action: "编辑配置", description: "按插件 configSchema 填写 JSON 配置，例如外部命令路径、默认 selection、报告模板选项。", safety: "配置错误会导致插件动作失败；保留默认配置作为回退。" },
+    { action: "运行动作", description: "默认以轻量沙盒运行：固定 cwd、白名单环境变量、JSON stdin、受限输出目录。", safety: "直接运行会跳过部分限制，必须二次确认命令、cwd、权限和可能写入目录；未知插件不要直接运行。" },
+    { action: "联动位置", description: "engineAdapter 出现在引擎页；analysisModule 出现在流程/运行分析；remoteScheduler 出现在远程；buildRecipe 出现在引擎高级部署；reportTemplate 出现在报告。", safety: "v1 不允许插件注入自定义 React 页面，所有插件都走通用详情页和声明式能力。" }
+  ];
+
+  const remoteModeRows: Array<{ mode: string; use: string; verify: string; fallback: string }> = [
+    { mode: "SSH 直连", use: "没有 SLURM/PBS/LSF 的云服务器、工作站或个人 Linux 主机。", verify: "测试连接应显示 OS、架构、CPU、工作目录可写；提交时用 nohup/后台 PID 监控。", fallback: "如果掉线，重新连接后用状态查询和日志尾部恢复；失败时回收 runs/checkpoints/analysis/reports。" },
+    { mode: "SLURM/PBS/LSF", use: "高校、研究所或企业 HPC 集群。", verify: "确认队列/partition、account、GPU 资源语法、module load、walltime 和 workdir。", fallback: "如果提交失败，先把脚本只写到 remote/，拿给集群管理员或在登录节点手动 sbatch/qsub/bsub。" },
+    { mode: "远程 helper", use: "需要远程扫描硬件、扫描引擎、安装 helper、远程一键部署或远程构建时。", verify: "远程页显示 helper ready、版本匹配、hostname/platform/arch/hardwareJson 可读。", fallback: "helper 未安装时先在远程页安装；权限不足时换 workdir 或使用普通用户目录，不要在登录节点长时间编译。" },
+    { mode: "只写脚本", use: "第一次接入新集群、没有权限直接执行、或需要人工审阅脚本时。", verify: "检查 sync-up、submit、status、log-tail、sync-down 每条命令。", fallback: "脚本可手动复制到远程执行；回传后仍可让 AutoMD 刷新 artifact。" },
+    { mode: "执行模式", use: "SSH/rsync 已验证，profile 稳定，脚本内容已审阅。", verify: "底部后台任务显示上传、提交、查询或回收进度；任务卡显示 job id/PID。", fallback: "网络中断不等于远程任务停止。重新测试连接后查 job id/PID 和日志，再决定 cancel 或 fetch。" }
+  ];
+
+  const remoteScriptRows: Array<{ script: string; purpose: string; success: string; commonIssue: string }> = [
+    { script: "sync-up", purpose: "在远程创建 workdir，并把当前项目需要的输入、生成文件和脚本上传过去。", success: "能看到 rsync 统计和远程目录创建成功。", commonIssue: "权限不足、workdir 展开失败、rsync 缺失、网络中断或上传了过大的旧结果目录。" },
+    { script: "submit", purpose: "对 SLURM/PBS/LSF 调用 sbatch/qsub/bsub；对 SSH 直连写入后台脚本并返回 job id 或 PID。", success: "GUI 保存 job id/PID，任务进入 queued 或 running。", commonIssue: "队列名、account、GPU 资源语法、module load、walltime 或可执行文件路径不符合目标机器。" },
+    { script: "status", purpose: "查询调度器队列或 SSH 进程状态，并把输出解析成 queued/running/completed/failed/cancelled。", success: "状态、当前阶段、日志尾部和失败分类会更新。", commonIssue: "job id 不存在、任务已结束但日志未同步、调度器命令在登录节点不可用。" },
+    { script: "log-tail", purpose: "读取远程 run 目录里的引擎日志尾部，用来判断进度、warning、fatal error 和性能。", success: "能看到 step、ns/day、能量/温压输出或引擎完成标记。", commonIssue: "日志路径和 run directory 不一致，任务还没写日志，或权限不足。" },
+    { script: "cancel", purpose: "取消调度器任务或 kill SSH 直连 PID。", success: "状态变为 cancelled，并保留已有日志和 checkpoint 供回收。", commonIssue: "任务已经结束、PID 复用、调度器权限不足，或使用了错误 profile。" },
+    { script: "sync-down", purpose: "把 runs、checkpoints、trajectories、analysis 和 reports 等结果回收到本机项目。", success: "本机项目出现远程日志、checkpoint、轨迹和分析文件；刷新 artifact 后可见。", commonIssue: "轨迹过大超时、远程目录填错、rsync 中断、空间不足或只回收了部分结果。" }
+  ];
+
+  const failureRows: Array<{ category: string; why: string; fix: string; where: TabId }> = [
+    { category: "缺少当前项目或当前结构", why: "运行包、远程提交和报告都需要知道输入来自哪个项目、哪一个结构。", fix: "回项目页创建/切换项目，导入结构，并在结构索引中选中目标结构。顶部固定条必须显示当前项目和当前结构。", where: "overview" },
+    { category: "结构文件无法读取或格式不支持", why: "路径不在项目内、文件过大、扩展名不支持、PDB/mmCIF 内容不完整，或 SDF/MOL2/SMILES 不是可直接可视化的结构。", fix: "重新用浏览按钮导入；PDB/mmCIF 用于结构视图，配体文件先作为输入保存，再用结构准备/参数化流程处理。", where: "overview" },
+    { category: "缺少可执行文件", why: "PATH、AutoMD 管理目录、Conda 环境或手动登记路径里找不到 gmx、python、tleap、lmp、cp2k 等入口。", fix: "到引擎页点自动扫描；找不到就手动登记；开源引擎用一键部署；商业/受限引擎必须配置用户已有安装路径。", where: "engines" },
+    { category: "平台不支持", why: "某些引擎只支持 Linux，或当前 macOS/Windows 没有对应原生二进制/GPU 后端。", fix: "平台不支持的卡片按钮会禁用；改用远程 Linux、WSL2、容器或生成源码/集群脚本。", where: "engines" },
+    { category: "许可证缺失", why: "NAMD、AMBER pmemd、CHARMM、Desmond、ACEMD 等不能由 AutoMD 下载或授权。", fix: "先在你的授权环境完成安装和许可，再回引擎页手动登记可执行文件和授权状态。", where: "engines" },
+    { category: "Python 科学环境缺包", why: "PDBFixer、MDAnalysis、RDKit、Open Babel、AmberTools 或 OpenMM 模块不在当前 Python 环境。", fix: "在流程页点一键安装/修复科学环境；如果 Conda/Mamba 不可用，先让 AutoMD 安装 Miniforge 或手动选择 Python。", where: "workflow" },
+    { category: "拓扑/力场缺口", why: "非标准残基、配体、金属、辅因子、膜、糖基化或 force-field atom type 没有对应参数。", fix: "回流程页检查力场/水模型；对配体生成并复核 mol2/frcmod/XML/topology；必要时用外部工具如 CHARMM-GUI、AmberTools、CGenFF 或实验室标准流程。", where: "workflow" },
+    { category: "坐标和拓扑不匹配", why: "原子数、原子名、残基名、链、盒子或 include 文件与坐标不一致。", fix: "重新生成结构准备和运行包；不要混用旧 top/tpr/prmtop/psf 和新坐标；检查原生文件的 include 路径。", where: "workflow" },
+    { category: "参数映射 unsupported/需复核", why: "统一 GUI 参数无法无损映射到某个引擎原生字段，或模板只能给建议。", fix: "展开流程页高级参数映射，打开生成的原生文件编辑；正式生产前用引擎自己的预处理命令验证。", where: "workflow" },
+    { category: "GPU 不可用", why: "没有相关显卡、驱动缺失、CUDA/ROCm/OpenCL/Metal 与引擎不匹配，或引擎编译时没有启用 GPU 后端。", fix: "先看底部 GPU 状态；NVIDIA 才处理 CUDA，AMD Linux 才处理 ROCm，Apple 使用 Metal 但并非所有引擎支持；不确定先改 CPU 或远程/HPC。", where: "engines" },
+    { category: "MPI 或多进程失败", why: "mpirun、MPI ABI、集群 module、进程数、hostfile 或 GPU-aware MPI 不匹配。", fix: "单机先关闭 MPI 跑小测试；HPC 上用集群推荐 module；源码构建时 MPI 编译器和运行时必须一致。", where: "engines" },
+    { category: "数值发散 / NaN / LINCS / SHAKE", why: "初始结构冲突、最小化不足、timestep 过大、约束失败、温压耦合不合适或参数错误。", fix: "降低 timestep，增加最小化，先短 NVT/NPT，检查重叠原子、配体参数、质子化、盒子大小和温压设置。", where: "workflow" },
+    { category: "磁盘或权限问题", why: "项目目录、远程 workdir、安装 prefix 或 build-recipes 不可写，磁盘空间不足，路径有空格或权限被系统拦截。", fix: "换到用户目录或 scratch；检查剩余空间；AutoMD 管理环境优先使用无空格目录 ~/.automd/engines；避免写系统目录。", where: "overview" },
+    { category: "远程连接失败", why: "host/port/user/password/key 错误，VPN/防火墙阻断，known_hosts 变化，工作目录不可写，或 helper 未安装。", fix: "远程页先测试连接；修正 profile；安装/检查 helper；没有调度器的云主机选择 SSH 直连。", where: "remote" },
+    { category: "调度器失败", why: "queue/partition、account、GPU 资源语法、walltime、module load 或 submit/status/cancel 命令不符合集群政策。", fix: "先只写脚本，检查 submit.slurm/pbs/lsf；拿第一条调度器错误修改 profile；必要时问管理员。", where: "remote" },
+    { category: "rsync 上传/回收失败", why: "远程路径展开失败、权限不足、连接中断、rsync 未安装，或轨迹太大导致超时。", fix: "确认本地和远程都有 rsync；workdir 使用绝对路径或 $USER；先回收 runs/checkpoints/analysis/reports，再处理大轨迹。", where: "remote" },
+    { category: "远程 helper 版本或权限问题", why: "远程 helper 未安装、版本过旧、安装目录不可写、Shell/PowerShell 不兼容，或 SSH 用户没有执行权限。", fix: "远程页重新检测/安装 helper；把 helper 装到用户可写 workdir；Windows 远程确认 OpenSSH Server 和 PowerShell 可用。", where: "remote" },
+    { category: "构建失败", why: "缺 cmake/git/compiler、网络下载失败、prefix 不可写、GPU/MPI/PLUMED 选项不匹配或源码版本不支持。", fix: "在引擎高级部署里先 Dry run/只写脚本；查看 build-combined.log 第一条编译错误；调整 recipe 或改用 Conda/容器/远程。", where: "engines" },
+    { category: "插件失败", why: "manifest 字段缺失、entrypoint 指向插件目录外、配置 JSON 不合法、权限不足或直接运行未确认。", fix: "回插件页查看 validation warning；修 manifest/config；默认用沙盒运行；未知插件不要直接运行。", where: "plugins" },
+    { category: "运行 manifest 缺失", why: "运行包尚未生成、run 目录被删除、任务还没进入执行阶段，或旧版本项目没有 automd-run-manifest.json。", fix: "重新 Dry run 或启动任务生成 run 目录；不要手动删除 runs/<engine-plan>；刷新 artifact 后报告会重新引用 manifest。", where: "run" },
+    { category: "Artifact 索引和文件夹不一致", why: "你移动/删除了项目文件，远程结果还没回收，或者 SQLite 缓存记录还是上一次扫描。", fix: "先打开项目文件夹确认真实文件，再在运行页刷新 artifact；远程任务先 sync-down，再刷新和导出报告。", where: "run" },
+    { category: "分析图表为空或无法解析", why: "分析 CSV/XVG 不存在、列不是数字、selection 没选到原子、轨迹/拓扑不匹配，或二进制轨迹只登记了 metadata。", fix: "生成并运行 MDAnalysis 分析包；检查 topology、trajectory、selection；确认输出 CSV/XVG 有数值列，然后重新解析。", where: "run" },
+    { category: "轨迹索引失败", why: "文件不是受支持文本轨迹、轨迹过大、帧格式不规则、maxBytes 太小，或 XTC/TRR/DCD/NetCDF/GSD 需要二进制解码器。", fix: "文本轨迹降低抽样或检查格式；二进制轨迹用 MDAnalysis 分析包生成小型 CSV；不要把完整大轨迹直接塞进前端预览。", where: "run" },
+    { category: "原生文件编辑被拒绝", why: "路径不在项目允许目录内、文件超过大小上限、扩展名不是安全文本类型，或试图编辑轨迹/二进制文件。", fix: "只编辑 generated、runs、remote、build-recipes、analysis、reports 内的 .mdp/.mdin/.conf/.inp/.py/.sh/.json/.yaml/.md 等文本文件。", where: "run" },
+    { category: "报告缺图或缺结果", why: "artifact 未刷新、分析 CSV/XVG 未生成、轨迹只登记了 metadata，或当前项目切错。", fix: "回运行页刷新 artifact、索引轨迹、生成分析包；确认当前项目固定条；再回报告页导出。", where: "run" }
+  ];
+
+  function syncGuideOutline(sectionId: string) {
+    const outline = guideOutlineRef.current;
+    const item = outline?.querySelector<HTMLElement>(`[data-outline-id="${sectionId}"]`);
+    item?.scrollIntoView({ block: "nearest" });
+  }
+
+  function updateActiveGuideSection() {
+    const content = guideContentRef.current;
+    if (!content) return;
+    const sections = guideSections
+      .map((section) => document.getElementById(section.id))
+      .filter((section): section is HTMLElement => Boolean(section));
+    if (!sections.length) return;
+
+    const contentRect = content.getBoundingClientRect();
+    const bottomGap = content.scrollHeight - content.scrollTop - content.clientHeight;
+    let nextId = sections[0].id;
+
+    if (bottomGap < 24) {
+      nextId = sections[sections.length - 1].id;
+    } else {
+      for (const section of sections) {
+        const top = section.getBoundingClientRect().top - contentRect.top;
+        if (top <= 110) {
+          nextId = section.id;
+        } else {
+          break;
+        }
+      }
+    }
+
+    setActiveGuideSection((current) => {
+      if (current !== nextId) {
+        syncGuideOutline(nextId);
+      }
+      return current === nextId ? current : nextId;
+    });
+  }
+
+  function scrollGuideTo(sectionId: string) {
+    const target = document.getElementById(sectionId);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveGuideSection(sectionId);
+    syncGuideOutline(sectionId);
+  }
+
+  useEffect(() => {
+    updateActiveGuideSection();
+  }, [guideSections]);
+
   return (
-    <div className="guide-page">
-      <section className="panel span-3 guide-quickstart">
+    <div className="guide-layout">
+      <aside className="guide-outline" ref={guideOutlineRef} aria-label="使用指引大纲">
+        <div className="guide-outline-card">
+          <div className="guide-outline-title">
+            <strong>本页大纲</strong>
+            <span>{guideSections.length} 个章节</span>
+          </div>
+          <nav className="guide-outline-list">
+            {guideSections.map((section, index) => (
+              <button
+                type="button"
+                key={section.id}
+                data-outline-id={section.id}
+                className={`guide-outline-item ${activeGuideSection === section.id ? "active" : ""}`}
+                onClick={() => scrollGuideTo(section.id)}
+              >
+                <span>{index + 1}</span>
+                <strong>{section.label}</strong>
+              </button>
+            ))}
+          </nav>
+        </div>
+      </aside>
+
+      <div className="guide-content" ref={guideContentRef} onScroll={updateActiveGuideSection}>
+      <div className="guide-page">
+      <section id="guide-quickstart" data-guide-section className="panel span-3 guide-quickstart">
         <div className="panel-title-row">
           <div>
             <h3>快速开始（8 步）</h3>
@@ -3651,7 +3870,7 @@ function GuidePanel({
         </ol>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-concepts" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>先弄懂这些词</h3>
@@ -3668,7 +3887,7 @@ function GuidePanel({
         </dl>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-full-flow" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>完整示例：小型蛋白水溶液模拟</h3>
@@ -3689,7 +3908,7 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-parameters" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>第一次模拟怎么填参数</h3>
@@ -3711,7 +3930,7 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-science" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>结构准备与分析环境是什么</h3>
@@ -3743,7 +3962,7 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-pages" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>每个页面怎么用</h3>
@@ -3770,7 +3989,98 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-directories" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>项目目录和文件都放在哪里</h3>
+            <p className="muted">AutoMD 的核心原则是“软件状态可重建，科学文件留在项目目录”。不知道文件去哪了时，先按这个表查。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("overview")}>打开项目页</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">目录</div>
+          <div className="guide-table-head">保存什么</div>
+          <div className="guide-table-head">用户应该怎么用</div>
+          {projectDirectoryRows.map((row) => (
+            <Fragment key={row.path}>
+              <div><strong className="mono">{row.path}</strong></div>
+              <div>{row.purpose}</div>
+              <div>{row.userAction}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-reproducibility" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>索引、缓存和复现记录</h3>
+            <p className="muted">这些记录解释“软件为什么知道某个引擎可用、某个结果在哪里、某次任务怎么跑”。它们服务于复现和排错，不要求用户手工维护。</p>
+          </div>
+        </div>
+        <div className="guide-table guide-table-4">
+          <div className="guide-table-head">记录</div>
+          <div className="guide-table-head">作用</div>
+          <div className="guide-table-head">保存位置</div>
+          <div className="guide-table-head">用户怎么处理</div>
+          {reproducibilityRows.map((row) => (
+            <Fragment key={row.item}>
+              <div><strong>{row.item}</strong></div>
+              <div>{row.purpose}</div>
+              <div>{row.where}</div>
+              <div>{row.userAction}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-structure-import" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>结构导入格式怎么选</h3>
+            <p className="muted">导入成功只代表文件进入项目；真正能不能生产模拟，还取决于拓扑、力场、配体、质子化和结构准备。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("overview")}>去导入结构</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">格式</div>
+          <div className="guide-table-head">适合什么</div>
+          <div className="guide-table-head">必须注意</div>
+          {structureInputRows.map((row) => (
+            <Fragment key={row.format}>
+              <div><strong>{row.format}</strong></div>
+              <div>{row.use}</div>
+              <div>{row.caution}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-run-features" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>运行页每个功能怎么判断能不能用</h3>
+            <p className="muted">运行页不是只有“开始”。它还负责生成包、复核原生文件、解析日志、恢复 checkpoint、索引轨迹和整理分析。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("run")}>打开运行页</button>
+        </div>
+        <div className="guide-table guide-table-4">
+          <div className="guide-table-head">功能</div>
+          <div className="guide-table-head">什么时候用</div>
+          <div className="guide-table-head">怎么操作</div>
+          <div className="guide-table-head">风险/误区</div>
+          {runFeatureRows.map((row) => (
+            <Fragment key={row.feature}>
+              <div><strong>{row.feature}</strong></div>
+              <div>{row.when}</div>
+              <div>{row.how}</div>
+              <div>{row.risk}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-status" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>固定当前项目和底部状态栏</h3>
@@ -3786,7 +4096,30 @@ function GuidePanel({
         </dl>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-performance" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>左下角设置和性能配置怎么用</h3>
+            <p className="muted">设置不是给开发者看的。它帮助普通用户控制本机不要被全占用，也帮助 AutoMD 生成更合理的本地和远程资源字段。</p>
+          </div>
+        </div>
+        <div className="guide-table guide-table-4">
+          <div className="guide-table-head">设置项</div>
+          <div className="guide-table-head">含义</div>
+          <div className="guide-table-head">推荐填法</div>
+          <div className="guide-table-head">注意事项</div>
+          {performanceRows.map((row) => (
+            <Fragment key={row.setting}>
+              <div><strong>{row.setting}</strong></div>
+              <div>{row.meaning}</div>
+              <div>{row.recommendation}</div>
+              <div>{row.warning}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-engines" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>引擎配置</h3>
@@ -3829,7 +4162,7 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel span-2">
+      <section id="guide-deploy-build" data-guide-section className="panel span-2">
         <div className="panel-title-row">
           <div>
             <h3>引擎安装、部署和编译</h3>
@@ -3877,7 +4210,7 @@ function GuidePanel({
         </div>
       </section>
 
-      <section className="panel">
+      <section id="guide-platform" data-guide-section className="panel">
         <div className="panel-title-row">
           <div>
             <h3>平台策略</h3>
@@ -3892,7 +4225,7 @@ function GuidePanel({
         </dl>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-remote" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>远程/HPC 配置</h3>
@@ -3920,9 +4253,44 @@ function GuidePanel({
           <div>Dry run 只预览；写脚本只落盘；Execute 才会 ssh/rsync/submit。</div>
           <div>第一次建议 Dry run 和写脚本，确认后再执行。</div>
         </div>
+        <div className="guide-section">
+          <h4>远程模式怎么选</h4>
+          <div className="guide-table guide-table-4">
+            <div className="guide-table-head">模式</div>
+            <div className="guide-table-head">适合场景</div>
+            <div className="guide-table-head">怎么确认可用</div>
+            <div className="guide-table-head">失败时怎么办</div>
+            {remoteModeRows.map((row) => (
+              <Fragment key={row.mode}>
+                <div><strong>{row.mode}</strong></div>
+                <div>{row.use}</div>
+                <div>{row.verify}</div>
+                <div>{row.fallback}</div>
+              </Fragment>
+            ))}
+          </div>
+        </div>
+        <div className="guide-section">
+          <h4>远程执行闭环</h4>
+          <p className="muted">远程页不是只导出命令。它把连接、上传、提交、查状态、看日志、取消和回收串成同一套可审阅流程；高级用户仍可打开脚本手动执行。</p>
+          <div className="guide-table guide-table-4">
+            <div className="guide-table-head">步骤/脚本</div>
+            <div className="guide-table-head">做什么</div>
+            <div className="guide-table-head">成功标志</div>
+            <div className="guide-table-head">常见问题</div>
+            {remoteScriptRows.map((row) => (
+              <Fragment key={row.script}>
+                <div><strong>{row.script}</strong></div>
+                <div>{row.purpose}</div>
+                <div>{row.success}</div>
+                <div>{row.commonIssue}</div>
+              </Fragment>
+            ))}
+          </div>
+        </div>
       </section>
 
-      <section className="panel span-3">
+      <section id="guide-run-report" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
             <h3>运行、分析和报告</h3>
@@ -3942,22 +4310,62 @@ function GuidePanel({
           </dl>
         </section>
 
-      <section className="panel span-3">
+      <section id="guide-plugins" data-guide-section className="panel span-3">
         <div className="panel-title-row">
           <div>
-            <h3>故障处理顺序</h3>
-            <p className="muted">先排环境，再排输入，最后排数值稳定性。</p>
+            <h3>插件管理和安全使用</h3>
+            <p className="muted">插件是扩展能力，不是普通数据文件。先看 manifest、来源、权限和联动位置，再启用动作。</p>
+          </div>
+          <button type="button" onClick={() => setActiveTab("plugins")}>打开插件页</button>
+        </div>
+        <div className="guide-table">
+          <div className="guide-table-head">操作</div>
+          <div className="guide-table-head">说明</div>
+          <div className="guide-table-head">安全检查</div>
+          {pluginGuideRows.map((row) => (
+            <Fragment key={row.action}>
+              <div><strong>{row.action}</strong></div>
+              <div>{row.description}</div>
+              <div>{row.safety}</div>
+            </Fragment>
+          ))}
+        </div>
+      </section>
+
+      <section id="guide-failures" data-guide-section className="panel span-3">
+        <div className="panel-title-row">
+          <div>
+            <h3>常见报错、原因和解决方案</h3>
+            <p className="muted">遇到错误时不要只看红色提示。先判断它属于环境、输入、参数、远程、构建还是结果整理，再去对应页面处理。</p>
           </div>
         </div>
-        <ol className="guide-steps compact">
-          <li>引擎显示缺失：回到引擎页保存可执行文件路径，或在对应引擎卡片的高级部署/编译中生成安装脚本。</li>
-          <li>许可证缺失：只在用户已有授权环境中配置，不在软件内下载商业引擎。</li>
-          <li>拓扑/力场失败：回到流程页检查非标准残基、配体参数、力场和水模型。</li>
-          <li>GPU 不可用：先看底部状态栏和本机运行环境中 CUDA/ROCm 是否“需安装”或“不适用”，再检查驱动、容器 runtime、HPC 分区和引擎编译选项。</li>
-          <li>远程失败：先检查 ssh、workdir、module load、队列名和调度器输出。</li>
-          <li>数值发散：降低 timestep、加强最小化、检查约束、温压耦合和初始结构冲突。</li>
-        </ol>
+        <div className="guide-section">
+          <h4>推荐排查顺序</h4>
+          <ol className="guide-steps compact">
+            <li>先看顶部当前项目和当前结构，确认没有在错误项目里操作。</li>
+            <li>再看引擎/科学环境是否可用，许可证和平台是否匹配。</li>
+            <li>然后看结构、拓扑、力场、配体和原生参数文件。</li>
+            <li>接着看资源：CPU/GPU/MPI、磁盘、权限、远程 workdir 和调度器。</li>
+            <li>最后处理数值稳定性：timestep、最小化、约束、温压耦合和初始结构冲突。</li>
+          </ol>
+        </div>
+        <div className="guide-table guide-table-4">
+          <div className="guide-table-head">报错类别</div>
+          <div className="guide-table-head">为什么会这样</div>
+          <div className="guide-table-head">解决方案</div>
+          <div className="guide-table-head">去哪里处理</div>
+          {failureRows.map((row) => (
+            <Fragment key={row.category}>
+              <div><strong>{row.category}</strong></div>
+              <div>{row.why}</div>
+              <div>{row.fix}</div>
+              <div><button type="button" onClick={() => setActiveTab(row.where)}>打开对应页面</button></div>
+            </Fragment>
+          ))}
+        </div>
       </section>
+      </div>
+      </div>
     </div>
   );
 }
@@ -5354,7 +5762,7 @@ function WorkflowPanel({
           <div>
             <h4>环境检查</h4>
             {scienceDiagnostics ? (
-              <div className="tool-list compact-tools">
+              <div className="tool-list compact-tools sci-tools-grid">
                 <div className="sidecar-summary">
                   <strong>{readyScienceCount}/{neededScienceTools.length} 项可用</strong>
                   <small>Python: {scienceDiagnostics.pythonExecutable ?? "未找到"}</small>
@@ -5392,6 +5800,7 @@ function WorkflowPanel({
               <EmptyState title="等待诊断" text="启动后会检测 OpenMM、PDBFixer、MDAnalysis、RDKit、Open Babel 和 AmberTools。" />
             )}
           </div>
+          <div className="sidecar-side">
           <div>
             <h4>一键环境</h4>
             <div className="sidecar-explain">
@@ -5430,6 +5839,7 @@ function WorkflowPanel({
             ) : (
               <EmptyState title="尚未生成" text="点击后会写入结构修复/加氢脚本、环境文件和配体处理说明；这是运行前输入准备，不是模拟结果。" />
             )}
+          </div>
           </div>
         </div>
       </section>
@@ -6051,7 +6461,7 @@ function RemotePanel({
   diagnostics: RuntimeDiagnostics | null;
   remoteProfiles: RemoteProfile[];
   selectedRemoteProfileId: string | null;
-  setSelectedRemoteProfileId: (value: string) => void;
+  setSelectedRemoteProfileId: (value: string | null) => void;
   remoteProfileDraft: RemoteProfile;
   setRemoteProfileDraft: (value: RemoteProfile) => void;
   remotePassword: string;
@@ -6114,6 +6524,8 @@ function RemotePanel({
   const jobActive = Boolean(
     remoteJobSnapshot && !["completed", "failed", "cancelled"].includes(remoteJobSnapshot.status)
   );
+  const [deleteProfileTarget, setDeleteProfileTarget] = useState<RemoteProfile | null>(null);
+  const [deleteProfileStage, setDeleteProfileStage] = useState<"warn" | "confirm">("warn");
 
   return (
     <div className="remote-flow">
@@ -6136,10 +6548,28 @@ function RemotePanel({
             <select
               value={draftSaved ? draft.id : ""}
               onChange={(event) => {
-                const picked = remoteProfiles.find((profile) => profile.id === event.target.value);
-                if (picked) {
-                  setSelectedRemoteProfileId(picked.id);
-                  setRemoteProfileDraft(picked);
+                const value = event.target.value;
+                if (value === "") {
+                  setSelectedRemoteProfileId(null);
+                  setRemoteProfileDraft({
+                    id: `custom-${Date.now()}`,
+                    name: "",
+                    host: "",
+                    username: "root",
+                    port: 22,
+                    authMethod: "password",
+                    identityFile: null,
+                    scheduler: "slurm",
+                    workdir: defaultRemoteWorkdir("root"),
+                    moduleLoad: [],
+                    defaultQueue: null,
+                  });
+                } else {
+                  const picked = remoteProfiles.find((profile) => profile.id === value);
+                  if (picked) {
+                    setSelectedRemoteProfileId(picked.id);
+                    setRemoteProfileDraft(picked);
+                  }
                 }
               }}
             >
@@ -6215,11 +6645,33 @@ function RemotePanel({
           ) : draft.authMethod === "key" ? (
             <label>
               私钥文件路径
-              <input
-                value={draft.identityFile ?? ""}
-                onChange={(event) => update({ identityFile: event.target.value || null })}
-                placeholder="~/.ssh/id_ed25519"
-              />
+              <div className="input-with-browse">
+                <input
+                  value={draft.identityFile ?? ""}
+                  onChange={(event) => update({ identityFile: event.target.value || null })}
+                  placeholder="~/.ssh/id_ed25519"
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const picked = await api.pickFile({
+                        title: "选择 SSH 私钥文件",
+                        extensions: [],
+                        defaultDir: "~/.ssh",
+                        showHidden: true,
+                      });
+                      if (picked) {
+                        update({ identityFile: picked });
+                      }
+                    } catch (caught) {
+                      console.error("浏览私钥失败", caught);
+                    }
+                  }}
+                >
+                  浏览
+                </button>
+              </div>
             </label>
           ) : (
             <p className="hint-text">将使用系统 ssh 与你的 ~/.ssh/config / 密钥 / agent，无需在此填写凭据。</p>
@@ -6229,10 +6681,36 @@ function RemotePanel({
             <button type="button" className="primary" onClick={testRemoteConnection} disabled={remoteConnecting}>
               {remoteConnecting ? "连接中…" : "测试连接"}
             </button>
-            <button type="button" onClick={() => saveRemoteProfile(draft)}>
-              保存为 profile
-            </button>
+            {draftSaved ? (
+              <button type="button" className="danger-outline" onClick={() => setDeleteProfileTarget(draft)}>
+                删除该 profile
+              </button>
+            ) : (
+              <button type="button" onClick={() => saveRemoteProfile(draft)}>
+                保存为 profile
+              </button>
+            )}
           </div>
+
+          {deleteProfileTarget ? (
+            <DeleteModal
+              titleText={deleteProfileTarget.name || "未命名连接"}
+              bodyText={`即将删除连接「${deleteProfileTarget.name || "未命名"}」（${deleteProfileTarget.host || "未填主机"}）。此操作不可撤销。`}
+              twoStage={true}
+              stage={deleteProfileStage}
+              deleting={false}
+              onCancel={() => { setDeleteProfileTarget(null); setDeleteProfileStage("warn"); }}
+              onConfirm={() => {
+                if (deleteProfileStage === "warn") {
+                  setDeleteProfileStage("confirm");
+                } else {
+                  deleteRemoteProfile(deleteProfileTarget.id);
+                  setDeleteProfileTarget(null);
+                  setDeleteProfileStage("warn");
+                }
+              }}
+            />
+          ) : null}
 
           {remoteConnectionTest ? (
             <div className={`connection-result ${remoteConnectionTest.ok ? "ok" : "fail"}`}>
@@ -6479,9 +6957,6 @@ function RemotePanel({
         </label>
         <div className="button-row">
           <button type="button" onClick={() => saveRemoteProfile(draft)}>保存 profile</button>
-          <button type="button" onClick={() => deleteRemoteProfile(draft.id)} disabled={!draftSaved || isTemplate}>
-            删除已保存
-          </button>
         </div>
 
         <h4>导出命令 / 脚本（手动跑）</h4>
