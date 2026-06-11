@@ -769,7 +769,7 @@ ul {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  align-items: center;
+  align-items: start;
 }
 
 .project-index-row > button:first-child {
@@ -914,7 +914,7 @@ ul {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
-  align-items: center;
+  align-items: start;
 }
 
 .structure-index-btn {
@@ -1636,13 +1636,22 @@ ul {
 }
 
 .plugin-import-box {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  align-content: start;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
   padding: 14px;
+}
+/* the form-grid carries its own top margin; the flex gap already spaces it. */
+.plugin-import-box > .form-grid {
+  margin-top: 0;
+}
+/* In a <details>, the slotted content isn't a flex child, so the column gap
+   doesn't reach the trailing submit button — give it explicit spacing. */
+details.plugin-import-box > button {
+  margin-top: 12px;
 }
 
 .plugin-import-box h4,
