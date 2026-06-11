@@ -769,7 +769,7 @@ ul {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .project-index-row > button:first-child {
@@ -861,7 +861,7 @@ ul {
 /* ── Project index: action buttons group ─────────────── */
 .index-action-group {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 6px;
   min-width: 0;
 }
@@ -914,7 +914,7 @@ ul {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .structure-index-btn {
