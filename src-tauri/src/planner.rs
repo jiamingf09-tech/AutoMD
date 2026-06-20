@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub fn default_simulation_plan(request: PlanRequest) -> SimulationPlan {
-    let biomolecular = matches!(request.domain, ProjectDomain::Biomolecular | ProjectDomain::Qmmm);
+    let biomolecular = matches!(
+        request.domain,
+        ProjectDomain::Biomolecular | ProjectDomain::Qmmm
+    );
 
     SimulationPlan {
         id: Uuid::new_v4(),
@@ -93,9 +96,15 @@ pub fn validate_plan(plan: &SimulationPlan) -> ValidationReport {
         });
     }
 
-    let status = if items.iter().any(|item| item.severity == ValidationSeverity::Error) {
+    let status = if items
+        .iter()
+        .any(|item| item.severity == ValidationSeverity::Error)
+    {
         ValidationStatus::Invalid
-    } else if items.iter().any(|item| item.severity == ValidationSeverity::Warning) {
+    } else if items
+        .iter()
+        .any(|item| item.severity == ValidationSeverity::Warning)
+    {
         ValidationStatus::ValidWithWarnings
     } else {
         ValidationStatus::Valid
@@ -129,7 +138,13 @@ pub fn parse_gromacs_ns_per_day(line: &str) -> Option<f32> {
     value.parse::<f32>().ok()
 }
 
-fn stage(id: &str, kind: SimulationStageKind, label: &str, parameters: &[(&str, &str)], outputs: &[&str]) -> SimulationStage {
+fn stage(
+    id: &str,
+    kind: SimulationStageKind,
+    label: &str,
+    parameters: &[(&str, &str)],
+    outputs: &[&str],
+) -> SimulationStage {
     SimulationStage {
         id: id.to_string(),
         kind,
@@ -150,35 +165,55 @@ fn default_stages(biomolecular: bool) -> Vec<SimulationStage> {
             "prepare",
             SimulationStageKind::StructurePreparation,
             "结构准备",
-            &[("repairMissingAtoms", "true"), ("addHydrogens", "true"), ("parameterizeLigands", "true")],
+            &[
+                ("repairMissingAtoms", "true"),
+                ("addHydrogens", "true"),
+                ("parameterizeLigands", "true"),
+            ],
             &["prepared_structure", "topology"],
         ),
         stage(
             "em",
             SimulationStageKind::EnergyMinimization,
             "能量最小化",
-            &[("integrator", "steepest-descent"), ("maxSteps", "50000"), ("emtol", "1000")],
+            &[
+                ("integrator", "steepest-descent"),
+                ("maxSteps", "50000"),
+                ("emtol", "1000"),
+            ],
             &["minimized_structure", "energy_log"],
         ),
         stage(
             "nvt",
             SimulationStageKind::NvtEquilibration,
             "NVT 平衡",
-            &[("durationPs", "100"), ("temperatureK", "300"), ("restraints", "heavy-atoms")],
+            &[
+                ("durationPs", "100"),
+                ("temperatureK", "300"),
+                ("restraints", "heavy-atoms"),
+            ],
             &["nvt_checkpoint", "temperature_trace"],
         ),
         stage(
             "npt",
             SimulationStageKind::NptEquilibration,
             "NPT 平衡",
-            &[("durationPs", "1000"), ("pressureBar", "1.0"), ("temperatureK", "300")],
+            &[
+                ("durationPs", "1000"),
+                ("pressureBar", "1.0"),
+                ("temperatureK", "300"),
+            ],
             &["npt_checkpoint", "pressure_trace", "density_trace"],
         ),
         stage(
             "production",
             SimulationStageKind::Production,
             "生产模拟",
-            &[("durationNs", production_ns), ("timestepFs", "2"), ("checkpointEveryPs", "100")],
+            &[
+                ("durationNs", production_ns),
+                ("timestepFs", "2"),
+                ("checkpointEveryPs", "100"),
+            ],
             &["trajectory", "checkpoint", "energy"],
         ),
         stage(
@@ -223,9 +258,7 @@ fn default_outputs() -> OutputSpec {
             "runs/<engine-plan>/*.{cpt,chk,rst7,restart.*}".to_string(),
             "checkpoints/*".to_string(),
         ],
-        trajectories: vec![
-            "trajectories/*.{xtc,trr,dcd,nc,pdb,xyz,lammpstrj,dump,gsd}".to_string(),
-        ],
+        trajectories: vec!["trajectories/*.{xtc,trr,dcd,nc,pdb,xyz,lammpstrj,dump,gsd}".to_string()],
         energy: vec![
             "runs/<engine-plan>/*.{edr,out,log}".to_string(),
             "analysis/openmm_state.csv".to_string(),
@@ -255,10 +288,20 @@ mod tests {
             engine_id: "gromacs".to_string(),
             domain: ProjectDomain::Biomolecular,
         });
-        assert!(plan.stages.iter().any(|stage| stage.kind == SimulationStageKind::EnergyMinimization));
-        assert!(plan.stages.iter().any(|stage| stage.kind == SimulationStageKind::Production));
+        assert!(plan
+            .stages
+            .iter()
+            .any(|stage| stage.kind == SimulationStageKind::EnergyMinimization));
+        assert!(plan
+            .stages
+            .iter()
+            .any(|stage| stage.kind == SimulationStageKind::Production));
         assert_eq!(plan.force_field.water_model, "TIP3P");
-        assert!(plan.outputs.trajectories.iter().any(|path| path.contains("trajectories")));
+        assert!(plan
+            .outputs
+            .trajectories
+            .iter()
+            .any(|path| path.contains("trajectories")));
     }
 
     #[test]

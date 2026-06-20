@@ -25,7 +25,9 @@ pub enum TrajectoryError {
     Json(#[from] serde_json::Error),
 }
 
-pub fn index_trajectory(request: TrajectoryIndexRequest) -> Result<TrajectoryIndex, TrajectoryError> {
+pub fn index_trajectory(
+    request: TrajectoryIndexRequest,
+) -> Result<TrajectoryIndex, TrajectoryError> {
     let project_root = project_root(&request.project_path)?;
     let relative = safe_relative(&request.trajectory_path)?;
     let trajectory_path = project_root.join(&relative);
@@ -46,10 +48,13 @@ pub fn index_trajectory(request: TrajectoryIndexRequest) -> Result<TrajectoryInd
                 ));
                 (TrajectoryIndexStrategy::MetadataOnly, Vec::new())
             } else {
-                let contents = fs::read_to_string(&trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
+                let contents = fs::read_to_string(&trajectory_path)
+                    .map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
                 let frames = parse_text_frames(&contents, &format, &mut warnings);
                 if frames.is_empty() {
-                    warnings.push("No frame boundaries were detected in the trajectory text.".to_string());
+                    warnings.push(
+                        "No frame boundaries were detected in the trajectory text.".to_string(),
+                    );
                 }
                 (TrajectoryIndexStrategy::TextOffsets, frames)
             }
@@ -110,7 +115,9 @@ pub fn index_trajectory(request: TrajectoryIndexRequest) -> Result<TrajectoryInd
     Ok(index)
 }
 
-pub fn read_trajectory_chunk(request: TrajectoryChunkRequest) -> Result<TrajectoryChunk, TrajectoryError> {
+pub fn read_trajectory_chunk(
+    request: TrajectoryChunkRequest,
+) -> Result<TrajectoryChunk, TrajectoryError> {
     let project_root = project_root(&request.project_path)?;
     let relative = safe_relative(&request.trajectory_path)?;
     let trajectory_path = project_root.join(&relative);
@@ -137,7 +144,8 @@ pub fn read_trajectory_chunk(request: TrajectoryChunkRequest) -> Result<Trajecto
         });
     }
 
-    let contents = fs::read_to_string(&trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
+    let contents =
+        fs::read_to_string(&trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
     let frames = parse_text_frames(&contents, &format, &mut warnings);
     let selected = select_frames(&frames, &request);
     let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_CHUNK_BYTES);
@@ -151,8 +159,13 @@ pub fn read_trajectory_chunk(request: TrajectoryChunkRequest) -> Result<Trajecto
             truncated = true;
             break;
         }
-        let Some(slice) = contents.get(descriptor.byte_start as usize..descriptor.byte_end as usize) else {
-            warnings.push(format!("Frame {} byte range was not valid UTF-8.", descriptor.frame_index));
+        let Some(slice) =
+            contents.get(descriptor.byte_start as usize..descriptor.byte_end as usize)
+        else {
+            warnings.push(format!(
+                "Frame {} byte range was not valid UTF-8.",
+                descriptor.frame_index
+            ));
             continue;
         };
         used_bytes = used_bytes.saturating_add(frame_size);
@@ -179,7 +192,9 @@ pub fn read_trajectory_chunk(request: TrajectoryChunkRequest) -> Result<Trajecto
 fn project_root(project_path: &str) -> Result<PathBuf, TrajectoryError> {
     let root = PathBuf::from(project_path);
     if !root.exists() {
-        return Err(TrajectoryError::MissingProjectPath(project_path.to_string()));
+        return Err(TrajectoryError::MissingProjectPath(
+            project_path.to_string(),
+        ));
     }
     Ok(root)
 }
@@ -251,7 +266,11 @@ fn line_spans(contents: &str) -> Vec<(u64, u64, &str)> {
     let mut start = 0usize;
     for line in contents.split_inclusive('\n') {
         let end = start + line.len();
-        spans.push((start as u64, end as u64, line.trim_end_matches(['\r', '\n'])));
+        spans.push((
+            start as u64,
+            end as u64,
+            line.trim_end_matches(['\r', '\n']),
+        ));
         start = end;
     }
     if start < contents.len() {
@@ -343,7 +362,10 @@ fn parse_xyz_frames(contents: &str, warnings: &mut Vec<String>) -> Vec<Trajector
         }
 
         let Ok(atom_count) = trimmed.parse::<usize>() else {
-            warnings.push(format!("Skipped XYZ line {} because atom count was not numeric.", index + 1));
+            warnings.push(format!(
+                "Skipped XYZ line {} because atom count was not numeric.",
+                index + 1
+            ));
             index += 1;
             continue;
         };
@@ -352,7 +374,10 @@ fn parse_xyz_frames(contents: &str, warnings: &mut Vec<String>) -> Vec<Trajector
             warnings.push(format!("XYZ frame {} is incomplete.", frames.len()));
             break;
         }
-        let comment = lines.get(index + 1).map(|(_, _, value)| value.trim()).unwrap_or("");
+        let comment = lines
+            .get(index + 1)
+            .map(|(_, _, value)| value.trim())
+            .unwrap_or("");
         let end = lines[index + required - 1].1;
         frames.push(frame_descriptor(
             frames.len(),
@@ -360,7 +385,11 @@ fn parse_xyz_frames(contents: &str, warnings: &mut Vec<String>) -> Vec<Trajector
             end,
             Some(atom_count as u32),
             parse_time_ps(comment),
-            if comment.is_empty() { "XYZ frame" } else { comment },
+            if comment.is_empty() {
+                "XYZ frame"
+            } else {
+                comment
+            },
         ));
         index += required;
     }
@@ -542,7 +571,11 @@ mod tests {
         assert_eq!(index.format, TrajectoryFormat::Pdb);
         assert_eq!(index.strategy, TrajectoryIndexStrategy::TextOffsets);
         assert_eq!(index.frame_count, Some(2));
-        assert!(index.index_path.as_deref().unwrap_or("").starts_with("trajectories/.automd-index/"));
+        assert!(index
+            .index_path
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("trajectories/.automd-index/"));
 
         let chunk = read_trajectory_chunk(TrajectoryChunkRequest {
             project_path: root.display().to_string(),
@@ -602,7 +635,10 @@ mod tests {
         assert_eq!(index.format, TrajectoryFormat::Xtc);
         assert_eq!(index.strategy, TrajectoryIndexStrategy::MetadataOnly);
         assert_eq!(index.frame_count, None);
-        assert!(index.warnings.iter().any(|warning| warning.contains("metadata-only")));
+        assert!(index
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("metadata-only")));
 
         let _ = fs::remove_dir_all(root);
     }

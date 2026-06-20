@@ -1016,6 +1016,7 @@ pub struct ExecutableSearchResult {
     pub found: bool,
     pub command: Option<String>,
     pub path: Option<String>,
+    pub version: Option<String>,
     pub checked_locations: Vec<String>,
     pub message: String,
 }

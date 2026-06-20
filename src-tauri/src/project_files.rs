@@ -20,7 +20,9 @@ pub enum ProjectFileError {
     Io(#[from] std::io::Error),
 }
 
-pub fn read_project_text_file(request: ProjectTextFileRequest) -> Result<ProjectTextFilePayload, ProjectFileError> {
+pub fn read_project_text_file(
+    request: ProjectTextFileRequest,
+) -> Result<ProjectTextFilePayload, ProjectFileError> {
     let project_root = project_root(&request.project_path)?;
     let relative = editable_relative_path(&request.path)?;
     let path = project_root.join(&relative);
@@ -40,7 +42,9 @@ pub fn read_project_text_file(request: ProjectTextFileRequest) -> Result<Project
     })
 }
 
-pub fn write_project_text_file(request: ProjectTextFileWriteRequest) -> Result<ProjectTextFilePayload, ProjectFileError> {
+pub fn write_project_text_file(
+    request: ProjectTextFileWriteRequest,
+) -> Result<ProjectTextFilePayload, ProjectFileError> {
     let project_root = project_root(&request.project_path)?;
     let relative = editable_relative_path(&request.path)?;
     if request.contents.len() as u64 > TEXT_FILE_MAX_BYTES {
@@ -129,7 +133,11 @@ fn is_supported_extension(extension: &str) -> bool {
 }
 
 fn language_for(path: &Path) -> String {
-    match path.extension().and_then(|value| value.to_str()).unwrap_or_default() {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+    {
         "mdp" => "gromacs-mdp",
         "mdin" => "amber-mdin",
         "conf" => "namd",

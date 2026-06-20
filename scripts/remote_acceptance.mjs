@@ -97,6 +97,13 @@ function remoteHelperBashScript() {
   return source.slice(rawStart + 3, rawEnd);
 }
 
+function remoteHelperVersion() {
+  const source = read("src-tauri/src/remote_helper.rs");
+  const match = source.match(/pub const HELPER_VERSION: &str = "([^"]+)"/);
+  if (!match) throw new Error("remote_helper.rs does not declare HELPER_VERSION");
+  return match[1];
+}
+
 class RemoteSession {
   constructor(config) {
     this.config = config;
@@ -238,7 +245,7 @@ function writeAcceptanceProject(localDir, scheduler) {
   fs.writeFileSync(path.join(localDir, "remote", "run-success.sh"), `#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p runs/mock analysis reports trajectories checkpoints logs
-echo "AutoMD remote ${scheduler.toUpperCase()} job started at $(date -Is)"
+echo "AutoMD remote ${scheduler.toUpperCase()} job started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo "step 100 of 100"
 echo "Performance: 12.500 ns/day"
 echo "AutoMD acceptance result" > runs/mock/result.log
@@ -247,7 +254,7 @@ echo "0,0.0" >> analysis/result.csv
 echo "# AutoMD acceptance report" > reports/report.md
 echo "trajectory" > trajectories/mock.xtc
 echo "checkpoint" > checkpoints/mock.cpt
-echo "AutoMD remote ${scheduler.toUpperCase()} job finished at $(date -Is)"
+echo "AutoMD remote ${scheduler.toUpperCase()} job finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 `);
   fs.writeFileSync(path.join(localDir, "remote", "run-long.sh"), `#!/usr/bin/env bash
 set -euo pipefail
@@ -406,6 +413,7 @@ async function main() {
   fs.mkdirSync(fetchedDir, { recursive: true });
 
   const session = new RemoteSession(config);
+  const helperVersion = remoteHelperVersion();
   info(`target ${config.user ? `${config.user}@` : ""}${config.host}:${config.port}`);
 
   const probe = await session.ssh("echo automd-ok; uname -srm; echo ---AUTOMD---; hostname; echo ---AUTOMD---; (command -v sbatch || command -v qsub || command -v bsub) 2>/dev/null || true");
@@ -422,7 +430,7 @@ async function main() {
 
   await session.ssh(`mkdir -p ${shellQuote(remoteBase)}`);
   const helperScript = remoteHelperBashScript();
-  const helperDir = `${remoteBase}/.automd/helper/0.1.0`;
+  const helperDir = `${remoteBase}/.automd/helper/${helperVersion}`;
   const helperPath = `${helperDir}/automd-helper.sh`;
   const helperInstall = await session.ssh(`mkdir -p ${shellQuote(helperDir)} && cat > ${shellQuote(helperPath)} && chmod +x ${shellQuote(helperPath)}`, {
     stdin: helperScript,
@@ -431,7 +439,7 @@ async function main() {
   const helperProbe = await session.ssh(`${shellQuote(helperPath)} probe`);
   assertOrThrow(helperProbe.ok, `helper probe failed: ${helperProbe.stderr || helperProbe.stdout}`);
   const helperJson = JSON.parse(helperProbe.stdout.trim().split("\n").pop());
-  check(helperJson.helperVersion === "0.1.0", "helper version mismatch");
+  check(helperJson.helperVersion === helperVersion, `helper version mismatch: expected ${helperVersion}, got ${helperJson.helperVersion ?? "missing"}`);
   info(`helper: ${helperJson.platform}/${helperJson.arch} cpu=${helperJson.hardware?.cpuCount ?? "unknown"}`);
 
   const engineScan = await session.ssh(`${shellQuote(helperPath)} scan-engines gmx gmx_mpi`);
@@ -492,7 +500,7 @@ async function main() {
   info(`submitted ${scheduler} job ${jobId}`);
 
   await waitFor(async () => {
-    const tail = await session.ssh(`cd ${shellQuote(remoteBase)} && tail -n 100 logs/*.out logs/*.err runs/*/*.log remote/*.log 2>/dev/null || true`);
+    const tail = await session.ssh(`cd ${shellQuote(remoteBase)} && find logs runs analysis remote -type f \\( -name '*.out' -o -name '*.err' -o -name '*.log' \\) -exec tail -n 100 {} + 2>/dev/null || true`);
     const completed = tail.stdout.includes("AutoMD remote") && tail.stdout.includes("finished");
     if (scheduler !== "ssh" && !completed) await session.ssh(schedulerSpec.status(jobId));
     return { ok: completed, tail: tail.stdout.trim().slice(-300) };

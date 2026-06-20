@@ -90,7 +90,13 @@ pub fn search_dirs() -> Vec<PathBuf> {
             add(&mut dirs, &mut seen, PathBuf::from(&home).join(suffix));
         }
         // conda environments: ~/<dist>/envs/<name>/bin
-        for dist in ["miniconda3", "miniforge3", "mambaforge", "anaconda3", "miniforge"] {
+        for dist in [
+            "miniconda3",
+            "miniforge3",
+            "mambaforge",
+            "anaconda3",
+            "miniforge",
+        ] {
             let envs = PathBuf::from(&home).join(dist).join("envs");
             if let Ok(read) = std::fs::read_dir(&envs) {
                 for entry in read.flatten() {
@@ -128,7 +134,11 @@ fn automd_app_data_dirs(home: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     dirs.push(home.join(".automd"));
     if cfg!(target_os = "macos") {
-        dirs.push(home.join("Library").join("Application Support").join("com.noir.automd"));
+        dirs.push(
+            home.join("Library")
+                .join("Application Support")
+                .join("com.noir.automd"),
+        );
     } else if cfg!(target_os = "windows") {
         if let Ok(appdata) = std::env::var("APPDATA") {
             dirs.push(PathBuf::from(appdata).join("com.noir.automd"));

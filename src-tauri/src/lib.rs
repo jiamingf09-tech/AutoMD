@@ -12,8 +12,8 @@ mod plugins;
 mod project_files;
 mod project_store;
 mod recipes;
-mod remote_monitor;
 mod remote_helper;
+mod remote_monitor;
 mod remote_runner;
 mod runtime;
 mod science_sidecar;
@@ -70,7 +70,10 @@ fn miniforge_prefix(engines_root: &Path) -> PathBuf {
 }
 
 fn path_has_whitespace(path: &Path) -> bool {
-    path.as_os_str().to_string_lossy().chars().any(char::is_whitespace)
+    path.as_os_str()
+        .to_string_lossy()
+        .chars()
+        .any(char::is_whitespace)
 }
 
 fn home_automd_dir() -> Option<PathBuf> {
@@ -133,7 +136,8 @@ fn install_miniforge(engines_root: &Path) -> Result<PathBuf, String> {
         return Ok(conda);
     }
 
-    std::fs::create_dir_all(prefix.parent().unwrap_or(engines_root)).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(prefix.parent().unwrap_or(engines_root))
+        .map_err(|error| error.to_string())?;
     let downloads = engines_root.join("_downloads");
     std::fs::create_dir_all(&downloads).map_err(|error| error.to_string())?;
     let (url, file_name) = miniforge_installer_url()?;
@@ -161,10 +165,16 @@ fn install_miniforge(engines_root: &Path) -> Result<PathBuf, String> {
     .map_err(|error| format!("启动 Miniforge 安装器失败：{error}"))?;
 
     if !output.status.success() {
-        return Err(format!("Miniforge 安装失败：\n{}", command_tail(&output.stderr)));
+        return Err(format!(
+            "Miniforge 安装失败：\n{}",
+            command_tail(&output.stderr)
+        ));
     }
     if !conda.is_file() {
-        return Err(format!("Miniforge 安装完成，但未找到 {}。", conda.display()));
+        return Err(format!(
+            "Miniforge 安装完成，但未找到 {}。",
+            conda.display()
+        ));
     }
     Ok(conda)
 }
@@ -189,7 +199,10 @@ fn install_internal_mamba(engines_root: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("启动 mamba 安装器失败：{error}"))?;
 
     if !output.status.success() {
-        return Err(format!("mamba 安装失败：\n{}", command_tail(&output.stderr)));
+        return Err(format!(
+            "mamba 安装失败：\n{}",
+            command_tail(&output.stderr)
+        ));
     }
     if !mamba.is_file() {
         return Err(format!("mamba 安装完成，但未找到 {}。", mamba.display()));
@@ -210,7 +223,11 @@ fn miniforge_installer_url() -> Result<(String, String), String> {
         ("linux", "aarch64") => "aarch64",
         (os, arch) => return Err(format!("{os}/{arch} 暂不支持自动安装 Miniforge。")),
     };
-    let extension = if cfg!(target_os = "windows") { "exe" } else { "sh" };
+    let extension = if cfg!(target_os = "windows") {
+        "exe"
+    } else {
+        "sh"
+    };
     let file_name = format!("Miniforge3-{platform}-{arch}.{extension}");
     Ok((
         format!("https://github.com/conda-forge/miniforge/releases/latest/download/{file_name}"),
@@ -253,7 +270,10 @@ fn download_file(url: &str, destination: &Path) -> Result<(), String> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!("下载 Miniforge 失败：\n{}", command_tail(&output.stderr)))
+        Err(format!(
+            "下载 Miniforge 失败：\n{}",
+            command_tail(&output.stderr)
+        ))
     }
 }
 
@@ -318,11 +338,69 @@ fn detect_installed_version(binary: &Path) -> Option<String> {
         .filter(|line| !line.is_empty())
 }
 
+fn engine_version_probe_args(engine_id: &str) -> &'static [&'static str] {
+    match engine_id {
+        // LAMMPS rejects --version on many builds; -h is the stable documented
+        // CLI summary and prints the version banner on the first lines.
+        "lammps" => &["-h"],
+        // tleap can print Amber search-path chatter before any useful text.
+        // -h keeps the probe side-effect free; the output is cleaned below.
+        "ambertools" => &["-h"],
+        _ => &["--version"],
+    }
+}
+
+fn clean_engine_version(engine_id: &str, raw: &str) -> Option<String> {
+    let mut lines = raw.lines().map(str::trim).filter(|line| {
+        let lower = line.to_ascii_lowercase();
+        !line.is_empty()
+            && !line.starts_with("-I:")
+            && !lower.starts_with("adding ")
+            && !lower.starts_with("usage:")
+            && !lower.starts_with("error:")
+            && !lower.contains("invalid command-line argument")
+    });
+    match engine_id {
+        "ambertools" => lines
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("amber")
+                    || lower.contains("leap")
+                    || lower.contains("tleap")
+                    || lower.contains("sander")
+                    || lower.contains("cpptraj")
+            })
+            .next()
+            .map(|line| line.to_string())
+            .or_else(|| Some("AmberTools detected".to_string())),
+        "lammps" => lines
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("lammps") || lower.contains("large-scale atomic")
+            })
+            .next()
+            .map(|line| line.to_string()),
+        _ => lines.next().map(|line| line.to_string()),
+    }
+}
+
+fn detect_installed_engine_cli_version(binary: &Path, engine_id: &str) -> Option<String> {
+    let output = Command::new(binary)
+        .args(engine_version_probe_args(engine_id))
+        .output()
+        .ok()?;
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push('\n');
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    clean_engine_version(engine_id, &text)
+}
+
 fn detect_installed_engine_version(binary: &Path, engine_id: &str) -> Option<String> {
     if let Some(module) = engine_python_module(engine_id) {
         return detect_python_module_version(binary, module);
     }
-    detect_installed_version(binary)
+    detect_installed_engine_cli_version(binary, engine_id)
 }
 
 #[tauri::command]
@@ -335,25 +413,38 @@ fn list_engine_capabilities(state: tauri::State<'_, AppState>) -> Vec<EngineCapa
     let mut capabilities = engine_registry::detect_all();
     if let Ok(db) = state.db.lock() {
         if let Ok(records) = db.list_engine_installations() {
-            apply_installation_records(&mut capabilities, &records, "local", Some(current_native_platform()));
+            apply_installation_records(
+                &mut capabilities,
+                &records,
+                "local",
+                Some(current_native_platform()),
+            );
         }
     }
+    apply_managed_science_engine_fallback(&mut capabilities, &state.engines_root);
     capabilities
 }
 
 #[tauri::command]
 fn list_engine_targets(state: tauri::State<'_, AppState>) -> Result<Vec<EngineTarget>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    let profiles = merge_remote_profile_templates(
+        db.list_remote_profiles()
+            .map_err(|error| error.to_string())?,
+    );
     let helper_statuses = db
         .list_remote_helper_statuses()
         .map_err(|error| error.to_string())?;
     let mut targets = vec![local_engine_target()];
-    targets.extend(
-        profiles
-            .iter()
-            .map(|profile| engine_target_from_profile(profile, helper_status_for_profile(profile, &helper_statuses))),
-    );
+    targets.extend(profiles.iter().map(|profile| {
+        engine_target_from_profile(
+            profile,
+            helper_status_for_profile(profile, &helper_statuses),
+        )
+    }));
     Ok(targets)
 }
 
@@ -364,42 +455,122 @@ fn list_engine_capabilities_for_target(
 ) -> Result<Vec<EngineCapability>, String> {
     let (target_kind, profile_id) = split_target_id(&target_id);
     let mut capabilities = engine_registry::detect_all();
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    let records = db.list_engine_installations().map_err(|error| error.to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    let records = db
+        .list_engine_installations()
+        .map_err(|error| error.to_string())?;
     match target_kind {
         EngineTargetKind::Local => {
-            apply_installation_records(&mut capabilities, &records, "local", Some(current_native_platform()));
+            apply_installation_records(
+                &mut capabilities,
+                &records,
+                "local",
+                Some(current_native_platform()),
+            );
+            apply_managed_science_engine_fallback(&mut capabilities, &state.engines_root);
         }
         EngineTargetKind::Remote => {
-            let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+            let profiles = merge_remote_profile_templates(
+                db.list_remote_profiles()
+                    .map_err(|error| error.to_string())?,
+            );
             let profile = profiles
                 .iter()
                 .find(|profile| profile.id == profile_id)
                 .ok_or_else(|| format!("未找到远程 profile：{profile_id}"))?;
             let helper_status = helper_status_for_profile(
                 profile,
-                &db.list_remote_helper_statuses().map_err(|error| error.to_string())?,
+                &db.list_remote_helper_statuses()
+                    .map_err(|error| error.to_string())?,
             );
-            if !matches!(&helper_status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
-                for capability in &mut capabilities {
-                    capability.detection = DetectionState {
-                        status: DetectionStatus::MissingInstall,
-                        path: None,
-                        version: None,
-                        message: format!("{} 的 AutoMD 远程 helper 未就绪：{}。", profile.name, profile.host),
-                    };
-                }
-                return Ok(capabilities);
-            }
             apply_installation_records(
                 &mut capabilities,
                 &records,
                 &format!("remote:{profile_id}"),
-                helper_status.platform,
+                helper_status.platform.clone(),
             );
+            if !matches!(
+                &helper_status.status,
+                RemoteHelperState::Ready | RemoteHelperState::Outdated
+            ) {
+                for capability in &mut capabilities {
+                    if matches!(
+                        capability.detection.status,
+                        DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported
+                    ) {
+                        continue;
+                    }
+                    capability.detection = DetectionState {
+                        status: DetectionStatus::MissingInstall,
+                        path: None,
+                        version: None,
+                        message: format!(
+                            "{} 的 AutoMD 远程 helper 未就绪：{}。",
+                            profile.name, profile.host
+                        ),
+                    };
+                }
+                return Ok(capabilities);
+            }
         }
     }
     Ok(capabilities)
+}
+
+fn apply_managed_science_engine_fallback(
+    capabilities: &mut [EngineCapability],
+    engines_root: &Path,
+) {
+    let prefix = engines_root.join("_tools").join("automd-science");
+    let python = python_binary(&prefix);
+    for capability in capabilities {
+        if capability.detection.status != DetectionStatus::MissingInstall {
+            continue;
+        }
+        match capability.id.as_str() {
+            "openmm" => {
+                if let Some(version) = detect_python_module_version(&python, "openmm") {
+                    capability.detection = DetectionState {
+                        status: DetectionStatus::Ready,
+                        path: Some(python.display().to_string()),
+                        version: Some(version),
+                        message: "已在 AutoMD 管理的 automd-science 环境检测到 OpenMM。"
+                            .to_string(),
+                    };
+                }
+            }
+            "ambertools" => {
+                let bin = prefix.join(if cfg!(target_os = "windows") {
+                    "Scripts"
+                } else {
+                    "bin"
+                });
+                if let Some(binary) = ["tleap", "sander", "cpptraj"]
+                    .iter()
+                    .map(|name| {
+                        bin.join(if cfg!(target_os = "windows") {
+                            format!("{name}.exe")
+                        } else {
+                            (*name).to_string()
+                        })
+                    })
+                    .find(|candidate| candidate.is_file())
+                {
+                    capability.detection = DetectionState {
+                        status: DetectionStatus::Ready,
+                        path: Some(binary.display().to_string()),
+                        version: detect_installed_engine_version(&binary, "ambertools"),
+                        message: "已在 AutoMD 管理的 automd-science 环境检测到 AmberTools。"
+                            .to_string(),
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn apply_installation_records(
@@ -431,7 +602,10 @@ fn apply_installation_records(
             continue;
         }
         if target_id != "local"
-            && matches!(&capability.detection.status, DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported)
+            && matches!(
+                &capability.detection.status,
+                DetectionStatus::NotApplicable | DetectionStatus::PlatformUnsupported
+            )
         {
             capability.detection = DetectionState {
                 status: DetectionStatus::MissingInstall,
@@ -450,11 +624,21 @@ fn apply_installation_records(
                 version: record.version.clone(),
                 message: match record.authorization_status {
                     DetectionStatus::Ready => "用户保存的引擎路径已标记可用。".to_string(),
-                    DetectionStatus::MissingLicense => "用户保存的引擎路径仍需许可/授权确认。".to_string(),
-                    DetectionStatus::MissingInstall => "用户保存的引擎路径标记为需要安装检查。".to_string(),
-                    DetectionStatus::PlatformUnsupported => "用户保存的引擎路径标记为当前平台不支持。".to_string(),
-                    DetectionStatus::RemoteRecommended => "用户保存的引擎配置建议通过远程环境运行。".to_string(),
-                    DetectionStatus::NotApplicable => "用户保存的引擎配置标记为当前环境不适用。".to_string(),
+                    DetectionStatus::MissingLicense => {
+                        "用户保存的引擎路径仍需许可/授权确认。".to_string()
+                    }
+                    DetectionStatus::MissingInstall => {
+                        "用户保存的引擎路径标记为需要安装检查。".to_string()
+                    }
+                    DetectionStatus::PlatformUnsupported => {
+                        "用户保存的引擎路径标记为当前平台不支持。".to_string()
+                    }
+                    DetectionStatus::RemoteRecommended => {
+                        "用户保存的引擎配置建议通过远程环境运行。".to_string()
+                    }
+                    DetectionStatus::NotApplicable => {
+                        "用户保存的引擎配置标记为当前环境不适用。".to_string()
+                    }
                 },
             };
         }
@@ -568,9 +752,18 @@ fn split_target_id(target_id: &str) -> (EngineTargetKind, String) {
     }
 }
 
-fn remote_profile_by_id(state: &tauri::State<'_, AppState>, profile_id: &str) -> Result<RemoteProfile, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    let profiles = merge_remote_profile_templates(db.list_remote_profiles().map_err(|error| error.to_string())?);
+fn remote_profile_by_id(
+    state: &tauri::State<'_, AppState>,
+    profile_id: &str,
+) -> Result<RemoteProfile, String> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    let profiles = merge_remote_profile_templates(
+        db.list_remote_profiles()
+            .map_err(|error| error.to_string())?,
+    );
     profiles
         .into_iter()
         .find(|profile| profile.id == profile_id)
@@ -581,7 +774,10 @@ fn remote_helper_status_by_profile(
     state: &tauri::State<'_, AppState>,
     profile_id: &str,
 ) -> Result<RemoteHelperStatus, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     let statuses = db
         .list_remote_helper_statuses()
         .map_err(|error| error.to_string())?;
@@ -645,7 +841,10 @@ async fn install_science_sidecar(
             .map_err(|error| format!("启动科学侧车安装器失败：{error}"))?;
 
         if !output.status.success() {
-            return Err(format!("科学侧车环境安装失败：\n{}", command_tail(&output.stderr)));
+            return Err(format!(
+                "科学侧车环境安装失败：\n{}",
+                command_tail(&output.stderr)
+            ));
         }
 
         Ok(science_sidecar::diagnostics(Some(&engines_root)))
@@ -655,7 +854,9 @@ async fn install_science_sidecar(
 }
 
 #[tauri::command]
-fn inspect_science_tool(request: ScienceToolInspectRequest) -> Result<ScienceToolDiagnostic, String> {
+fn inspect_science_tool(
+    request: ScienceToolInspectRequest,
+) -> Result<ScienceToolDiagnostic, String> {
     let path = PathBuf::from(&request.executable_path);
     if !path.is_file() {
         return Err(format!("路径不存在或不是可执行文件：{}", path.display()));
@@ -721,8 +922,13 @@ fn list_remote_profile_templates() -> Vec<RemoteProfile> {
 
 #[tauri::command]
 fn list_remote_profiles(state: tauri::State<'_, AppState>) -> Result<Vec<RemoteProfile>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    let saved = db.list_remote_profiles().map_err(|error| error.to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    let saved = db
+        .list_remote_profiles()
+        .map_err(|error| error.to_string())?;
     let mut profiles = saved;
     for template in runtime::remote_profile_templates() {
         if !profiles.iter().any(|profile| profile.id == template.id) {
@@ -733,21 +939,38 @@ fn list_remote_profiles(state: tauri::State<'_, AppState>) -> Result<Vec<RemoteP
 }
 
 #[tauri::command]
-fn save_remote_profile(profile: RemoteProfile, state: tauri::State<'_, AppState>) -> Result<RemoteProfile, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    db.save_remote_profile(profile).map_err(|error| error.to_string())
+fn save_remote_profile(
+    profile: RemoteProfile,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteProfile, String> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_remote_profile(profile)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn delete_remote_profile(id: String, state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    db.delete_remote_profile(id).map_err(|error| error.to_string())
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.delete_remote_profile(id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn list_engine_installations(state: tauri::State<'_, AppState>) -> Result<Vec<EngineInstallationRecord>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    db.list_engine_installations().map_err(|error| error.to_string())
+fn list_engine_installations(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<EngineInstallationRecord>, String> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.list_engine_installations()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -755,8 +978,12 @@ fn save_engine_installation(
     record: EngineInstallationRecord,
     state: tauri::State<'_, AppState>,
 ) -> Result<EngineInstallationRecord, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    db.save_engine_installation(record).map_err(|error| error.to_string())
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_engine_installation(record)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -765,7 +992,10 @@ fn delete_engine_installation(
     location: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.delete_engine_installation(engine_id, location)
         .map_err(|error| error.to_string())
 }
@@ -777,7 +1007,10 @@ fn delete_engine_installation_for_target(
     location: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.delete_engine_installation_for_target(target_id, engine_id, location)
         .map_err(|error| error.to_string())
 }
@@ -790,24 +1023,34 @@ fn check_remote_helper(
     let profile = remote_profile_by_id(&state, &profile_id)?;
     let password = state.credentials.get(&profile_id);
     let existing = remote_helper_status_by_profile(&state, &profile_id).ok();
-    let checked = remote_helper::check_helper(&profile, existing.and_then(|status| status.install_path), password.as_deref())
-        .unwrap_or_else(|error| RemoteHelperStatus {
-            profile_id: profile.id.clone(),
-            helper_version: None,
-            status: if error.to_string().to_ascii_lowercase().contains("permission") {
-                RemoteHelperState::PermissionDenied
-            } else {
-                RemoteHelperState::Unreachable
-            },
-            install_path: Some(remote_helper::default_install_path(&profile)),
-            platform: None,
-            arch: None,
-            hostname: None,
-            hardware_json: None,
-            checked_at: chrono::Utc::now(),
-            last_error: Some(error.to_string()),
-        });
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let checked = remote_helper::check_helper(
+        &profile,
+        existing
+            .as_ref()
+            .and_then(|status| status.install_path.clone()),
+        password.as_deref(),
+    )
+    .unwrap_or_else(|error| RemoteHelperStatus {
+        profile_id: profile.id.clone(),
+        helper_version: None,
+        status: remote_helper_error_state(&error.to_string()),
+        install_path: existing
+            .as_ref()
+            .and_then(|status| status.install_path.clone())
+            .or_else(|| Some(remote_helper::default_install_path(&profile))),
+        platform: existing.as_ref().and_then(|status| status.platform.clone()),
+        arch: existing.as_ref().and_then(|status| status.arch.clone()),
+        hostname: existing.as_ref().and_then(|status| status.hostname.clone()),
+        hardware_json: existing
+            .as_ref()
+            .and_then(|status| status.hardware_json.clone()),
+        checked_at: chrono::Utc::now(),
+        last_error: Some(error.to_string()),
+    });
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.save_remote_helper_status(checked)
         .map_err(|error| error.to_string())
 }
@@ -819,25 +1062,44 @@ fn install_remote_helper(
 ) -> Result<RemoteHelperStatus, String> {
     let profile = remote_profile_by_id(&state, &profile_id)?;
     let password = state.credentials.get(&profile_id);
-    let installed = remote_helper::install_helper(&profile, password.as_deref()).unwrap_or_else(|error| RemoteHelperStatus {
-        profile_id: profile.id.clone(),
-        helper_version: None,
-        status: if error.to_string().to_ascii_lowercase().contains("permission") {
-            RemoteHelperState::PermissionDenied
-        } else {
-            RemoteHelperState::Unreachable
-        },
-        install_path: Some(remote_helper::default_install_path(&profile)),
-        platform: None,
-        arch: None,
-        hostname: None,
-        hardware_json: None,
-        checked_at: chrono::Utc::now(),
-        last_error: Some(error.to_string()),
-    });
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let existing = remote_helper_status_by_profile(&state, &profile_id).ok();
+    let installed =
+        remote_helper::install_helper(&profile, password.as_deref()).unwrap_or_else(|error| {
+            RemoteHelperStatus {
+                profile_id: profile.id.clone(),
+                helper_version: None,
+                status: remote_helper_error_state(&error.to_string()),
+                install_path: Some(remote_helper::default_install_path(&profile)),
+                platform: existing.as_ref().and_then(|status| status.platform.clone()),
+                arch: existing.as_ref().and_then(|status| status.arch.clone()),
+                hostname: existing.as_ref().and_then(|status| status.hostname.clone()),
+                hardware_json: existing
+                    .as_ref()
+                    .and_then(|status| status.hardware_json.clone()),
+                checked_at: chrono::Utc::now(),
+                last_error: Some(error.to_string()),
+            }
+        });
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.save_remote_helper_status(installed)
         .map_err(|error| error.to_string())
+}
+
+fn remote_helper_error_state(error: &str) -> RemoteHelperState {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("permission") || error.contains("权限") {
+        RemoteHelperState::PermissionDenied
+    } else if lower.contains("no such file")
+        || lower.contains("not found")
+        || error.contains("没有那个文件")
+    {
+        RemoteHelperState::Missing
+    } else {
+        RemoteHelperState::Unreachable
+    }
 }
 
 #[tauri::command]
@@ -851,7 +1113,10 @@ fn scan_engines_on_target(
         EngineTargetKind::Remote => {
             let profile = remote_profile_by_id(&state, &profile_id)?;
             let helper_status = remote_helper_status_by_profile(&state, &profile_id)?;
-            if !matches!(&helper_status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+            if !matches!(
+                &helper_status.status,
+                RemoteHelperState::Ready | RemoteHelperState::Outdated
+            ) {
                 return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
             }
             let install_path = helper_status
@@ -868,8 +1133,14 @@ fn scan_engines_on_target(
                         continue;
                     }
                 }
-                if let Some(probe) = remote_helper::scan_engine(&profile, install_path, &engine.executable_names, password.as_deref())
-                    .map_err(|error| error.to_string())?
+                if let Some(probe) = remote_helper::scan_engine(
+                    &profile,
+                    install_path,
+                    &engine.executable_names,
+                    helper_status.platform.as_ref(),
+                    password.as_deref(),
+                )
+                .map_err(|error| error.to_string())?
                 {
                     found_records.push(EngineInstallationRecord {
                         target_kind: EngineTargetKind::Remote,
@@ -890,7 +1161,10 @@ fn scan_engines_on_target(
                 }
             }
             {
-                let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|_| "project database lock poisoned".to_string())?;
                 for record in found_records {
                     db.save_engine_installation(record)
                         .map_err(|error| error.to_string())?;
@@ -934,8 +1208,8 @@ async fn install_engine(
     let id = engine_id.clone();
     // The download + conda create can take minutes. Run it on the blocking pool
     // so the UI thread is never blocked (the install stays fully async).
-    let (location, version) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<(String, Option<String>), String> {
+    let (location, version) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(String, Option<String>), String> {
             std::fs::create_dir_all(&engines_root).map_err(|error| error.to_string())?;
             let manager = ensure_conda_manager(&engines_root)?;
             let prefix = engines_root.join(&id);
@@ -954,9 +1228,15 @@ async fn install_engine(
             }
             let binary = locate_installed_binary(&prefix, &id).ok_or_else(|| {
                 if engine_python_module(&id).is_some() {
-                    format!("{id} 安装完成，但未在 {} 找到 Python 环境。", prefix.display())
+                    format!(
+                        "{id} 安装完成，但未在 {} 找到 Python 环境。",
+                        prefix.display()
+                    )
                 } else {
-                    format!("{id} 安装完成，但未在 {} 找到可执行文件。", prefix.join("bin").display())
+                    format!(
+                        "{id} 安装完成，但未在 {} 找到可执行文件。",
+                        prefix.join("bin").display()
+                    )
                 }
             })?;
             let version = detect_installed_engine_version(&binary, &id);
@@ -969,9 +1249,10 @@ async fn install_engine(
                 }
             }
             Ok((binary.display().to_string(), version))
-        })
-        .await
-        .map_err(|error| format!("安装任务执行失败：{error}"))??;
+        },
+    )
+    .await
+    .map_err(|error| format!("安装任务执行失败：{error}"))??;
 
     let record = EngineInstallationRecord {
         target_kind: EngineTargetKind::Local,
@@ -985,17 +1266,23 @@ async fn install_engine(
         arch: Some(std::env::consts::ARCH.to_string()),
         checked_at: chrono::Utc::now(),
     };
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.save_engine_installation(record.clone())
         .map_err(|error| error.to_string())?;
     Ok(record)
 }
 
 fn source_build_capable(engine_id: &str) -> bool {
-    matches!(engine_id, "gromacs" | "cp2k")
+    matches!(engine_id, "gromacs" | "cp2k" | "tinker")
 }
 
-fn resolve_deploy_strategy(engine_id: &str, requested: EngineDeployStrategy) -> EngineDeployStrategy {
+fn resolve_deploy_strategy(
+    engine_id: &str,
+    requested: EngineDeployStrategy,
+) -> EngineDeployStrategy {
     match requested {
         EngineDeployStrategy::Auto => {
             if engine_conda_package(engine_id).is_some() {
@@ -1016,9 +1303,12 @@ fn locate_source_build_binary(engine_id: &str, options: &BuildRecipeOptions) -> 
         .as_deref()
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| PathBuf::from(home).join(".local").join("automd").join(engine_id))
+            std::env::var("HOME").ok().map(|home| {
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("automd")
+                    .join(engine_id)
+            })
         })?;
     let bin_dir = prefix.join("bin");
     let capability = engine_registry::detect_engine_by_id(engine_id)?;
@@ -1052,7 +1342,9 @@ fn source_build_record(
     })
 }
 
-fn run_local_build_for_deploy(request: &EngineDeployRequest) -> Result<BuildWorkflowResult, String> {
+fn run_local_build_for_deploy(
+    request: &EngineDeployRequest,
+) -> Result<BuildWorkflowResult, String> {
     let project_path = request
         .project_path
         .clone()
@@ -1095,16 +1387,35 @@ async fn install_or_build_engine(
         }
         (EngineTargetKind::Local, EngineDeployStrategy::SourceBuild) => {
             if !source_build_capable(&request.engine_id) {
-                return Err(format!("{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。", request.engine_id));
+                return Err(format!(
+                    "{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。",
+                    request.engine_id
+                ));
             }
             let build_result = run_local_build_for_deploy(&request)?;
             let mut record = None;
-            if matches!(&request.mode, BuildWorkflowMode::Execute) && build_result.status == TaskStatus::Completed {
-                if let Some(found) = source_build_record("local", "本机".to_string(), request.engine_id.clone(), &request.build_options) {
-                    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-                    record = Some(db.save_engine_installation(found).map_err(|error| error.to_string())?);
+            if matches!(&request.mode, BuildWorkflowMode::Execute)
+                && build_result.status == TaskStatus::Completed
+            {
+                if let Some(found) = source_build_record(
+                    "local",
+                    "本机".to_string(),
+                    request.engine_id.clone(),
+                    &request.build_options,
+                ) {
+                    let db = state
+                        .db
+                        .lock()
+                        .map_err(|_| "project database lock poisoned".to_string())?;
+                    record = Some(
+                        db.save_engine_installation(found)
+                            .map_err(|error| error.to_string())?,
+                    );
                 } else {
-                    warnings.push("构建完成，但未自动定位到可执行文件；请回到引擎页手动登记路径。".to_string());
+                    warnings.push(
+                        "构建完成，但未自动定位到可执行文件；请回到引擎页手动登记路径。"
+                            .to_string(),
+                    );
                 }
             }
             Ok(EngineDeployResult {
@@ -1121,6 +1432,12 @@ async fn install_or_build_engine(
             })
         }
         (EngineTargetKind::Local, EngineDeployStrategy::RecipeOnly) => {
+            if matches!(&request.mode, BuildWorkflowMode::Execute) {
+                return Err(format!(
+                    "{} 仅提供 recipe/接入清单；AutoMD 不会把占位脚本标记为编译成功。请先按上游许可准备源码，再手动登记构建产物。",
+                    request.engine_id
+                ));
+            }
             let build_result = run_local_build_for_deploy(&request)?;
             warnings.push("该引擎不能由 AutoMD 自动下载或编译；已生成 recipe/接入清单，请按授权和上游文档处理。".to_string());
             Ok(EngineDeployResult {
@@ -1141,7 +1458,10 @@ async fn install_or_build_engine(
                 .ok_or_else(|| format!("{} 不能通过包管理器自动部署。", request.engine_id))?;
             let profile = remote_profile_by_id(&state, &profile_id)?;
             let helper = remote_helper_status_by_profile(&state, &profile_id)?;
-            if !matches!(&helper.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+            if !matches!(
+                &helper.status,
+                RemoteHelperState::Ready | RemoteHelperState::Outdated
+            ) {
                 return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
             }
             let install_path = helper
@@ -1152,7 +1472,11 @@ async fn install_or_build_engine(
                 .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
             if let Some(platform) = &helper.platform {
                 if !capability.platform_support.native.contains(platform) {
-                    return Err(format!("{} 不支持该远程平台 {}。", capability.name, platform_label(platform)));
+                    return Err(format!(
+                        "{} 不支持该远程平台 {}。",
+                        capability.name,
+                        platform_label(platform)
+                    ));
                 }
             }
             let password = state.credentials.get(&profile_id);
@@ -1163,6 +1487,7 @@ async fn install_or_build_engine(
                 package,
                 &capability.executable_names,
                 password.as_deref(),
+                request.timeout_seconds,
             )
             .map_err(|error| error.to_string())?;
             let record = EngineInstallationRecord {
@@ -1181,8 +1506,13 @@ async fn install_or_build_engine(
                 arch: probe.arch.or(helper.arch),
                 checked_at: chrono::Utc::now(),
             };
-            let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-            let saved = db.save_engine_installation(record).map_err(|error| error.to_string())?;
+            let db = state
+                .db
+                .lock()
+                .map_err(|_| "project database lock poisoned".to_string())?;
+            let saved = db
+                .save_engine_installation(record)
+                .map_err(|error| error.to_string())?;
             Ok(EngineDeployResult {
                 target_id: format!("remote:{profile_id}"),
                 engine_id: request.engine_id,
@@ -1198,11 +1528,17 @@ async fn install_or_build_engine(
         }
         (EngineTargetKind::Remote, EngineDeployStrategy::SourceBuild) => {
             if !source_build_capable(&request.engine_id) {
-                return Err(format!("{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。", request.engine_id));
+                return Err(format!(
+                    "{} 尚无完整源码构建 recipe，只能生成接入清单或手动登记。",
+                    request.engine_id
+                ));
             }
             let profile = remote_profile_by_id(&state, &profile_id)?;
             let helper = remote_helper_status_by_profile(&state, &profile_id)?;
-            if !matches!(&helper.status, RemoteHelperState::Ready | RemoteHelperState::Outdated) {
+            if !matches!(
+                &helper.status,
+                RemoteHelperState::Ready | RemoteHelperState::Outdated
+            ) {
                 return Err("远程 helper 未就绪，请先在远程页安装或检测 helper。".to_string());
             }
             let install_path = helper
@@ -1226,29 +1562,49 @@ async fn install_or_build_engine(
             }
             let password = state.credentials.get(&profile_id);
             let build = recipes::build_recipe(request.build_options.clone());
-            let stdout = remote_helper::run_build_engine_with_helper(&profile, install_path, &request.engine_id, &build.script, password.as_deref())
-                .map_err(|error| error.to_string())?;
+            let stdout = remote_helper::run_build_engine_with_helper(
+                &profile,
+                install_path,
+                &request.engine_id,
+                &build.script,
+                password.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
             let capability = engine_registry::detect_engine_by_id(&request.engine_id)
                 .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
-            let record = remote_helper::scan_engine(&profile, install_path, &capability.executable_names, password.as_deref())
-                .map_err(|error| error.to_string())?
-                .map(|probe| EngineInstallationRecord {
-                    target_kind: EngineTargetKind::Remote,
-                    target_id: format!("remote:{profile_id}"),
-                    target_label: profile.name.clone(),
-                    engine_id: request.engine_id.clone(),
-                    location: probe.location,
-                    version: probe.version,
-                    authorization_status: DetectionStatus::Ready,
-                    platform: probe.platform.or(helper.platform.clone()),
-                    arch: probe.arch.or(helper.arch.clone()),
-                    checked_at: chrono::Utc::now(),
-                });
+            let record = remote_helper::scan_engine(
+                &profile,
+                install_path,
+                &capability.executable_names,
+                helper.platform.as_ref(),
+                password.as_deref(),
+            )
+            .map_err(|error| error.to_string())?
+            .map(|probe| EngineInstallationRecord {
+                target_kind: EngineTargetKind::Remote,
+                target_id: format!("remote:{profile_id}"),
+                target_label: profile.name.clone(),
+                engine_id: request.engine_id.clone(),
+                location: probe.location,
+                version: probe.version,
+                authorization_status: DetectionStatus::Ready,
+                platform: probe.platform.or(helper.platform.clone()),
+                arch: probe.arch.or(helper.arch.clone()),
+                checked_at: chrono::Utc::now(),
+            });
             let saved = if let Some(record) = record {
-                let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-                Some(db.save_engine_installation(record).map_err(|error| error.to_string())?)
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|_| "project database lock poisoned".to_string())?;
+                Some(
+                    db.save_engine_installation(record)
+                        .map_err(|error| error.to_string())?,
+                )
             } else {
-                warnings.push("远程构建完成，但未自动扫描到可执行文件；请手动登记远程路径。".to_string());
+                warnings.push(
+                    "远程构建完成，但未自动扫描到可执行文件；请手动登记远程路径。".to_string(),
+                );
                 None
             };
             Ok(EngineDeployResult {
@@ -1265,8 +1621,17 @@ async fn install_or_build_engine(
             })
         }
         (_, EngineDeployStrategy::RecipeOnly) => {
+            if matches!(&request.mode, BuildWorkflowMode::Execute) {
+                return Err(format!(
+                    "{} 仅提供 recipe/接入清单；AutoMD 不会在目标设备执行占位脚本或把它标记为编译成功。",
+                    request.engine_id
+                ));
+            }
             let build_result = run_local_build_for_deploy(&request)?;
-            warnings.push("该引擎需要用户源码、许可证或目标平台工具链；AutoMD 只生成 recipe/接入清单。".to_string());
+            warnings.push(
+                "该引擎需要用户源码、许可证或目标平台工具链；AutoMD 只生成 recipe/接入清单。"
+                    .to_string(),
+            );
             Ok(EngineDeployResult {
                 target_id: request.target_id,
                 engine_id: request.engine_id,
@@ -1280,7 +1645,9 @@ async fn install_or_build_engine(
                 warnings,
             })
         }
-        (_, EngineDeployStrategy::Auto) => unreachable!("auto strategy is resolved before matching"),
+        (_, EngineDeployStrategy::Auto) => {
+            unreachable!("auto strategy is resolved before matching")
+        }
     }
 }
 
@@ -1306,7 +1673,10 @@ fn list_installable_tools() -> Vec<String> {
 /// One-click install for a runtime tool via conda-forge. Returns the absolute
 /// path of the installed binary (the UI marks the tool ready with it).
 #[tauri::command]
-async fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+async fn install_tool(
+    tool_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
     let engines_root = state.engines_root.clone();
     // Blocking conda/download work runs off the UI thread (fully async).
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
@@ -1337,12 +1707,18 @@ async fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Res
             .map_err(|error| format!("启动安装器失败：{error}"))?;
 
         if !output.status.success() {
-            return Err(format!("{tool_id} 安装失败：\n{}", command_tail(&output.stderr)));
+            return Err(format!(
+                "{tool_id} 安装失败：\n{}",
+                command_tail(&output.stderr)
+            ));
         }
 
         let binary = prefix.join("bin").join(exe);
         if !binary.is_file() {
-            return Err(format!("{tool_id} 安装完成，但未找到 {}。", binary.display()));
+            return Err(format!(
+                "{tool_id} 安装完成，但未找到 {}。",
+                binary.display()
+            ));
         }
         Ok(binary.display().to_string())
     })
@@ -1351,11 +1727,15 @@ async fn install_tool(tool_id: String, state: tauri::State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-fn list_plugin_manifests(state: tauri::State<'_, AppState>) -> Result<PluginRegistrySnapshot, String> {
+fn list_plugin_manifests(
+    state: tauri::State<'_, AppState>,
+) -> Result<PluginRegistrySnapshot, String> {
     plugin_registry_snapshot(&state)
 }
 
-fn plugin_registry_snapshot(state: &tauri::State<'_, AppState>) -> Result<PluginRegistrySnapshot, String> {
+fn plugin_registry_snapshot(
+    state: &tauri::State<'_, AppState>,
+) -> Result<PluginRegistrySnapshot, String> {
     let states = state
         .db
         .lock()
@@ -1366,14 +1746,18 @@ fn plugin_registry_snapshot(state: &tauri::State<'_, AppState>) -> Result<Plugin
 }
 
 #[tauri::command]
-fn import_plugin(state: tauri::State<'_, AppState>, request: PluginImportRequest) -> Result<PluginRegistrySnapshot, String> {
+fn import_plugin(
+    state: tauri::State<'_, AppState>,
+    request: PluginImportRequest,
+) -> Result<PluginRegistrySnapshot, String> {
     let states = state
         .db
         .lock()
         .map_err(|error| error.to_string())?
         .list_plugin_states()
         .map_err(|error| error.to_string())?;
-    let plugin_id = plugins::import_plugin(&state.plugin_root, &request, &states).map_err(|error| error.to_string())?;
+    let plugin_id = plugins::import_plugin(&state.plugin_root, &request, &states)
+        .map_err(|error| error.to_string())?;
     state
         .db
         .lock()
@@ -1384,8 +1768,12 @@ fn import_plugin(state: tauri::State<'_, AppState>, request: PluginImportRequest
 }
 
 #[tauri::command]
-fn create_plugin_template(state: tauri::State<'_, AppState>, request: PluginTemplateRequest) -> Result<PluginRegistrySnapshot, String> {
-    let plugin_id = plugins::create_plugin_template(&state.plugin_root, &request).map_err(|error| error.to_string())?;
+fn create_plugin_template(
+    state: tauri::State<'_, AppState>,
+    request: PluginTemplateRequest,
+) -> Result<PluginRegistrySnapshot, String> {
+    let plugin_id = plugins::create_plugin_template(&state.plugin_root, &request)
+        .map_err(|error| error.to_string())?;
     state
         .db
         .lock()
@@ -1396,7 +1784,11 @@ fn create_plugin_template(state: tauri::State<'_, AppState>, request: PluginTemp
 }
 
 #[tauri::command]
-fn set_plugin_enabled(state: tauri::State<'_, AppState>, plugin_id: String, enabled: bool) -> Result<PluginRegistrySnapshot, String> {
+fn set_plugin_enabled(
+    state: tauri::State<'_, AppState>,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<PluginRegistrySnapshot, String> {
     let snapshot = plugin_registry_snapshot(&state)?;
     let manifest = snapshot
         .manifests
@@ -1416,14 +1808,18 @@ fn set_plugin_enabled(state: tauri::State<'_, AppState>, plugin_id: String, enab
 }
 
 #[tauri::command]
-fn delete_plugin(state: tauri::State<'_, AppState>, plugin_id: String) -> Result<PluginRegistrySnapshot, String> {
+fn delete_plugin(
+    state: tauri::State<'_, AppState>,
+    plugin_id: String,
+) -> Result<PluginRegistrySnapshot, String> {
     let states = state
         .db
         .lock()
         .map_err(|error| error.to_string())?
         .list_plugin_states()
         .map_err(|error| error.to_string())?;
-    plugins::delete_user_plugin(&state.plugin_root, &plugin_id, &states).map_err(|error| error.to_string())?;
+    plugins::delete_user_plugin(&state.plugin_root, &plugin_id, &states)
+        .map_err(|error| error.to_string())?;
     state
         .db
         .lock()
@@ -1434,7 +1830,10 @@ fn delete_plugin(state: tauri::State<'_, AppState>, plugin_id: String) -> Result
 }
 
 #[tauri::command]
-fn save_plugin_config(state: tauri::State<'_, AppState>, request: PluginConfigRequest) -> Result<PluginRegistrySnapshot, String> {
+fn save_plugin_config(
+    state: tauri::State<'_, AppState>,
+    request: PluginConfigRequest,
+) -> Result<PluginRegistrySnapshot, String> {
     let snapshot = plugin_registry_snapshot(&state)?;
     let manifest = snapshot
         .manifests
@@ -1454,7 +1853,10 @@ fn save_plugin_config(state: tauri::State<'_, AppState>, request: PluginConfigRe
 }
 
 #[tauri::command]
-fn run_plugin_action(state: tauri::State<'_, AppState>, request: PluginRunRequest) -> Result<PluginRunResult, String> {
+fn run_plugin_action(
+    state: tauri::State<'_, AppState>,
+    request: PluginRunRequest,
+) -> Result<PluginRunResult, String> {
     let snapshot = plugin_registry_snapshot(&state)?;
     let manifest = snapshot
         .manifests
@@ -1468,11 +1870,21 @@ fn run_plugin_action(state: tauri::State<'_, AppState>, request: PluginRunReques
             .db
             .lock()
             .map_err(|error| error.to_string())?
-            .insert_plugin_run(run_id, &request.plugin_id, &request.action_id, request.mode.clone())
+            .insert_plugin_run(
+                run_id,
+                &request.plugin_id,
+                &request.action_id,
+                request.mode.clone(),
+            )
             .map_err(|error| error.to_string())?;
     }
 
-    match plugins::execute_plugin_action(&state.plugin_root, &manifest, &request, &run_id.to_string()) {
+    match plugins::execute_plugin_action(
+        &state.plugin_root,
+        &manifest,
+        &request,
+        &run_id.to_string(),
+    ) {
         Ok((stdout, stderr, parsed_output, warnings)) => {
             let record = state
                 .db
@@ -1480,7 +1892,13 @@ fn run_plugin_action(state: tauri::State<'_, AppState>, request: PluginRunReques
                 .map_err(|error| error.to_string())?
                 .finish_plugin_run(run_id, PluginRunStatus::Completed, &stdout, &stderr)
                 .map_err(|error| error.to_string())?;
-            Ok(PluginRunResult { record, stdout, stderr, parsed_output, warnings })
+            Ok(PluginRunResult {
+                record,
+                stdout,
+                stderr,
+                parsed_output,
+                warnings,
+            })
         }
         Err(error) => {
             let message = error.to_string();
@@ -1504,12 +1922,16 @@ fn run_plugin_action(state: tauri::State<'_, AppState>, request: PluginRunReques
 #[tauri::command]
 fn open_plugin_folder(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     std::fs::create_dir_all(&state.plugin_root).map_err(|error| error.to_string())?;
-    tauri_plugin_opener::open_path(&state.plugin_root, None::<&str>).map_err(|error| error.to_string())?;
+    tauri_plugin_opener::open_path(&state.plugin_root, None::<&str>)
+        .map_err(|error| error.to_string())?;
     Ok(true)
 }
 
 #[tauri::command]
-fn open_plugin_install_folder(state: tauri::State<'_, AppState>, plugin_id: String) -> Result<bool, String> {
+fn open_plugin_install_folder(
+    state: tauri::State<'_, AppState>,
+    plugin_id: String,
+) -> Result<bool, String> {
     let snapshot = plugin_registry_snapshot(&state)?;
     let manifest = snapshot
         .manifests
@@ -1560,7 +1982,12 @@ fn pick_file_in_system(request: FilePickRequest) -> Result<Option<String>, Strin
         }
         dir
     });
-    pick_file_dialog(&title, &request.extensions, default_dir.as_deref(), request.show_hidden)
+    pick_file_dialog(
+        &title,
+        &request.extensions,
+        default_dir.as_deref(),
+        request.show_hidden,
+    )
 }
 
 fn find_python_module_executable(
@@ -1584,6 +2011,7 @@ fn find_python_module_executable(
 
     let mut seen = std::collections::HashSet::new();
     for candidate in candidates {
+        let candidate = normalize_python_module_executable(candidate);
         if !seen.insert(candidate.clone()) {
             continue;
         }
@@ -1598,6 +2026,25 @@ fn find_python_module_executable(
     None
 }
 
+fn normalize_python_module_executable(candidate: PathBuf) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        return candidate;
+    }
+    let name = candidate
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name == "python3" || name.starts_with("python3.") {
+        if let Some(parent) = candidate.parent() {
+            let python = parent.join("python");
+            if python.is_file() {
+                return python;
+            }
+        }
+    }
+    candidate
+}
+
 #[tauri::command]
 fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchResult, String> {
     let mut checked_locations = Vec::new();
@@ -1606,18 +2053,29 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
     let mut dirs = sysenv::search_dirs();
     dirs.extend(request.extra_dirs.into_iter().map(PathBuf::from));
 
-    for command in request.commands.iter().filter(|command| !command.trim().is_empty()) {
+    for command in request
+        .commands
+        .iter()
+        .filter(|command| !command.trim().is_empty())
+    {
         if let Some(module) = command.strip_prefix("python module:").map(str::trim) {
-            if let Some((path, version)) = find_python_module_executable(module, &dirs, &mut checked_locations) {
+            if let Some((path, version)) =
+                find_python_module_executable(module, &dirs, &mut checked_locations)
+            {
                 let version_text = version
+                    .as_deref()
                     .map(|value| format!("，版本 {value}"))
                     .unwrap_or_default();
                 return Ok(ExecutableSearchResult {
                     found: true,
                     command: Some(command.clone()),
                     path: Some(path.display().to_string()),
+                    version,
                     checked_locations,
-                    message: format!("已在 {} 检测到 Python 模块 {module}{version_text}。", path.display()),
+                    message: format!(
+                        "已在 {} 检测到 Python 模块 {module}{version_text}。",
+                        path.display()
+                    ),
                 });
             }
             continue;
@@ -1628,6 +2086,7 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
                 found: true,
                 command: Some(command.clone()),
                 path: Some(path.display().to_string()),
+                version: detect_installed_version(&path),
                 checked_locations,
                 message: format!("已在 PATH 中找到 {command}。"),
             });
@@ -1639,6 +2098,7 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
                 found: true,
                 command: Some(command.clone()),
                 path: Some(command_path.display().to_string()),
+                version: detect_installed_version(&command_path),
                 checked_locations,
                 message: "已找到用户提供的可执行文件路径。".to_string(),
             });
@@ -1653,6 +2113,7 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
                         found: true,
                         command: Some(command.clone()),
                         path: Some(path.display().to_string()),
+                        version: detect_installed_version(&path),
                         checked_locations,
                         message: format!("已在 {} 找到 {command}。", dir.display()),
                     });
@@ -1665,12 +2126,18 @@ fn find_executable(request: ExecutableSearchRequest) -> Result<ExecutableSearchR
         found: false,
         command: None,
         path: None,
+        version: None,
         checked_locations,
         message: "自动查找未发现可执行文件（已扫描 PATH、shell 环境与 conda 安装目录）。可手动选择，或使用一键安装。".to_string(),
     })
 }
 
-fn pick_file_dialog(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
+fn pick_file_dialog(
+    title: &str,
+    extensions: &[String],
+    default_dir: Option<&str>,
+    show_hidden: bool,
+) -> Result<Option<String>, String> {
     if cfg!(target_os = "macos") {
         pick_file_macos(title, extensions, default_dir, show_hidden)
     } else if cfg!(target_os = "windows") {
@@ -1680,7 +2147,12 @@ fn pick_file_dialog(title: &str, extensions: &[String], default_dir: Option<&str
     }
 }
 
-fn pick_file_macos(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
+fn pick_file_macos(
+    title: &str,
+    extensions: &[String],
+    default_dir: Option<&str>,
+    show_hidden: bool,
+) -> Result<Option<String>, String> {
     let escaped_title = escape_applescript(title);
     let extension_filter = if extensions.is_empty() {
         String::new()
@@ -1719,7 +2191,12 @@ fn pick_file_macos(title: &str, extensions: &[String], default_dir: Option<&str>
     Err(stderr.trim().to_string())
 }
 
-fn pick_file_windows(title: &str, extensions: &[String], default_dir: Option<&str>, show_hidden: bool) -> Result<Option<String>, String> {
+fn pick_file_windows(
+    title: &str,
+    extensions: &[String],
+    default_dir: Option<&str>,
+    show_hidden: bool,
+) -> Result<Option<String>, String> {
     let filter = if extensions.is_empty() {
         "All files (*.*)|*.*".to_string()
     } else {
@@ -1762,7 +2239,16 @@ fn pick_file_windows(title: &str, extensions: &[String], default_dir: Option<&st
 fn pick_file_linux(title: &str, default_dir: Option<&str>) -> Result<Option<String>, String> {
     let default_filename = default_dir.unwrap_or(".");
     for (command, args) in [
-        ("zenity", vec!["--file-selection", "--title", title, "--filename", default_filename]),
+        (
+            "zenity",
+            vec![
+                "--file-selection",
+                "--title",
+                title,
+                "--filename",
+                default_filename,
+            ],
+        ),
         ("kdialog", vec!["--getopenfilename", default_filename]),
     ] {
         if which::which(command).is_err() {
@@ -1786,7 +2272,10 @@ fn escape_applescript(value: &str) -> String {
 
 #[tauri::command]
 fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectSummary>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.list_projects().map_err(|error| error.to_string())
 }
 
@@ -1795,14 +2284,20 @@ fn create_project(
     request: CreateProjectRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProjectSummary, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.create_project(request, &state.project_root)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn delete_project(id: String, state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.delete_project(id).map_err(|error| error.to_string())
 }
 
@@ -1868,7 +2363,9 @@ fn generate_slurm_script(plan: SimulationPlan) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn generate_remote_execution_package(request: RemoteExecutionRequest) -> Result<RemoteExecutionPackage, String> {
+fn generate_remote_execution_package(
+    request: RemoteExecutionRequest,
+) -> Result<RemoteExecutionPackage, String> {
     require_plan_structure(&request.plan)?;
     Ok(recipes::remote_execution_package(request))
 }
@@ -1879,7 +2376,9 @@ fn parse_remote_job_status(request: RemoteStatusParseRequest) -> RemoteJobSnapsh
 }
 
 #[tauri::command]
-fn run_remote_workflow_step(request: RemoteWorkflowStepRequest) -> Result<RemoteWorkflowStepResult, String> {
+fn run_remote_workflow_step(
+    request: RemoteWorkflowStepRequest,
+) -> Result<RemoteWorkflowStepResult, String> {
     remote_runner::run_remote_workflow_step(request).map_err(|error| error.to_string())
 }
 
@@ -1913,12 +2412,18 @@ fn remote_submit_inner(scheduler: &ExecutionMode, workdir: &str, script: &str) -
     }
 }
 
+fn remote_prepare_workdir_inner(workdir: &str) -> String {
+    format!(
+        "mkdir -p {workdir} && rm -rf {workdir}/logs {workdir}/runs {workdir}/analysis {workdir}/reports {workdir}/checkpoints {workdir}/trajectories && mkdir -p {workdir}"
+    )
+}
+
 fn remote_status_inner(scheduler: &ExecutionMode, job_id: &str) -> String {
     match scheduler {
         ExecutionMode::Slurm => format!("squeue -j {job_id} 2>/dev/null || sacct -j {job_id} --format=JobID,State,Elapsed -n 2>/dev/null"),
         ExecutionMode::Pbs => format!("qstat {job_id}"),
         ExecutionMode::Lsf => format!("bjobs {job_id}"),
-        _ => format!("ps -p {job_id} -o pid,etime,cmd 2>/dev/null || echo 'not-running'"),
+        _ => format!("ps -p {job_id} -o pid= -o etime= -o command= 2>/dev/null || ps -p {job_id} -o pid= -o etime= -o args= 2>/dev/null || echo 'not-running'"),
     }
 }
 
@@ -1932,7 +2437,9 @@ fn remote_cancel_inner(scheduler: &ExecutionMode, job_id: &str) -> String {
 }
 
 fn remote_tail_inner(workdir: &str) -> String {
-    format!("cd {workdir} 2>/dev/null && tail -n 200 logs/*.out logs/*.err runs/*/*.log analysis/*.log 2>/dev/null || true")
+    format!(
+        "cd {workdir} 2>/dev/null && find logs runs analysis -type f \\( -name '*.out' -o -name '*.err' -o -name '*.log' \\) -exec tail -n 200 {{}} + 2>/dev/null || true"
+    )
 }
 
 /// Resolve the effective password for a profile: the one passed in, else the
@@ -2000,10 +2507,86 @@ async fn test_remote_connection(
             state.credentials.put(&profile.id, &pw);
         }
     }
+    if test.ok {
+        persist_remote_connection_metadata(&state, &profile, &test)?;
+    }
     Ok(test)
 }
 
-fn build_connection_test(host: &str, user: Option<String>, out: &ssh::SshOutcome) -> RemoteConnectionTest {
+fn remote_platform_from_os(os: Option<&str>) -> Option<Platform> {
+    let os = os?.trim().to_ascii_lowercase();
+    if os.contains("darwin") || os.contains("macos") {
+        Some(Platform::Macos)
+    } else if os.contains("linux") {
+        Some(Platform::Linux)
+    } else if os.contains("windows") || os.contains("mingw") || os.contains("msys") {
+        Some(Platform::Windows)
+    } else {
+        None
+    }
+}
+
+fn persist_remote_connection_metadata(
+    state: &tauri::State<'_, AppState>,
+    profile: &RemoteProfile,
+    test: &RemoteConnectionTest,
+) -> Result<(), String> {
+    let existing = remote_helper_status_by_profile(state, &profile.id).ok();
+    let status = match existing.as_ref().map(|status| &status.status) {
+        Some(RemoteHelperState::Ready) => RemoteHelperState::Ready,
+        Some(RemoteHelperState::Outdated) => RemoteHelperState::Outdated,
+        Some(RemoteHelperState::PermissionDenied) => RemoteHelperState::PermissionDenied,
+        _ => RemoteHelperState::Missing,
+    };
+    let helper_status = RemoteHelperStatus {
+        profile_id: profile.id.clone(),
+        helper_version: existing
+            .as_ref()
+            .and_then(|status| status.helper_version.clone()),
+        status,
+        install_path: existing
+            .as_ref()
+            .and_then(|status| status.install_path.clone())
+            .or_else(|| Some(remote_helper::default_install_path(profile))),
+        platform: remote_platform_from_os(test.os.as_deref())
+            .or_else(|| existing.as_ref().and_then(|status| status.platform.clone())),
+        arch: test
+            .arch
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|status| status.arch.clone())),
+        hostname: test
+            .hostname
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|status| status.hostname.clone())),
+        hardware_json: existing
+            .as_ref()
+            .and_then(|status| status.hardware_json.clone()),
+        checked_at: chrono::Utc::now(),
+        last_error: if matches!(
+            existing.as_ref().map(|status| &status.status),
+            Some(RemoteHelperState::Ready | RemoteHelperState::Outdated)
+        ) {
+            existing
+                .as_ref()
+                .and_then(|status| status.last_error.clone())
+        } else {
+            Some("远程连接可用，AutoMD helper 尚未就绪。".to_string())
+        },
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.save_remote_helper_status(helper_status)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn build_connection_test(
+    host: &str,
+    user: Option<String>,
+    out: &ssh::SshOutcome,
+) -> RemoteConnectionTest {
     let stdout = out.stdout.clone();
     let ok = out.success && stdout.contains("automd-ok");
     if !ok {
@@ -2100,6 +2683,80 @@ fn remote_preflight_can_override(checks: &[PreflightCheck], scheduler: &Executio
     })
 }
 
+fn remote_shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn python_module_probe_command(python: Option<&str>, module: &str) -> String {
+    let module = module.trim();
+    let code = remote_shell_quote(&format!(
+        "import importlib; importlib.import_module({module:?})"
+    ));
+    match python.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(executable) => format!(
+            "{} -c {} >/dev/null 2>&1",
+            remote_shell_quote(executable),
+            code
+        ),
+        None => format!("(python3 -c {code} >/dev/null 2>&1 || python -c {code} >/dev/null 2>&1)"),
+    }
+}
+
+fn remote_engine_location_probe(engine_id: &str, location: &str) -> String {
+    let location = location.trim();
+    let lower = location.to_ascii_lowercase();
+    if lower.starts_with("python module:") {
+        if let Some((_, module)) = location.split_once(':') {
+            return python_module_probe_command(None, module);
+        }
+    }
+    if let Some((python, module)) = location.split_once("::") {
+        return python_module_probe_command(Some(python), module);
+    }
+    if engine_id == "openmm" && lower.contains("python") {
+        return python_module_probe_command(Some(location), "openmm");
+    }
+    if engine_id == "hoomd" && lower.contains("python") {
+        return python_module_probe_command(Some(location), "hoomd");
+    }
+    if location.contains('/') || location.starts_with('~') || location.starts_with('$') {
+        format!("test -e {}", remote_shell_quote(location))
+    } else {
+        format!(
+            "command -v {} >/dev/null 2>&1",
+            remote_shell_quote(location)
+        )
+    }
+}
+
+fn remote_engine_probe_script(
+    engine_id: &str,
+    records: &[EngineInstallationRecord],
+) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut script = String::from("set +e\n");
+    for record in records {
+        let check = remote_engine_location_probe(engine_id, &record.location);
+        script.push_str(&format!(
+            "if {check}; then echo {}; exit 0; fi\n",
+            remote_shell_quote(&format!("ENGINE_OK {}", record.location))
+        ));
+    }
+    script.push_str(&format!(
+        "echo {} >&2\nexit 1",
+        remote_shell_quote(
+            "ENGINE_MISSING registered engine locations are not usable on the remote target"
+        )
+    ));
+    Some(script)
+}
+
 #[cfg(test)]
 mod remote_preflight_override_tests {
     use super::*;
@@ -2111,6 +2768,40 @@ mod remote_preflight_override_tests {
             ok,
             detail: String::new(),
         }
+    }
+
+    #[test]
+    fn ambertools_version_filter_drops_leap_search_path_noise() {
+        let raw = "-I: Adding /opt/amber/dat/leap/prep to search path.\n-I: Adding /opt/amber/dat/leap/lib to search path.\nWelcome to LEaP!\n";
+        assert_eq!(
+            clean_engine_version("ambertools", raw).as_deref(),
+            Some("Welcome to LEaP!")
+        );
+    }
+
+    #[test]
+    fn lammps_version_filter_prefers_help_banner_over_invalid_argument() {
+        let raw = "ERROR: Invalid command-line argument: --version\nLarge-scale Atomic/Molecular Massively Parallel Simulator - 10 Sep 2025\n";
+        assert_eq!(
+            clean_engine_version("lammps", raw).as_deref(),
+            Some("Large-scale Atomic/Molecular Massively Parallel Simulator - 10 Sep 2025")
+        );
+    }
+
+    #[test]
+    fn python_module_probe_prefers_canonical_python_in_same_prefix() {
+        let root =
+            std::env::temp_dir().join(format!("automd-python-normalize-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).expect("temp bin");
+        let python = bin.join("python");
+        let python3 = bin.join("python3");
+        std::fs::write(&python, "").expect("python");
+        std::fs::write(&python3, "").expect("python3");
+
+        assert_eq!(normalize_python_module_executable(python3), python);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2132,8 +2823,14 @@ mod remote_preflight_override_tests {
     fn scheduled_hpc_can_only_override_missing_helper() {
         let checks = vec![check("engine", false), check("helper", false)];
 
-        assert!(!remote_preflight_can_override(&checks, &ExecutionMode::Slurm));
-        assert!(remote_preflight_can_override(&[check("helper", false)], &ExecutionMode::Slurm));
+        assert!(!remote_preflight_can_override(
+            &checks,
+            &ExecutionMode::Slurm
+        ));
+        assert!(remote_preflight_can_override(
+            &[check("helper", false)],
+            &ExecutionMode::Slurm
+        ));
     }
 
     #[test]
@@ -2145,11 +2842,77 @@ mod remote_preflight_override_tests {
 
     #[test]
     fn ssh_direct_submit_detaches_nohup_process() {
-        let command = remote_submit_inner(&ExecutionMode::Ssh, "/scratch/noir/automd/run-1", "remote/run-ssh.sh");
+        let command = remote_submit_inner(
+            &ExecutionMode::Ssh,
+            "/scratch/noir/automd/run-1",
+            "remote/run-ssh.sh",
+        );
 
         assert!(command.contains("mkdir -p logs"));
         assert!(command.contains("(nohup bash remote/run-ssh.sh"));
         assert!(command.contains("< /dev/null & echo $!)"));
+    }
+
+    #[test]
+    fn remote_prepare_workdir_cleans_only_job_outputs() {
+        let command = remote_prepare_workdir_inner("/scratch/noir/automd/job-openmm-123");
+
+        assert!(command.starts_with("mkdir -p /scratch/noir/automd/job-openmm-123"));
+        assert!(command.contains("rm -rf /scratch/noir/automd/job-openmm-123/logs"));
+        assert!(command.contains("/scratch/noir/automd/job-openmm-123/runs"));
+        assert!(command.contains("/scratch/noir/automd/job-openmm-123/analysis"));
+        assert!(!command.contains("rm -rf /scratch/noir/automd "));
+    }
+
+    #[test]
+    fn engine_probe_checks_remote_paths_and_python_modules() {
+        assert_eq!(
+            remote_engine_location_probe("gromacs", "/home/user/gmx"),
+            "test -e '/home/user/gmx'"
+        );
+        let openmm_probe = remote_engine_location_probe("openmm", "/home/user/openmm/bin/python");
+        assert!(openmm_probe.contains("importlib.import_module"));
+        assert!(openmm_probe.contains("\"openmm\""));
+        assert!(
+            remote_engine_location_probe("openmm", "python module: openmm").contains("python3 -c")
+        );
+    }
+
+    #[test]
+    fn darwin_connection_maps_to_macos_before_helper_installation() {
+        assert_eq!(
+            remote_platform_from_os(Some("Darwin")),
+            Some(Platform::Macos)
+        );
+        assert_eq!(
+            remote_platform_from_os(Some("Linux")),
+            Some(Platform::Linux)
+        );
+        assert_eq!(remote_platform_from_os(Some("unknown")), None);
+    }
+
+    #[test]
+    fn helper_errors_distinguish_missing_from_unreachable() {
+        assert_eq!(
+            remote_helper_error_state("bash: helper: No such file or directory"),
+            RemoteHelperState::Missing
+        );
+        assert_eq!(
+            remote_helper_error_state("Permission denied"),
+            RemoteHelperState::PermissionDenied
+        );
+        assert_eq!(
+            remote_helper_error_state("Connection timed out"),
+            RemoteHelperState::Unreachable
+        );
+    }
+
+    #[test]
+    fn remote_tail_uses_find_instead_of_shell_globs() {
+        let command = remote_tail_inner("/Users/test/automd/run");
+        assert!(command.contains("find logs runs analysis"));
+        assert!(command.contains("-exec tail -n 200"));
+        assert!(!command.contains("logs/*.out"));
     }
 }
 
@@ -2166,22 +2929,39 @@ async fn run_remote_preflight(
 ) -> RemoteSubmitPreflight {
     let mut checks = Vec::new();
 
-    let has_project = project_id.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false)
-        && project_path.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false);
+    let has_project = project_id
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+        && project_path
+            .as_deref()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
     checks.push(PreflightCheck {
         id: "project".to_string(),
         label: "已选择项目".to_string(),
         ok: has_project,
-        detail: if has_project { "已绑定当前项目目录。".to_string() } else { "请先在“项目”页创建或打开一个项目。".to_string() },
+        detail: if has_project {
+            "已绑定当前项目目录。".to_string()
+        } else {
+            "请先在“项目”页创建或打开一个项目。".to_string()
+        },
     });
 
-    let has_structure = structure_id.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false)
+    let has_structure = structure_id
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
         && require_plan_structure(plan).is_ok();
     checks.push(PreflightCheck {
         id: "structure".to_string(),
         label: "已选择结构".to_string(),
         ok: has_structure,
-        detail: if has_structure { "当前计划已绑定一个结构。".to_string() } else { "请先在“项目”页导入并选中一个结构（无结构不允许提交）。".to_string() },
+        detail: if has_structure {
+            "当前计划已绑定一个结构。".to_string()
+        } else {
+            "请先在“项目”页导入并选中一个结构（无结构不允许提交）。".to_string()
+        },
     });
 
     let has_stage = plan.stages.iter().any(|stage| stage.enabled);
@@ -2189,55 +2969,116 @@ async fn run_remote_preflight(
         id: "plan".to_string(),
         label: "运行计划就绪".to_string(),
         ok: has_stage,
-        detail: if has_stage { format!("引擎 {} · 至少一个阶段已启用。", plan.engine_id) } else { "当前计划没有启用任何阶段，请到“流程”页配置。".to_string() },
+        detail: if has_stage {
+            format!("引擎 {} · 至少一个阶段已启用。", plan.engine_id)
+        } else {
+            "当前计划没有启用任何阶段，请到“流程”页配置。".to_string()
+        },
     });
 
     let target_id = format!("remote:{}", profile.id);
-    let engine_ok = {
+    let engine_records: Vec<EngineInstallationRecord> = {
         match state.db.lock() {
             Ok(db) => db
                 .list_engine_installations()
                 .map(|records| {
-                    records.iter().any(|record| {
-                        record.target_id == target_id && record.engine_id == plan.engine_id
-                    })
+                    records
+                        .into_iter()
+                        .filter(|record| {
+                            record.target_id == target_id && record.engine_id == plan.engine_id
+                        })
+                        .collect()
                 })
-                .unwrap_or(false),
-            Err(_) => false,
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
         }
+    };
+
+    let password = resolve_remote_password(state, profile, password);
+    let engine_probe = if let Some(engine_probe_cmd) =
+        remote_engine_probe_script(&plan.engine_id, &engine_records)
+    {
+        let probe_profile = profile.clone();
+        let probe_password = password.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            ssh::run_remote(&probe_profile, probe_password.as_deref(), &engine_probe_cmd)
+        })
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+    } else {
+        None
+    };
+    let engine_ok = engine_probe.as_ref().is_some_and(|out| out.success);
+    let engine_detail = if engine_ok {
+        let stdout = engine_probe
+            .as_ref()
+            .map(|out| out.stdout.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{} 已在目标设备登记并通过远程校验。", plan.engine_id));
+        format!(
+            "{} 已在目标设备登记并通过远程校验：{stdout}",
+            plan.engine_id
+        )
+    } else if engine_records.is_empty() {
+        if profile.scheduler == ExecutionMode::Ssh {
+            format!("目标设备尚未检测到 {}。建议先用远程助手扫描/安装；如果你确认远程已自行装好，也可用高级直连覆盖。", plan.engine_id)
+        } else {
+            format!(
+                "目标设备尚未检测到 {}，请先用远程助手扫描/安装。",
+                plan.engine_id
+            )
+        }
+    } else if let Some(out) = &engine_probe {
+        let locations = engine_records
+            .iter()
+            .map(|record| record.location.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} 已登记但远程校验失败：{}。登记位置：{}",
+            plan.engine_id,
+            ssh::classify_connection_error(&out.combined()),
+            locations
+        )
+    } else {
+        format!("{} 已登记但无法连接远程目标进行路径校验。", plan.engine_id)
     };
     checks.push(PreflightCheck {
         id: "engine".to_string(),
         label: "目标设备已有该引擎".to_string(),
         ok: engine_ok,
-        detail: if engine_ok {
-            format!("{} 已在目标设备登记。", plan.engine_id)
-        } else if profile.scheduler == ExecutionMode::Ssh {
-            format!("目标设备尚未检测到 {}。建议先用远程助手扫描/安装；如果你确认远程已自行装好，也可用高级直连覆盖。", plan.engine_id)
-        } else {
-            format!("目标设备尚未检测到 {}，请先用远程助手扫描/安装。", plan.engine_id)
-        },
+        detail: engine_detail,
     });
 
     let helper_ready = remote_helper_status_by_profile(state, &profile.id)
-        .map(|status| matches!(status.status, RemoteHelperState::Ready | RemoteHelperState::Outdated))
+        .map(|status| {
+            matches!(
+                status.status,
+                RemoteHelperState::Ready | RemoteHelperState::Outdated
+            )
+        })
         .unwrap_or(false);
     checks.push(PreflightCheck {
         id: "helper".to_string(),
         label: "远程助手已安装".to_string(),
         ok: helper_ready,
-        detail: if helper_ready { "远程助手就绪，可自动扫描/监控。".to_string() } else { "远程助手未安装。可在上一步安装，或用“无 helper 高级直连”覆盖。".to_string() },
+        detail: if helper_ready {
+            "远程助手就绪，可自动扫描/监控。".to_string()
+        } else {
+            "远程助手未安装。可在上一步安装，或用“无 helper 高级直连”覆盖。".to_string()
+        },
     });
 
     // Live probe: workdir writable + scheduler present.
-    let password = resolve_remote_password(state, profile, password);
     let probe_profile = profile.clone();
+    let probe_password = password.clone();
     let workdir = profile.workdir.clone();
     let probe_cmd = format!(
-        "mkdir -p {workdir} 2>/dev/null && test -w {workdir} && echo WRITABLE; echo ---AUTOMD---; (command -v sbatch || command -v qsub || command -v bsub) 2>/dev/null"
+        "mkdir -p {workdir} 2>/dev/null && test -w {workdir} && echo WRITABLE; echo ---AUTOMD---; ((command -v sbatch || command -v qsub || command -v bsub) 2>/dev/null || true)"
     );
     let probe = tauri::async_runtime::spawn_blocking(move || {
-        ssh::run_remote(&probe_profile, password.as_deref(), &probe_cmd)
+        ssh::run_remote(&probe_profile, probe_password.as_deref(), &probe_cmd)
     })
     .await
     .ok()
@@ -2246,18 +3087,35 @@ async fn run_remote_preflight(
     let (workdir_ok, workdir_detail, scheduler_detected) = match &probe {
         Some(out) if out.success => {
             let writable = out.stdout.contains("WRITABLE");
-            let sched_section = out.stdout.split("---AUTOMD---").nth(1).unwrap_or("").to_ascii_lowercase();
+            let sched_section = out
+                .stdout
+                .split("---AUTOMD---")
+                .nth(1)
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let detected = sched_section.contains("sbatch")
                 || sched_section.contains("qsub")
                 || sched_section.contains("bsub");
             (
                 writable,
-                if writable { format!("{} 可写。", profile.workdir) } else { format!("{} 不可写或无法创建。", profile.workdir) },
+                if writable {
+                    format!("{} 可写。", profile.workdir)
+                } else {
+                    format!("{} 不可写或无法创建。", profile.workdir)
+                },
                 detected,
             )
         }
-        Some(out) => (false, ssh::classify_connection_error(&out.combined()), false),
-        None => (false, "无法连接以检查工作目录（请先在第1步测试连接）。".to_string(), false),
+        Some(out) => (
+            false,
+            ssh::classify_connection_error(&out.combined()),
+            false,
+        ),
+        None => (
+            false,
+            "无法连接以检查工作目录（请先在第1步测试连接）。".to_string(),
+            false,
+        ),
     };
     checks.push(PreflightCheck {
         id: "workdir".to_string(),
@@ -2282,7 +3140,11 @@ async fn run_remote_preflight(
 
     let all_ok = checks.iter().all(|check| check.ok);
     let can_override = remote_preflight_can_override(&checks, &profile.scheduler);
-    RemoteSubmitPreflight { checks, all_ok, can_override }
+    RemoteSubmitPreflight {
+        checks,
+        all_ok,
+        can_override,
+    }
 }
 
 #[tauri::command]
@@ -2343,61 +3205,77 @@ async fn submit_remote_job(
     let scheduler = profile.scheduler.clone();
     let engine_id = plan.engine_id.clone();
 
-    let submission = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSubmission, String> {
-        // 1. Generate the remote package (scheduler script + sync scripts).
-        let package = recipes::remote_execution_package(RemoteExecutionRequest {
-            plan: plan.clone(),
-            profile: profile.clone(),
-            local_project_path: Some(project_path.clone()),
-            include_submit: true,
-        });
-        // 2. Materialize the generated files into the local project staging dir.
-        let project_root = std::path::Path::new(&project_path);
-        for file in &package.files {
-            let dest = project_root.join(&file.path);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| format!("写入远程脚本失败：{error}"))?;
+    let submission =
+        tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSubmission, String> {
+            // 1. Generate the remote package (scheduler script + sync scripts).
+            let package = recipes::remote_execution_package(RemoteExecutionRequest {
+                plan: plan.clone(),
+                profile: profile.clone(),
+                local_project_path: Some(project_path.clone()),
+                include_submit: true,
+            });
+            // 2. Materialize the generated files into the local project staging dir.
+            let project_root = std::path::Path::new(&project_path);
+            for file in &package.files {
+                let dest = project_root.join(&file.path);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("写入远程脚本失败：{error}"))?;
+                }
+                std::fs::write(&dest, &file.contents)
+                    .map_err(|error| format!("写入 {} 失败：{error}", file.path))?;
             }
-            std::fs::write(&dest, &file.contents).map_err(|error| format!("写入 {} 失败：{error}", file.path))?;
-        }
-        // 3. Create the remote workdir and upload the project.
-        let mkdir = ssh::run_remote(&profile, password.as_deref(), &format!("mkdir -p {}", package.remote_workdir))?;
-        if !mkdir.success {
-            return Err(format!("创建远程目录失败：{}", ssh::classify_connection_error(&mkdir.combined())));
-        }
-        let upload = ssh::rsync_up(&profile, password.as_deref(), &project_path, &package.remote_workdir)?;
-        if !upload.success {
-            return Err(format!("上传失败：{}", upload.combined()));
-        }
-        let files_uploaded = ssh::transferred_regular_file_count(&upload.combined()).unwrap_or(0);
-        // 4. Submit.
-        let script = remote_scheduler_filename(&scheduler);
-        let submit_cmd = remote_submit_inner(&scheduler, &package.remote_workdir, script);
-        let submit = ssh::run_remote(&profile, password.as_deref(), &submit_cmd)?;
-        if !submit.success {
-            return Err(format!("提交失败：{}", submit.combined()));
-        }
-        // 5. Parse the job id with the existing monitor parser.
-        let snapshot = remote_monitor::parse_remote_status(RemoteStatusParseRequest {
-            engine_id: engine_id.clone(),
-            scheduler: scheduler.clone(),
-            submit_output: Some(submit.stdout.clone()),
-            status_output: None,
-            log_output: None,
-        });
-        Ok(RemoteJobSubmission {
-            job_id: snapshot.job_id,
-            scheduler: scheduler.clone(),
-            submit_output: submit.combined().trim().to_string(),
-            remote_run_dir: package.remote_workdir.clone(),
-            remote_workdir: package.remote_workdir.clone(),
-            files_uploaded,
-            warnings: package.warnings,
-            submitted_at: chrono::Utc::now(),
+            // 3. Create the remote workdir and upload the project.
+            let mkdir = ssh::run_remote(
+                &profile,
+                password.as_deref(),
+                &remote_prepare_workdir_inner(&package.remote_workdir),
+            )?;
+            if !mkdir.success {
+                return Err(format!(
+                    "创建远程目录失败：{}",
+                    ssh::classify_connection_error(&mkdir.combined())
+                ));
+            }
+            let upload = ssh::rsync_up(
+                &profile,
+                password.as_deref(),
+                &project_path,
+                &package.remote_workdir,
+            )?;
+            if !upload.success {
+                return Err(format!("上传失败：{}", upload.combined()));
+            }
+            let files_uploaded =
+                ssh::transferred_regular_file_count(&upload.combined()).unwrap_or(0);
+            // 4. Submit.
+            let script = remote_scheduler_filename(&scheduler);
+            let submit_cmd = remote_submit_inner(&scheduler, &package.remote_workdir, script);
+            let submit = ssh::run_remote(&profile, password.as_deref(), &submit_cmd)?;
+            if !submit.success {
+                return Err(format!("提交失败：{}", submit.combined()));
+            }
+            // 5. Parse the job id with the existing monitor parser.
+            let snapshot = remote_monitor::parse_remote_status(RemoteStatusParseRequest {
+                engine_id: engine_id.clone(),
+                scheduler: scheduler.clone(),
+                submit_output: Some(submit.stdout.clone()),
+                status_output: None,
+                log_output: None,
+            });
+            Ok(RemoteJobSubmission {
+                job_id: snapshot.job_id,
+                scheduler: scheduler.clone(),
+                submit_output: submit.combined().trim().to_string(),
+                remote_run_dir: package.remote_workdir.clone(),
+                remote_workdir: package.remote_workdir.clone(),
+                files_uploaded,
+                warnings: package.warnings,
+                submitted_at: chrono::Utc::now(),
+            })
         })
-    })
-    .await
-    .map_err(|error| format!("提交任务执行失败：{error}"))??;
+        .await
+        .map_err(|error| format!("提交任务执行失败：{error}"))??;
 
     Ok(submission)
 }
@@ -2414,27 +3292,35 @@ async fn poll_remote_job(
     let workdir = request.remote_run_dir.clone();
     let job_id = request.job_id.clone().unwrap_or_default();
 
-    let snapshot = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSnapshot, String> {
-        let status_output = if job_id.is_empty() {
-            None
-        } else {
-            ssh::run_remote(&profile, password.as_deref(), &remote_status_inner(&scheduler, &job_id))
+    let snapshot =
+        tauri::async_runtime::spawn_blocking(move || -> Result<RemoteJobSnapshot, String> {
+            let status_output = if job_id.is_empty() {
+                None
+            } else {
+                ssh::run_remote(
+                    &profile,
+                    password.as_deref(),
+                    &remote_status_inner(&scheduler, &job_id),
+                )
                 .ok()
                 .map(|out| out.combined())
-        };
-        let log_output = ssh::run_remote(&profile, password.as_deref(), &remote_tail_inner(&workdir))
-            .ok()
-            .map(|out| out.combined());
-        Ok(remote_monitor::parse_remote_status(RemoteStatusParseRequest {
-            engine_id,
-            scheduler,
-            submit_output: None,
-            status_output,
-            log_output,
-        }))
-    })
-    .await
-    .map_err(|error| format!("状态查询执行失败：{error}"))??;
+            };
+            let log_output =
+                ssh::run_remote(&profile, password.as_deref(), &remote_tail_inner(&workdir))
+                    .ok()
+                    .map(|out| out.combined());
+            Ok(remote_monitor::parse_remote_status(
+                RemoteStatusParseRequest {
+                    engine_id,
+                    scheduler,
+                    submit_output: (!job_id.is_empty()).then_some(job_id),
+                    status_output,
+                    log_output,
+                },
+            ))
+        })
+        .await
+        .map_err(|error| format!("状态查询执行失败：{error}"))??;
 
     Ok(snapshot)
 }
@@ -2453,7 +3339,11 @@ async fn cancel_remote_job(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "缺少 job id / PID。".to_string())?;
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        ssh::run_remote(&profile, password.as_deref(), &remote_cancel_inner(&scheduler, &job_id))
+        ssh::run_remote(
+            &profile,
+            password.as_deref(),
+            &remote_cancel_inner(&scheduler, &job_id),
+        )
     })
     .await
     .map_err(|error| format!("取消任务执行失败：{error}"))?;
@@ -2479,22 +3369,57 @@ async fn fetch_remote_results(
 
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<RemoteFetchResult, String> {
         std::fs::create_dir_all(&local_dir).map_err(|error| format!("创建本地目录失败：{error}"))?;
+        remove_fixed_remote_result_files(&local_dir)?;
         let download = ssh::rsync_down(&profile, password.as_deref(), &remote_dir, &local_dir)?;
         if !download.success {
             return Err(format!("下载失败：{}", download.combined()));
         }
-        let files_downloaded = ssh::transferred_regular_file_count(&download.combined()).unwrap_or(0);
+        let output = download.combined();
+        let files_downloaded = ssh::transferred_regular_file_count(&output).unwrap_or(0);
+        let matching_remote_files = ssh::total_regular_file_count(&output).unwrap_or(files_downloaded);
+        if files_downloaded == 0 && matching_remote_files == 0 {
+            return Err(format!(
+                "未回收任何文件：远程目录 {remote_dir} 中没有匹配的 runs/、analysis/、reports/、checkpoints/、trajectories/ 或 logs/ 内容。"
+            ));
+        }
+        let warnings = if files_downloaded == 0 {
+            vec![
+                "远程目录有匹配结果文件，但本地副本已经是最新状态，rsync 未传输新文件。"
+                    .to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
         Ok(RemoteFetchResult {
             files_downloaded,
             local_dir: local_dir.clone(),
             message: format!("已从 {remote_dir} 回收结果到本地项目。"),
-            warnings: Vec::new(),
+            warnings,
         })
     })
     .await
     .map_err(|error| format!("回收任务执行失败：{error}"))??;
 
     Ok(result)
+}
+
+fn remove_fixed_remote_result_files(local_dir: &str) -> Result<(), String> {
+    let project_root = Path::new(local_dir);
+    for relative_path in [
+        "analysis/openmm_state.csv",
+        "trajectories/openmm.dcd",
+        "trajectories/openmm-final.pdb",
+        "checkpoints/openmm.chk",
+        "logs/automd-ssh.out",
+        "logs/automd-ssh.err",
+    ] {
+        let path = project_root.join(relative_path);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("清理旧结果文件 {} 失败：{error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2524,29 +3449,39 @@ fn prepare_engine_run_package(request: EngineRunRequest) -> Result<EngineRunPack
 }
 
 #[tauri::command]
-fn prepare_batch_experiment(request: BatchExperimentRequest) -> Result<BatchExperimentPackage, String> {
+fn prepare_batch_experiment(
+    request: BatchExperimentRequest,
+) -> Result<BatchExperimentPackage, String> {
     require_plan_structure(&request.plan)?;
     batch::prepare_batch_experiment(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn read_project_text_file(request: ProjectTextFileRequest) -> Result<ProjectTextFilePayload, String> {
+fn read_project_text_file(
+    request: ProjectTextFileRequest,
+) -> Result<ProjectTextFilePayload, String> {
     project_files::read_project_text_file(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn write_project_text_file(request: ProjectTextFileWriteRequest) -> Result<ProjectTextFilePayload, String> {
+fn write_project_text_file(
+    request: ProjectTextFileWriteRequest,
+) -> Result<ProjectTextFilePayload, String> {
     project_files::write_project_text_file(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn prepare_structure_package(request: StructurePreparationRequest) -> Result<StructurePreparationPackage, String> {
+fn prepare_structure_package(
+    request: StructurePreparationRequest,
+) -> Result<StructurePreparationPackage, String> {
     require_plan_structure(&request.plan)?;
     science_sidecar::prepare_structure_package(request).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn prepare_trajectory_analysis_package(request: TrajectoryAnalysisRequest) -> Result<TrajectoryAnalysisPackage, String> {
+fn prepare_trajectory_analysis_package(
+    request: TrajectoryAnalysisRequest,
+) -> Result<TrajectoryAnalysisPackage, String> {
     require_plan_structure(&request.plan)?;
     science_sidecar::prepare_analysis_package(request).map_err(|error| error.to_string())
 }
@@ -2615,14 +3550,21 @@ fn cancel_local_task(
 }
 
 #[tauri::command]
-fn list_task_records(project_id: Option<String>, state: tauri::State<'_, AppState>) -> Result<Vec<TaskRecord>, String> {
+fn list_task_records(
+    project_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TaskRecord>, String> {
     let project_id = project_id
         .as_deref()
         .map(uuid::Uuid::parse_str)
         .transpose()
         .map_err(|error| error.to_string())?;
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
-    db.list_task_records(project_id).map_err(|error| error.to_string())
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
+    db.list_task_records(project_id)
+        .map_err(|error| error.to_string())
 }
 
 fn persist_task_snapshot(
@@ -2630,7 +3572,10 @@ fn persist_task_snapshot(
     snapshot: &LocalTaskSnapshot,
     project_id: Option<uuid::Uuid>,
 ) -> Result<(), String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.upsert_task_snapshot(snapshot, project_id)
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -2642,15 +3587,24 @@ fn collect_artifact_index(
     state: tauri::State<'_, AppState>,
 ) -> Result<ArtifactIndex, String> {
     let index = artifacts::collect_artifacts(request).map_err(|error| error.to_string())?;
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.upsert_artifact_index(&index)
         .map_err(|error| error.to_string())?;
     Ok(index)
 }
 
 #[tauri::command]
-fn list_artifact_records(project_path: String, state: tauri::State<'_, AppState>) -> Result<Vec<ArtifactRecord>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+fn list_artifact_records(
+    project_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ArtifactRecord>, String> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.list_artifact_records(project_path)
         .map_err(|error| error.to_string())
 }
@@ -2666,7 +3620,10 @@ fn parse_analysis_results(
     state: tauri::State<'_, AppState>,
 ) -> Result<AnalysisParseResult, String> {
     let result = analysis::parse_analysis_results(request).map_err(|error| error.to_string())?;
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.upsert_analysis_cache(&result)
         .map_err(|error| error.to_string())?;
     Ok(result)
@@ -2677,7 +3634,10 @@ fn list_analysis_cache_records(
     project_path: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AnalysisCacheRecord>, String> {
-    let db = state.db.lock().map_err(|_| "project database lock poisoned".to_string())?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "project database lock poisoned".to_string())?;
     db.list_analysis_cache_records(project_path)
         .map_err(|error| error.to_string())
 }
@@ -2697,10 +3657,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let app_dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".automd"));
+            let app_dir = app.path().app_data_dir().unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".automd")
+            });
             std::fs::create_dir_all(&app_dir)?;
             let project_root = app_dir.join("projects");
             std::fs::create_dir_all(&project_root)?;
@@ -2728,11 +3689,26 @@ pub fn run() {
             // the frontend handles (jump pages, open settings, toggle theme, …);
             // standard items (Edit copy/paste, About, Quit, fullscreen) are native.
             let handle = app.handle();
-            let settings_item = MenuItem::with_id(handle, "settings", "设置…", true, Some("CmdOrCtrl+,"))?;
-            let new_project_item = MenuItem::with_id(handle, "new-project", "新建项目", true, Some("CmdOrCtrl+N"))?;
-            let open_folder_item = MenuItem::with_id(handle, "open-project-folder", "打开项目文件夹", true, None::<&str>)?;
-            let toggle_theme_item = MenuItem::with_id(handle, "toggle-theme", "切换深色 / 浅色", true, Some("CmdOrCtrl+Shift+L"))?;
-            let reload_item = MenuItem::with_id(handle, "reload", "重新加载", true, Some("CmdOrCtrl+R"))?;
+            let settings_item =
+                MenuItem::with_id(handle, "settings", "设置…", true, Some("CmdOrCtrl+,"))?;
+            let new_project_item =
+                MenuItem::with_id(handle, "new-project", "新建项目", true, Some("CmdOrCtrl+N"))?;
+            let open_folder_item = MenuItem::with_id(
+                handle,
+                "open-project-folder",
+                "打开项目文件夹",
+                true,
+                None::<&str>,
+            )?;
+            let toggle_theme_item = MenuItem::with_id(
+                handle,
+                "toggle-theme",
+                "切换深色 / 浅色",
+                true,
+                Some("CmdOrCtrl+Shift+L"),
+            )?;
+            let reload_item =
+                MenuItem::with_id(handle, "reload", "重新加载", true, Some("CmdOrCtrl+R"))?;
             let guide_item = MenuItem::with_id(handle, "guide", "使用指引", true, None::<&str>)?;
 
             let app_menu = SubmenuBuilder::new(handle, "AutoMD")

@@ -120,7 +120,13 @@ impl ProjectDatabase {
             let status: String = row.get(7)?;
 
             Ok(ProjectSummary {
-                id: Uuid::parse_str(&id).map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?,
+                id: Uuid::parse_str(&id).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
                 name: row.get(1)?,
                 domain: domain_from_str(&domain).map_err(to_sql_conversion_error)?,
                 path: row.get(3)?,
@@ -135,7 +141,8 @@ impl ProjectDatabase {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
     /// Permanently delete a project: its on-disk directory (inputs, generated,
@@ -161,10 +168,14 @@ impl ProjectDatabase {
             .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         self.connection
             .execute("DELETE FROM tasks WHERE project_id = ?1", params![id])?;
-        self.connection
-            .execute("DELETE FROM artifact_records WHERE project_path = ?1", params![path])?;
-        self.connection
-            .execute("DELETE FROM analysis_cache WHERE project_path = ?1", params![path])?;
+        self.connection.execute(
+            "DELETE FROM artifact_records WHERE project_path = ?1",
+            params![path],
+        )?;
+        self.connection.execute(
+            "DELETE FROM analysis_cache WHERE project_path = ?1",
+            params![path],
+        )?;
 
         Ok(true)
     }
@@ -180,8 +191,14 @@ impl ProjectDatabase {
         let rows = statement.query_map([], |row| {
             let scheduler: String = row.get(3)?;
             let module_load_json: String = row.get(5)?;
-            let module_load = serde_json::from_str::<Vec<String>>(&module_load_json)
-                .map_err(|err| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(err)))?;
+            let module_load =
+                serde_json::from_str::<Vec<String>>(&module_load_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
             let auth_method: String = row.get(9)?;
             let port: i64 = row.get(8)?;
             Ok(RemoteProfile {
@@ -199,7 +216,8 @@ impl ProjectDatabase {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
     pub fn save_remote_profile(&self, profile: RemoteProfile) -> Result<RemoteProfile, StoreError> {
@@ -259,13 +277,15 @@ impl ProjectDatabase {
             let platform: Option<String> = row.get(7)?;
             let checked_at: String = row.get(9)?;
             Ok(EngineInstallationRecord {
-                target_kind: engine_target_kind_from_str(&target_kind).map_err(to_sql_conversion_error)?,
+                target_kind: engine_target_kind_from_str(&target_kind)
+                    .map_err(to_sql_conversion_error)?,
                 target_id: row.get(1)?,
                 target_label: row.get(2)?,
                 engine_id: row.get(3)?,
                 location: row.get(4)?,
                 version: row.get(5)?,
-                authorization_status: detection_status_from_str(&authorization_status).map_err(to_sql_conversion_error)?,
+                authorization_status: detection_status_from_str(&authorization_status)
+                    .map_err(to_sql_conversion_error)?,
                 platform: platform
                     .as_deref()
                     .map(platform_from_str)
@@ -276,7 +296,10 @@ impl ProjectDatabase {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        let records = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)?;
+        dedupe_engine_installations(records)
     }
 
     pub fn save_engine_installation(
@@ -291,7 +314,12 @@ impl ProjectDatabase {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(target_kind, target_id, engine_id, location) DO UPDATE SET
                 target_label = excluded.target_label,
-                version = excluded.version,
+                version = CASE
+                    WHEN trim(excluded.version) = ''
+                      OR lower(trim(excluded.version)) IN ('unknown', 'version unknown')
+                    THEN engine_installations.version
+                    ELSE excluded.version
+                END,
                 authorization_status = excluded.authorization_status,
                 platform = excluded.platform,
                 arch = excluded.arch,
@@ -312,7 +340,11 @@ impl ProjectDatabase {
         Ok(record)
     }
 
-    pub fn delete_engine_installation(&self, engine_id: String, location: String) -> Result<bool, StoreError> {
+    pub fn delete_engine_installation(
+        &self,
+        engine_id: String,
+        location: String,
+    ) -> Result<bool, StoreError> {
         let deleted = self.connection.execute(
             "DELETE FROM engine_installations WHERE target_id = 'local' AND engine_id = ?1 AND location = ?2",
             params![engine_id, location],
@@ -362,7 +394,8 @@ impl ProjectDatabase {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
     pub fn save_remote_helper_status(
@@ -415,8 +448,13 @@ impl ProjectDatabase {
             Ok(PluginStateRecord {
                 plugin_id: row.get(0)?,
                 enabled: row.get::<_, i64>(1)? != 0,
-                config: serde_json::from_str(&config_json)
-                    .map_err(|err| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err)))?,
+                config: serde_json::from_str(&config_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
                 installed_at: parse_datetime(&installed_at).map_err(to_sql_conversion_error)?,
                 updated_at: parse_datetime(&updated_at).map_err(to_sql_conversion_error)?,
                 last_run_at: last_run_at
@@ -427,10 +465,15 @@ impl ProjectDatabase {
                 last_error: row.get(6)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
-    pub fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<PluginStateRecord, StoreError> {
+    pub fn set_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<PluginStateRecord, StoreError> {
         let now = Utc::now();
         self.connection.execute(
             "INSERT INTO plugin_states
@@ -449,7 +492,11 @@ impl ProjectDatabase {
         self.plugin_state(plugin_id)
     }
 
-    pub fn save_plugin_config(&self, plugin_id: &str, config: serde_json::Value) -> Result<PluginStateRecord, StoreError> {
+    pub fn save_plugin_config(
+        &self,
+        plugin_id: &str,
+        config: serde_json::Value,
+    ) -> Result<PluginStateRecord, StoreError> {
         let now = Utc::now();
         self.connection.execute(
             "INSERT INTO plugin_states
@@ -464,11 +511,14 @@ impl ProjectDatabase {
     }
 
     pub fn delete_plugin_state(&self, plugin_id: &str) -> Result<bool, StoreError> {
-        let deleted = self
-            .connection
-            .execute("DELETE FROM plugin_states WHERE plugin_id = ?1", params![plugin_id])?;
-        self.connection
-            .execute("DELETE FROM plugin_runs WHERE plugin_id = ?1", params![plugin_id])?;
+        let deleted = self.connection.execute(
+            "DELETE FROM plugin_states WHERE plugin_id = ?1",
+            params![plugin_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM plugin_runs WHERE plugin_id = ?1",
+            params![plugin_id],
+        )?;
         Ok(deleted > 0)
     }
 
@@ -610,7 +660,11 @@ impl ProjectDatabase {
             .map_err(StoreError::Database)
     }
 
-    pub fn upsert_task_snapshot(&self, snapshot: &LocalTaskSnapshot, project_id: Option<Uuid>) -> Result<TaskRecord, StoreError> {
+    pub fn upsert_task_snapshot(
+        &self,
+        snapshot: &LocalTaskSnapshot,
+        project_id: Option<Uuid>,
+    ) -> Result<TaskRecord, StoreError> {
         let updated_at = Utc::now();
         let record = TaskRecord {
             id: snapshot.id,
@@ -651,7 +705,10 @@ impl ProjectDatabase {
         Ok(record)
     }
 
-    pub fn list_task_records(&self, project_id: Option<Uuid>) -> Result<Vec<TaskRecord>, StoreError> {
+    pub fn list_task_records(
+        &self,
+        project_id: Option<Uuid>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
         let sql = match project_id {
             Some(_) => {
                 "SELECT id, project_id, plan_id, engine_id, status, current_stage, progress_percent, created_at, updated_at
@@ -675,13 +732,31 @@ impl ProjectDatabase {
             let created_at: String = row.get(7)?;
             let updated_at: String = row.get(8)?;
             Ok(TaskRecord {
-                id: Uuid::parse_str(&id).map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err)))?,
+                id: Uuid::parse_str(&id).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
                 project_id: project_id
                     .as_deref()
                     .map(Uuid::parse_str)
                     .transpose()
-                    .map_err(|err| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(err)))?,
-                plan_id: Uuid::parse_str(&plan_id).map_err(|err| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(err)))?,
+                    .map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?,
+                plan_id: Uuid::parse_str(&plan_id).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
                 engine_id: row.get(3)?,
                 status: task_status_from_str(&status).map_err(to_sql_conversion_error)?,
                 current_stage: current_stage
@@ -699,10 +774,14 @@ impl ProjectDatabase {
             Some(project_id) => statement.query_map(params![project_id.to_string()], map_row)?,
             None => statement.query_map([], map_row)?,
         };
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
-    pub fn upsert_artifact_index(&self, index: &ArtifactIndex) -> Result<Vec<ArtifactRecord>, StoreError> {
+    pub fn upsert_artifact_index(
+        &self,
+        index: &ArtifactIndex,
+    ) -> Result<Vec<ArtifactRecord>, StoreError> {
         self.connection.execute(
             "DELETE FROM artifact_records WHERE project_path = ?1",
             params![&index.project_path],
@@ -740,7 +819,10 @@ impl ProjectDatabase {
         Ok(records)
     }
 
-    pub fn list_artifact_records(&self, project_path: String) -> Result<Vec<ArtifactRecord>, StoreError> {
+    pub fn list_artifact_records(
+        &self,
+        project_path: String,
+    ) -> Result<Vec<ArtifactRecord>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT project_path, path, kind, size_bytes, modified_at, summary, run_directory, indexed_at
              FROM artifact_records
@@ -767,10 +849,14 @@ impl ProjectDatabase {
                 indexed_at: parse_datetime(&indexed_at).map_err(to_sql_conversion_error)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
-    pub fn upsert_analysis_cache(&self, result: &AnalysisParseResult) -> Result<Vec<AnalysisCacheRecord>, StoreError> {
+    pub fn upsert_analysis_cache(
+        &self,
+        result: &AnalysisParseResult,
+    ) -> Result<Vec<AnalysisCacheRecord>, StoreError> {
         self.connection.execute(
             "DELETE FROM analysis_cache WHERE project_path = ?1",
             params![&result.project_path],
@@ -814,7 +900,10 @@ impl ProjectDatabase {
         Ok(records)
     }
 
-    pub fn list_analysis_cache_records(&self, project_path: String) -> Result<Vec<AnalysisCacheRecord>, StoreError> {
+    pub fn list_analysis_cache_records(
+        &self,
+        project_path: String,
+    ) -> Result<Vec<AnalysisCacheRecord>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT project_path, path, label, x_label, y_label, point_count, min_y, max_y, last_y, generated_at
              FROM analysis_cache
@@ -837,7 +926,8 @@ impl ProjectDatabase {
                 generated_at: parse_datetime(&generated_at).map_err(to_sql_conversion_error)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::Database)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
@@ -966,16 +1056,19 @@ impl ProjectDatabase {
             .collect::<Result<Vec<_>, _>>()?;
         let has = |name: &str| columns.iter().any(|column| column == name);
         if !has("username") {
-            self.connection
-                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN username TEXT NOT NULL DEFAULT ''")?;
+            self.connection.execute_batch(
+                "ALTER TABLE remote_profiles ADD COLUMN username TEXT NOT NULL DEFAULT ''",
+            )?;
         }
         if !has("port") {
-            self.connection
-                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN port INTEGER NOT NULL DEFAULT 22")?;
+            self.connection.execute_batch(
+                "ALTER TABLE remote_profiles ADD COLUMN port INTEGER NOT NULL DEFAULT 22",
+            )?;
         }
         if !has("auth_method") {
-            self.connection
-                .execute_batch("ALTER TABLE remote_profiles ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'agent'")?;
+            self.connection.execute_batch(
+                "ALTER TABLE remote_profiles ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'agent'",
+            )?;
         }
         if !has("identity_file") {
             self.connection
@@ -1030,11 +1123,13 @@ fn tail_string(value: &str, max_chars: usize) -> String {
     chars[start..].iter().collect()
 }
 
-fn normalize_engine_installation(mut record: EngineInstallationRecord) -> Result<EngineInstallationRecord, StoreError> {
+fn normalize_engine_installation(
+    mut record: EngineInstallationRecord,
+) -> Result<EngineInstallationRecord, StoreError> {
     record.target_id = record.target_id.trim().to_string();
     record.target_label = record.target_label.trim().to_string();
     record.engine_id = record.engine_id.trim().to_string();
-    record.location = record.location.trim().to_string();
+    record.location = normalize_engine_installation_location(&record.engine_id, &record.location);
     record.arch = record
         .arch
         .as_deref()
@@ -1059,7 +1154,75 @@ fn normalize_engine_installation(mut record: EngineInstallationRecord) -> Result
     Ok(record)
 }
 
-fn normalize_remote_helper_status(mut status: RemoteHelperStatus) -> Result<RemoteHelperStatus, StoreError> {
+fn normalize_engine_installation_location(engine_id: &str, location: &str) -> String {
+    let trimmed = location.trim();
+    if !matches!(engine_id, "openmm" | "hoomd") || cfg!(target_os = "windows") {
+        return trimmed.to_string();
+    }
+    let path = PathBuf::from(trimmed);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name == "python3" || name.starts_with("python3.") {
+        if let Some(parent) = path.parent() {
+            let python = parent.join("python");
+            if python.is_file() {
+                return python.display().to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
+fn dedupe_engine_installations(
+    records: Vec<EngineInstallationRecord>,
+) -> Result<Vec<EngineInstallationRecord>, StoreError> {
+    let mut deduped: Vec<EngineInstallationRecord> = Vec::new();
+    for record in records {
+        let record = normalize_engine_installation(record)?;
+        if let Some(existing) = deduped.iter_mut().find(|existing| {
+            existing.target_kind == record.target_kind
+                && existing.target_id == record.target_id
+                && existing.engine_id == record.engine_id
+                && existing.location == record.location
+        }) {
+            if engine_installation_record_is_better(&record, existing) {
+                *existing = record;
+            }
+        } else {
+            deduped.push(record);
+        }
+    }
+    Ok(deduped)
+}
+
+fn engine_installation_record_is_better(
+    candidate: &EngineInstallationRecord,
+    current: &EngineInstallationRecord,
+) -> bool {
+    let candidate_version = informative_version(candidate.version.as_deref());
+    let current_version = informative_version(current.version.as_deref());
+    if candidate_version != current_version {
+        return candidate_version;
+    }
+    candidate.checked_at > current.checked_at
+}
+
+fn informative_version(version: Option<&str>) -> bool {
+    version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower != "version unknown" && lower != "unknown"
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_remote_helper_status(
+    mut status: RemoteHelperStatus,
+) -> Result<RemoteHelperStatus, StoreError> {
     status.profile_id = status.profile_id.trim().to_string();
     status.helper_version = status
         .helper_version
@@ -1124,7 +1287,11 @@ fn normalize_remote_profile(mut profile: RemoteProfile) -> Result<RemoteProfile,
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
-    if profile.id.is_empty() || profile.name.is_empty() || profile.host.is_empty() || profile.workdir.is_empty() {
+    if profile.id.is_empty()
+        || profile.name.is_empty()
+        || profile.host.is_empty()
+        || profile.workdir.is_empty()
+    {
         return Err(StoreError::InvalidRemoteProfile);
     }
     Ok(profile)
@@ -1469,7 +1636,10 @@ mod tests {
         assert_eq!(profiles[0].username, "noir");
         assert_eq!(profiles[0].port, 2222);
         assert_eq!(profiles[0].auth_method, RemoteAuthMethod::Key);
-        assert_eq!(profiles[0].identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(
+            profiles[0].identity_file.as_deref(),
+            Some("~/.ssh/id_ed25519")
+        );
 
         let mut updated = profiles[0].clone();
         updated.scheduler = ExecutionMode::Pbs;
@@ -1479,7 +1649,9 @@ mod tests {
         assert_eq!(profiles[0].scheduler, ExecutionMode::Pbs);
         assert_eq!(profiles[0].default_queue, None);
 
-        assert!(db.delete_remote_profile("custom-slurm".to_string()).expect("delete"));
+        assert!(db
+            .delete_remote_profile("custom-slurm".to_string())
+            .expect("delete"));
         assert!(db.list_remote_profiles().expect("empty").is_empty());
         let _ = std::fs::remove_file(path);
     }
@@ -1504,7 +1676,10 @@ mod tests {
         db.save_engine_installation(record).expect("save");
         let records = db.list_engine_installations().expect("list");
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].authorization_status, DetectionStatus::MissingLicense);
+        assert_eq!(
+            records[0].authorization_status,
+            DetectionStatus::MissingLicense
+        );
 
         let mut updated = records[0].clone();
         updated.authorization_status = DetectionStatus::Ready;
@@ -1519,6 +1694,49 @@ mod tests {
             .expect("delete"));
         assert!(db.list_engine_installations().expect("empty").is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn engine_installations_normalize_python_module_duplicates() {
+        let path =
+            std::env::temp_dir().join(format!("automd-openmm-engines-{}.sqlite", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("automd-openmm-prefix-{}", Uuid::new_v4()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let python = bin.join("python");
+        let python3 = bin.join("python3");
+        std::fs::write(&python, "").expect("python");
+        std::fs::write(&python3, "").expect("python3");
+
+        let db = ProjectDatabase::open(&path).expect("db");
+        let base = EngineInstallationRecord {
+            target_kind: EngineTargetKind::Local,
+            target_id: "local".to_string(),
+            target_label: "本机".to_string(),
+            engine_id: "openmm".to_string(),
+            location: python.display().to_string(),
+            version: Some("8.5.1".to_string()),
+            authorization_status: DetectionStatus::Ready,
+            platform: Some(Platform::Macos),
+            arch: Some("aarch64".to_string()),
+            checked_at: Utc::now(),
+        };
+        let mut duplicate = base.clone();
+        duplicate.location = python3.display().to_string();
+        duplicate.version = Some("version unknown".to_string());
+        duplicate.checked_at = duplicate.checked_at + chrono::Duration::seconds(60);
+
+        db.save_engine_installation(base).expect("save base");
+        db.save_engine_installation(duplicate)
+            .expect("save duplicate");
+        let records = db.list_engine_installations().expect("list");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].location, python.display().to_string());
+        assert_eq!(records[0].version.as_deref(), Some("8.5.1"));
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1562,7 +1780,10 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, TaskStatus::Completed);
         assert_eq!(records[0].progress_percent, 100.0);
-        assert!(db.list_task_records(Some(Uuid::new_v4())).expect("empty").is_empty());
+        assert!(db
+            .list_task_records(Some(Uuid::new_v4()))
+            .expect("empty")
+            .is_empty());
         let _ = std::fs::remove_file(path);
     }
 
@@ -1596,7 +1817,9 @@ mod tests {
         };
         let records = db.upsert_artifact_index(&index).expect("artifact upsert");
         assert_eq!(records.len(), 2);
-        let records = db.list_artifact_records(project_path.clone()).expect("artifact list");
+        let records = db
+            .list_artifact_records(project_path.clone())
+            .expect("artifact list");
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].path, "analysis/rmsd.xvg");
         assert_eq!(records[0].kind, ArtifactKind::AnalysisTable);
@@ -1608,7 +1831,10 @@ mod tests {
                 label: "RMSD".to_string(),
                 x_label: "Time (ns)".to_string(),
                 y_label: "RMSD (nm)".to_string(),
-                points: vec![AnalysisPoint { x: 0.0, y: 0.1 }, AnalysisPoint { x: 1.0, y: 0.2 }],
+                points: vec![
+                    AnalysisPoint { x: 0.0, y: 0.1 },
+                    AnalysisPoint { x: 1.0, y: 0.2 },
+                ],
                 min_y: Some(0.1),
                 max_y: Some(0.2),
                 last_y: Some(0.2),

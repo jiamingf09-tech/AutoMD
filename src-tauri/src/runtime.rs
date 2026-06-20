@@ -68,10 +68,9 @@ fn cpu_hardware() -> CpuHardware {
             .trim()
             .parse::<u16>()
             .ok(),
-        "linux" => parse_lscpu_value("Core(s) per socket")
-            .and_then(|cores| {
-                parse_lscpu_value("Socket(s)").map(|sockets| cores.saturating_mul(sockets))
-            }),
+        "linux" => parse_lscpu_value("Core(s) per socket").and_then(|cores| {
+            parse_lscpu_value("Socket(s)").map(|sockets| cores.saturating_mul(sockets))
+        }),
         _ => None,
     };
     let brand = match std::env::consts::OS {
@@ -79,8 +78,13 @@ fn cpu_hardware() -> CpuHardware {
         "linux" => fs::read_to_string("/proc/cpuinfo")
             .ok()
             .and_then(|text| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix("model name").and_then(|value| value.split_once(':').map(|(_, right)| right.trim().to_string())))
+                text.lines().find_map(|line| {
+                    line.strip_prefix("model name").and_then(|value| {
+                        value
+                            .split_once(':')
+                            .map(|(_, right)| right.trim().to_string())
+                    })
+                })
             })
             .unwrap_or_default(),
         "windows" => command_stdout(
@@ -128,7 +132,8 @@ fn memory_hardware() -> MemoryHardware {
         "linux" => {
             let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
             let total = parse_meminfo_kb(&meminfo, "MemTotal").map(|kb| kb.saturating_mul(1024));
-            let available = parse_meminfo_kb(&meminfo, "MemAvailable").map(|kb| kb.saturating_mul(1024));
+            let available =
+                parse_meminfo_kb(&meminfo, "MemAvailable").map(|kb| kb.saturating_mul(1024));
             MemoryHardware {
                 total_bytes: total,
                 available_bytes: available,
@@ -203,20 +208,31 @@ fn gpu_devices(gpu_info: &LocalGpuInfo) -> Vec<GpuDevice> {
 }
 
 fn macos_gpu_devices() -> Vec<GpuDevice> {
-    let output = command_stdout("system_profiler", &["SPDisplaysDataType", "-detailLevel", "mini"]);
+    let output = command_stdout(
+        "system_profiler",
+        &["SPDisplaysDataType", "-detailLevel", "mini"],
+    );
     let mut devices = Vec::new();
     let mut current_name: Option<String> = None;
     let mut vendor = String::new();
     let mut memory: Option<u64> = None;
     let mut detail_parts: Vec<String> = Vec::new();
 
-    let flush = |devices: &mut Vec<GpuDevice>, current_name: &mut Option<String>, vendor: &mut String, memory: &mut Option<u64>, detail_parts: &mut Vec<String>| {
+    let flush = |devices: &mut Vec<GpuDevice>,
+                 current_name: &mut Option<String>,
+                 vendor: &mut String,
+                 memory: &mut Option<u64>,
+                 detail_parts: &mut Vec<String>| {
         if let Some(name) = current_name.take() {
             let kind = classify_gpu_summary(&format!("{name} {vendor}"));
             devices.push(GpuDevice {
                 id: format!("gpu{}", devices.len()),
                 name,
-                vendor: if vendor.is_empty() { gpu_vendor(&kind.label) } else { vendor.clone() },
+                vendor: if vendor.is_empty() {
+                    gpu_vendor(&kind.label)
+                } else {
+                    vendor.clone()
+                },
                 backend: backend_for_gpu_kind(&kind.kind),
                 memory_bytes: *memory,
                 detail: if detail_parts.is_empty() {
@@ -234,11 +250,20 @@ fn macos_gpu_devices() -> Vec<GpuDevice> {
     for raw_line in output.lines() {
         let line = raw_line.trim();
         if let Some(value) = line.strip_prefix("Chipset Model:") {
-            flush(&mut devices, &mut current_name, &mut vendor, &mut memory, &mut detail_parts);
+            flush(
+                &mut devices,
+                &mut current_name,
+                &mut vendor,
+                &mut memory,
+                &mut detail_parts,
+            );
             current_name = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("Vendor:") {
             vendor = value.trim().to_string();
-        } else if let Some(value) = line.strip_prefix("VRAM (Total):").or_else(|| line.strip_prefix("VRAM:")) {
+        } else if let Some(value) = line
+            .strip_prefix("VRAM (Total):")
+            .or_else(|| line.strip_prefix("VRAM:"))
+        {
             memory = parse_memory_size(value.trim());
             detail_parts.push(format!("VRAM {}", value.trim()));
         } else if let Some(value) = line.strip_prefix("Total Number of Cores:") {
@@ -247,14 +272,23 @@ fn macos_gpu_devices() -> Vec<GpuDevice> {
             detail_parts.push(format!("Metal {}", value.trim()));
         }
     }
-    flush(&mut devices, &mut current_name, &mut vendor, &mut memory, &mut detail_parts);
+    flush(
+        &mut devices,
+        &mut current_name,
+        &mut vendor,
+        &mut memory,
+        &mut detail_parts,
+    );
     devices
 }
 
 fn linux_gpu_devices() -> Vec<GpuDevice> {
     let nvidia = command_stdout(
         "nvidia-smi",
-        &["--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
+        &[
+            "--query-gpu=index,name,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
     );
     let mut devices: Vec<GpuDevice> = nvidia
         .lines()
@@ -286,7 +320,9 @@ fn linux_gpu_devices() -> Vec<GpuDevice> {
         .lines()
         .filter(|line| {
             let lower = line.to_ascii_lowercase();
-            lower.contains("vga") || lower.contains("3d controller") || lower.contains("display controller")
+            lower.contains("vga")
+                || lower.contains("3d controller")
+                || lower.contains("display controller")
         })
         .enumerate()
         .map(|(index, line)| {
@@ -345,7 +381,10 @@ fn gpu_vendor(value: &str) -> String {
     let lower = value.to_ascii_lowercase();
     if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("quadro") {
         "NVIDIA".to_string()
-    } else if lower.contains("amd") || lower.contains("radeon") || lower.contains("advanced micro devices") {
+    } else if lower.contains("amd")
+        || lower.contains("radeon")
+        || lower.contains("advanced micro devices")
+    {
         "AMD".to_string()
     } else if lower.contains("apple") || lower.contains("metal") {
         "Apple".to_string()
@@ -395,8 +434,14 @@ fn unix_disk_volumes() -> Vec<DiskVolume> {
             if parts.len() < 6 {
                 return None;
             }
-            let total_bytes = parts[1].parse::<u64>().ok().map(|kb| kb.saturating_mul(1024));
-            let available_bytes = parts[3].parse::<u64>().ok().map(|kb| kb.saturating_mul(1024));
+            let total_bytes = parts[1]
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb.saturating_mul(1024));
+            let available_bytes = parts[3]
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb.saturating_mul(1024));
             Some(DiskVolume {
                 id: format!("disk{index}"),
                 mount_point: parts[5..].join(" "),
@@ -530,15 +575,13 @@ fn apply_contextual_tool_statuses(tools: &mut [ToolDiagnostic]) {
         );
     }
 
-    for (id, scheduler) in [
-        ("sbatch", "SLURM"),
-        ("qsub", "PBS"),
-        ("bsub", "LSF"),
-    ] {
+    for (id, scheduler) in [("sbatch", "SLURM"), ("qsub", "PBS"), ("bsub", "LSF")] {
         mark_missing_not_applicable(
             tools,
             id,
-            &format!("{scheduler} 命令通常由远程/HPC 登录节点提供；本机缺失不影响配置远程 profile。"),
+            &format!(
+                "{scheduler} 命令通常由远程/HPC 登录节点提供；本机缺失不影响配置远程 profile。"
+            ),
         );
     }
 }
@@ -706,7 +749,9 @@ fn gpu_availability(tools: &[ToolDiagnostic], gpu_info: &LocalGpuInfo) -> GpuAva
 }
 
 fn ready_tool<'a>(tools: &'a [ToolDiagnostic], id: &str) -> Option<&'a ToolDiagnostic> {
-    tools.iter().find(|tool| tool.id == id && matches!(tool.status, DetectionStatus::Ready))
+    tools
+        .iter()
+        .find(|tool| tool.id == id && matches!(tool.status, DetectionStatus::Ready))
 }
 
 fn detect_local_gpu() -> LocalGpuInfo {
@@ -729,7 +774,10 @@ fn detect_local_gpu() -> LocalGpuInfo {
 
 fn gpu_hardware_summary() -> String {
     match std::env::consts::OS {
-        "macos" => command_stdout("system_profiler", &["SPDisplaysDataType", "-detailLevel", "mini"]),
+        "macos" => command_stdout(
+            "system_profiler",
+            &["SPDisplaysDataType", "-detailLevel", "mini"],
+        ),
         "linux" => command_stdout("lspci", &[]),
         "windows" => command_stdout(
             "powershell",
@@ -808,7 +856,10 @@ mod tests {
             classify_gpu_summary("NVIDIA GeForce RTX 4090").kind,
             LocalGpuKind::Nvidia
         );
-        assert_eq!(classify_gpu_summary("AMD Radeon Pro").kind, LocalGpuKind::Amd);
+        assert_eq!(
+            classify_gpu_summary("AMD Radeon Pro").kind,
+            LocalGpuKind::Amd
+        );
         assert_eq!(
             classify_gpu_summary("Chipset Model: Apple M4").kind,
             LocalGpuKind::Apple

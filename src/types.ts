@@ -686,6 +686,7 @@ export interface ExecutableSearchResult {
   found: boolean;
   command?: string | null;
   path?: string | null;
+  version?: string | null;
   checkedLocations: string[];
   message: string;
 }

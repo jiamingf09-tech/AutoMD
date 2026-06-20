@@ -25,7 +25,10 @@ pub enum PluginRegistryError {
     Execution(String),
 }
 
-pub fn registry_snapshot(plugin_root: &Path, states: &[PluginStateRecord]) -> Result<PluginRegistrySnapshot, PluginRegistryError> {
+pub fn registry_snapshot(
+    plugin_root: &Path,
+    states: &[PluginStateRecord],
+) -> Result<PluginRegistrySnapshot, PluginRegistryError> {
     fs::create_dir_all(plugin_root)?;
     let state_map = states
         .iter()
@@ -42,7 +45,10 @@ pub fn registry_snapshot(plugin_root: &Path, states: &[PluginStateRecord]) -> Re
                 }
                 manifests.push(manifest);
             }
-            Err(error) => warnings.push(format!("Could not parse plugin manifest: {} ({error})", manifest_path.display())),
+            Err(error) => warnings.push(format!(
+                "Could not parse plugin manifest: {} ({error})",
+                manifest_path.display()
+            )),
         }
     }
 
@@ -69,17 +75,28 @@ pub fn registry_snapshot(plugin_root: &Path, states: &[PluginStateRecord]) -> Re
     })
 }
 
-pub fn import_plugin(plugin_root: &Path, request: &PluginImportRequest, states: &[PluginStateRecord]) -> Result<String, PluginRegistryError> {
+pub fn import_plugin(
+    plugin_root: &Path,
+    request: &PluginImportRequest,
+    states: &[PluginStateRecord],
+) -> Result<String, PluginRegistryError> {
     fs::create_dir_all(plugin_root)?;
     let source = PathBuf::from(request.source_path.trim());
     if !source.exists() {
-        return Err(PluginRegistryError::Invalid(format!("source path does not exist: {}", source.display())));
+        return Err(PluginRegistryError::Invalid(format!(
+            "source path does not exist: {}",
+            source.display()
+        )));
     }
     let manifest_path = if source.is_dir() {
         discover_manifest_paths(&source)?
             .into_iter()
             .next()
-            .ok_or_else(|| PluginRegistryError::Invalid("directory does not contain a *.automd-plugin.json manifest".to_string()))?
+            .ok_or_else(|| {
+                PluginRegistryError::Invalid(
+                    "directory does not contain a *.automd-plugin.json manifest".to_string(),
+                )
+            })?
     } else {
         source.clone()
     };
@@ -120,9 +137,16 @@ pub fn import_plugin(plugin_root: &Path, request: &PluginImportRequest, states: 
     Ok(manifest.id)
 }
 
-pub fn create_plugin_template(plugin_root: &Path, request: &PluginTemplateRequest) -> Result<String, PluginRegistryError> {
+pub fn create_plugin_template(
+    plugin_root: &Path,
+    request: &PluginTemplateRequest,
+) -> Result<String, PluginRegistryError> {
     fs::create_dir_all(plugin_root)?;
-    let plugin_id = safe_plugin_id(if request.id.trim().is_empty() { &request.name } else { &request.id });
+    let plugin_id = safe_plugin_id(if request.id.trim().is_empty() {
+        &request.name
+    } else {
+        &request.id
+    });
     ensure_user_plugin_id(&plugin_id)?;
     ensure_not_builtin(&plugin_id)?;
     let destination = plugin_root.join(&plugin_id);
@@ -139,7 +163,10 @@ pub fn create_plugin_template(plugin_root: &Path, request: &PluginTemplateReques
         format!(
             "# {}\n\n{}\n\n这个插件由 AutoMD 快速创建。修改 `{}` 后回到软件刷新插件列表。\n",
             request.name,
-            request.description.as_deref().unwrap_or("AutoMD user plugin."),
+            request
+                .description
+                .as_deref()
+                .unwrap_or("AutoMD user plugin."),
             entrypoint
         ),
     )?;
@@ -166,11 +193,18 @@ pub fn create_plugin_template(plugin_root: &Path, request: &PluginTemplateReques
         }],
         "defaultConfig": {}
     });
-    fs::write(destination.join(format!("{plugin_id}.automd-plugin.json")), serde_json::to_string_pretty(&manifest)?)?;
+    fs::write(
+        destination.join(format!("{plugin_id}.automd-plugin.json")),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
     Ok(plugin_id)
 }
 
-pub fn delete_user_plugin(plugin_root: &Path, plugin_id: &str, states: &[PluginStateRecord]) -> Result<(), PluginRegistryError> {
+pub fn delete_user_plugin(
+    plugin_root: &Path,
+    plugin_id: &str,
+    states: &[PluginStateRecord],
+) -> Result<(), PluginRegistryError> {
     ensure_not_builtin(plugin_id)?;
     let snapshot = registry_snapshot(plugin_root, states)?;
     let manifest = snapshot
@@ -183,7 +217,13 @@ pub fn delete_user_plugin(plugin_root: &Path, plugin_id: &str, states: &[PluginS
     }
     let install_path = manifest
         .install_path
-        .or_else(|| manifest.source_path.as_ref().and_then(|path| Path::new(path).parent().map(|parent| parent.display().to_string())))
+        .or_else(|| {
+            manifest.source_path.as_ref().and_then(|path| {
+                Path::new(path)
+                    .parent()
+                    .map(|parent| parent.display().to_string())
+            })
+        })
         .ok_or_else(|| PluginRegistryError::Invalid("plugin has no install path".to_string()))?;
     let install_path = PathBuf::from(install_path);
     if install_path.exists() {
@@ -202,10 +242,14 @@ pub fn execute_plugin_action(
         return Err(PluginRegistryError::BuiltIn(manifest.id.clone()));
     }
     if !manifest.enabled {
-        return Err(PluginRegistryError::Invalid("plugin is disabled".to_string()));
+        return Err(PluginRegistryError::Invalid(
+            "plugin is disabled".to_string(),
+        ));
     }
     if matches!(request.mode, PluginRunMode::Direct) && !request.confirmed_direct {
-        return Err(PluginRegistryError::Invalid("direct plugin execution requires second confirmation".to_string()));
+        return Err(PluginRegistryError::Invalid(
+            "direct plugin execution requires second confirmation".to_string(),
+        ));
     }
     let action = manifest
         .actions
@@ -214,12 +258,21 @@ pub fn execute_plugin_action(
         .or_else(|| manifest.actions.first())
         .ok_or_else(|| PluginRegistryError::Invalid("plugin action is missing".to_string()))?;
     let install_dir = manifest_install_dir(manifest)?;
-    let sandbox_dir = plugin_root.join(".runs").join(safe_plugin_id(&manifest.id)).join(run_id);
+    let sandbox_dir = plugin_root
+        .join(".runs")
+        .join(safe_plugin_id(&manifest.id))
+        .join(run_id);
     fs::create_dir_all(&sandbox_dir)?;
 
-    let (command, args, cwd) = command_spec(manifest, action, &install_dir, &sandbox_dir, &request.mode)?;
+    let (command, args, cwd) =
+        command_spec(manifest, action, &install_dir, &sandbox_dir, &request.mode)?;
     let mut child = Command::new(&command);
-    child.args(&args).current_dir(&cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    child
+        .args(&args)
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if matches!(request.mode, PluginRunMode::Sandbox) {
         child.env_clear();
         if let Ok(path) = std::env::var("PATH") {
@@ -228,9 +281,9 @@ pub fn execute_plugin_action(
         child.env("AUTOMD_PLUGIN_SANDBOX", "1");
         child.env("AUTOMD_PLUGIN_ID", &manifest.id);
     }
-    let mut process = child
-        .spawn()
-        .map_err(|error| PluginRegistryError::Execution(format!("{}: {error}", command.display())))?;
+    let mut process = child.spawn().map_err(|error| {
+        PluginRegistryError::Execution(format!("{}: {error}", command.display()))
+    })?;
     if let Some(stdin) = process.stdin.as_mut() {
         stdin.write_all(serde_json::to_string_pretty(&request.context)?.as_bytes())?;
     }
@@ -248,11 +301,13 @@ pub fn execute_plugin_action(
         }
     }
     if !output.status.success() {
-        return Err(PluginRegistryError::Execution(if stderr.trim().is_empty() {
-            format!("plugin exited with status {}", output.status)
-        } else {
-            stderr.clone()
-        }));
+        return Err(PluginRegistryError::Execution(
+            if stderr.trim().is_empty() {
+                format!("plugin exited with status {}", output.status)
+            } else {
+                stderr.clone()
+            },
+        ));
     }
     let mut warnings = Vec::new();
     if matches!(request.mode, PluginRunMode::Direct) {
@@ -269,8 +324,13 @@ fn load_user_manifest(
     let mut manifest = parse_manifest_file(manifest_path)?;
     manifest.origin = PluginOrigin::User;
     manifest.source_path = Some(manifest_path.display().to_string());
-    manifest.install_path = manifest_path.parent().map(|parent| parent.display().to_string());
-    manifest.enabled = state_map.get(&manifest.id).map(|state| state.enabled).unwrap_or(true);
+    manifest.install_path = manifest_path
+        .parent()
+        .map(|parent| parent.display().to_string());
+    manifest.enabled = state_map
+        .get(&manifest.id)
+        .map(|state| state.enabled)
+        .unwrap_or(true);
     manifest.config = state_map
         .get(&manifest.id)
         .map(|state| state.config.clone())
@@ -284,7 +344,11 @@ fn parse_manifest_file(path: &Path) -> Result<PluginManifest, PluginRegistryErro
     Ok(serde_json::from_str::<PluginManifest>(&contents)?)
 }
 
-fn validate_manifest(plugin_root: &Path, manifest_path: &Path, manifest: &mut PluginManifest) -> Option<String> {
+fn validate_manifest(
+    plugin_root: &Path,
+    manifest_path: &Path,
+    manifest: &mut PluginManifest,
+) -> Option<String> {
     let warning = if manifest.id.trim().is_empty() {
         Some("id is required".to_string())
     } else if manifest.name.trim().is_empty() {
@@ -293,7 +357,9 @@ fn validate_manifest(plugin_root: &Path, manifest_path: &Path, manifest: &mut Pl
         Some("version is required".to_string())
     } else if manifest.entrypoint.trim().is_empty() {
         Some("entrypoint is required".to_string())
-    } else if matches!(manifest.kind, PluginKind::EngineAdapter) && manifest.engine_id.as_deref().unwrap_or("").is_empty() {
+    } else if matches!(manifest.kind, PluginKind::EngineAdapter)
+        && manifest.engine_id.as_deref().unwrap_or("").is_empty()
+    {
         Some("engineId is required for engineAdapter plugins".to_string())
     } else if manifest.entrypoint.contains("..") || Path::new(&manifest.entrypoint).is_absolute() {
         Some("entrypoint should be relative to the plugin directory; direct run still requires confirmation".to_string())
@@ -351,7 +417,13 @@ fn builtin_manifests() -> Vec<PluginManifest> {
             PluginKind::EngineAdapter,
             "builtin://engine_adapters",
             Some("gromacs/openmm/ambertools/namd"),
-            vec!["prepare", "run", "parse_progress", "classify_failure", "resume"],
+            vec![
+                "prepare",
+                "run",
+                "parse_progress",
+                "classify_failure",
+                "resume",
+            ],
         ),
         builtin(
             "automd-core-analysis",
@@ -410,7 +482,11 @@ fn builtin(
         license_policy: None,
         warnings: Vec::new(),
         source_path: None,
-        supported_platforms: vec!["windows".to_string(), "macos".to_string(), "linux".to_string()],
+        supported_platforms: vec![
+            "windows".to_string(),
+            "macos".to_string(),
+            "linux".to_string(),
+        ],
         integration_targets: integration_targets_for_kind(&kind),
         actions: Vec::new(),
         config_schema: serde_json::Value::Null,
@@ -459,14 +535,21 @@ fn command_spec(
         return Ok((PathBuf::from(command), args, cwd));
     }
     let entrypoint = resolve_entrypoint(manifest, install_dir, mode)?;
-    let extension = entrypoint.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    let extension = entrypoint
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
     let command = match extension {
         "py" => PathBuf::from("python3"),
         "js" | "mjs" | "cjs" => PathBuf::from("node"),
         "sh" => PathBuf::from("bash"),
         _ => entrypoint.clone(),
     };
-    let args = if command == entrypoint { Vec::new() } else { vec![entrypoint.display().to_string()] };
+    let args = if command == entrypoint {
+        Vec::new()
+    } else {
+        vec![entrypoint.display().to_string()]
+    };
     Ok((command, args, cwd))
 }
 
@@ -477,28 +560,43 @@ fn resolve_arg(arg: &str, install_dir: &Path) -> String {
     arg.to_string()
 }
 
-fn resolve_entrypoint(manifest: &PluginManifest, install_dir: &Path, mode: &PluginRunMode) -> Result<PathBuf, PluginRegistryError> {
+fn resolve_entrypoint(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    mode: &PluginRunMode,
+) -> Result<PathBuf, PluginRegistryError> {
     let entry = PathBuf::from(&manifest.entrypoint);
     if entry.is_absolute() {
         if matches!(mode, PluginRunMode::Direct) {
             return Ok(entry);
         }
-        return Err(PluginRegistryError::Invalid("sandbox entrypoint cannot be absolute".to_string()));
+        return Err(PluginRegistryError::Invalid(
+            "sandbox entrypoint cannot be absolute".to_string(),
+        ));
     }
     if path_has_parent(&entry) {
         if matches!(mode, PluginRunMode::Direct) {
             return Ok(install_dir.join(entry));
         }
-        return Err(PluginRegistryError::Invalid("sandbox entrypoint cannot escape plugin directory".to_string()));
+        return Err(PluginRegistryError::Invalid(
+            "sandbox entrypoint cannot escape plugin directory".to_string(),
+        ));
     }
     let resolved = install_dir.join(entry);
     if !resolved.exists() {
-        return Err(PluginRegistryError::Invalid(format!("entrypoint not found: {}", resolved.display())));
+        return Err(PluginRegistryError::Invalid(format!(
+            "entrypoint not found: {}",
+            resolved.display()
+        )));
     }
     Ok(resolved)
 }
 
-fn validate_plugin_output_paths(value: &serde_json::Value, sandbox_dir: &Path, context: &serde_json::Value) -> Result<(), PluginRegistryError> {
+fn validate_plugin_output_paths(
+    value: &serde_json::Value,
+    sandbox_dir: &Path,
+    context: &serde_json::Value,
+) -> Result<(), PluginRegistryError> {
     let project_path = context
         .get("projectPath")
         .and_then(|value| value.as_str())
@@ -513,12 +611,20 @@ fn validate_plugin_output_paths(value: &serde_json::Value, sandbox_dir: &Path, c
         let path = PathBuf::from(path);
         if path.is_absolute() {
             let inside_sandbox = path.starts_with(sandbox_dir);
-            let inside_project = project_path.as_ref().is_some_and(|project| path.starts_with(project));
+            let inside_project = project_path
+                .as_ref()
+                .is_some_and(|project| path.starts_with(project));
             if !inside_sandbox && !inside_project {
-                return Err(PluginRegistryError::Invalid(format!("sandbox output path is outside allowed directories: {}", path.display())));
+                return Err(PluginRegistryError::Invalid(format!(
+                    "sandbox output path is outside allowed directories: {}",
+                    path.display()
+                )));
             }
         } else if path_has_parent(&path) {
-            return Err(PluginRegistryError::Invalid(format!("relative output path escapes allowed directories: {}", path.display())));
+            return Err(PluginRegistryError::Invalid(format!(
+                "relative output path escapes allowed directories: {}",
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -529,11 +635,20 @@ fn manifest_install_dir(manifest: &PluginManifest) -> Result<PathBuf, PluginRegi
         .install_path
         .as_deref()
         .map(PathBuf::from)
-        .or_else(|| manifest.source_path.as_ref().and_then(|source| Path::new(source).parent().map(PathBuf::from)))
+        .or_else(|| {
+            manifest
+                .source_path
+                .as_ref()
+                .and_then(|source| Path::new(source).parent().map(PathBuf::from))
+        })
         .ok_or_else(|| PluginRegistryError::Invalid("plugin installPath is missing".to_string()))
 }
 
-fn copy_entrypoint_sibling(manifest: &PluginManifest, manifest_path: &Path, destination: &Path) -> Result<(), PluginRegistryError> {
+fn copy_entrypoint_sibling(
+    manifest: &PluginManifest,
+    manifest_path: &Path,
+    destination: &Path,
+) -> Result<(), PluginRegistryError> {
     let entrypoint = PathBuf::from(&manifest.entrypoint);
     if entrypoint.is_absolute() || path_has_parent(&entrypoint) {
         return Ok(());
@@ -569,20 +684,26 @@ fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), PluginRegistryE
 fn ensure_user_plugin_id(plugin_id: &str) -> Result<(), PluginRegistryError> {
     let safe = safe_plugin_id(plugin_id);
     if safe != plugin_id {
-        return Err(PluginRegistryError::Invalid(format!("plugin id must be lowercase ascii, numbers, hyphen or underscore: {safe}")));
+        return Err(PluginRegistryError::Invalid(format!(
+            "plugin id must be lowercase ascii, numbers, hyphen or underscore: {safe}"
+        )));
     }
     Ok(())
 }
 
 fn ensure_not_builtin(plugin_id: &str) -> Result<(), PluginRegistryError> {
-    if builtin_manifests().iter().any(|manifest| manifest.id == plugin_id) {
+    if builtin_manifests()
+        .iter()
+        .any(|manifest| manifest.id == plugin_id)
+    {
         return Err(PluginRegistryError::BuiltIn(plugin_id.to_string()));
     }
     Ok(())
 }
 
 fn path_has_parent(path: &Path) -> bool {
-    path.components().any(|component| matches!(component, Component::ParentDir))
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn safe_plugin_id(value: &str) -> String {
@@ -597,10 +718,16 @@ fn safe_plugin_id(value: &str) -> String {
         }
     }
     let trimmed = id.trim_matches('-');
-    if trimmed.is_empty() { "automd-plugin".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "automd-plugin".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
-fn template_entrypoint(language: &str) -> (&'static str, &'static str, Vec<&'static str>, &'static str) {
+fn template_entrypoint(
+    language: &str,
+) -> (&'static str, &'static str, Vec<&'static str>, &'static str) {
     match language {
         "javascript" | "js" | "node" => (
             "entrypoint.js",
@@ -697,11 +824,19 @@ mod tests {
 
         let snapshot = registry_snapshot(&root, &states).expect("registry snapshot");
 
-        let user = snapshot.manifests.iter().find(|manifest| manifest.id == "example-lammps-pack").expect("user plugin");
+        let user = snapshot
+            .manifests
+            .iter()
+            .find(|manifest| manifest.id == "example-lammps-pack")
+            .expect("user plugin");
         assert_eq!(user.origin, PluginOrigin::User);
         assert!(!user.enabled);
         assert_eq!(user.config["threads"], 2);
-        assert!(snapshot.manifests.iter().any(|manifest| manifest.id == "automd-core-engines" && manifest.origin == PluginOrigin::BuiltIn));
+        assert!(snapshot
+            .manifests
+            .iter()
+            .any(|manifest| manifest.id == "automd-core-engines"
+                && manifest.origin == PluginOrigin::BuiltIn));
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -716,9 +851,18 @@ mod tests {
             r#"{"id":"demo-plugin","name":"Demo","version":"0.1.0","kind":"analysisModule","entrypoint":"entrypoint.py","capabilities":["run"],"warnings":[]}"#,
         )
         .expect("manifest");
-        let request = PluginImportRequest { source_path: source.display().to_string(), overwrite: false };
-        assert_eq!(import_plugin(&root, &request, &[]).expect("first import"), "demo-plugin");
-        assert!(matches!(import_plugin(&root, &request, &[]), Err(PluginRegistryError::Conflict(_))));
+        let request = PluginImportRequest {
+            source_path: source.display().to_string(),
+            overwrite: false,
+        };
+        assert_eq!(
+            import_plugin(&root, &request, &[]).expect("first import"),
+            "demo-plugin"
+        );
+        assert!(matches!(
+            import_plugin(&root, &request, &[]),
+            Err(PluginRegistryError::Conflict(_))
+        ));
 
         let builtin_source = temp_root("builtin-source");
         fs::create_dir_all(&builtin_source).expect("builtin source");
@@ -727,8 +871,14 @@ mod tests {
             r#"{"id":"automd-core-engines","name":"Bad","version":"0.1.0","kind":"analysisModule","entrypoint":"entrypoint.py","capabilities":[],"warnings":[]}"#,
         )
         .expect("builtin manifest");
-        let request = PluginImportRequest { source_path: builtin_source.display().to_string(), overwrite: true };
-        assert!(matches!(import_plugin(&root, &request, &[]), Err(PluginRegistryError::BuiltIn(_))));
+        let request = PluginImportRequest {
+            source_path: builtin_source.display().to_string(),
+            overwrite: true,
+        };
+        assert!(matches!(
+            import_plugin(&root, &request, &[]),
+            Err(PluginRegistryError::BuiltIn(_))
+        ));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(source);
         let _ = fs::remove_dir_all(builtin_source);
@@ -752,7 +902,12 @@ mod tests {
             capabilities: vec!["run".to_string()],
             license_policy: None,
             warnings: Vec::new(),
-            source_path: Some(plugin_dir.join("escape.automd-plugin.json").display().to_string()),
+            source_path: Some(
+                plugin_dir
+                    .join("escape.automd-plugin.json")
+                    .display()
+                    .to_string(),
+            ),
             supported_platforms: vec!["linux".to_string()],
             integration_targets: vec!["workflow".to_string()],
             actions: vec![PluginAction {
@@ -779,7 +934,10 @@ mod tests {
             confirmed_direct: false,
             context: json!({"projectPath": root.join("project").display().to_string()}),
         };
-        assert!(matches!(execute_plugin_action(&root, &manifest, &request, "run1"), Err(PluginRegistryError::Invalid(_))));
+        assert!(matches!(
+            execute_plugin_action(&root, &manifest, &request, "run1"),
+            Err(PluginRegistryError::Invalid(_))
+        ));
 
         let bad_output = json!({"artifacts":[{"path":"../outside.txt"}]});
         assert!(matches!(
@@ -795,7 +953,14 @@ mod tests {
         let plugin_dir = root.join("direct-plugin");
         fs::create_dir_all(&plugin_dir).expect("plugin dir");
         fs::write(plugin_dir.join("entrypoint.py"), "print('{}')").expect("entrypoint");
-        let mut manifest = builtin("direct-plugin", "Direct", PluginKind::AnalysisModule, "entrypoint.py", None, vec!["run"]);
+        let mut manifest = builtin(
+            "direct-plugin",
+            "Direct",
+            PluginKind::AnalysisModule,
+            "entrypoint.py",
+            None,
+            vec!["run"],
+        );
         manifest.origin = PluginOrigin::User;
         manifest.install_path = Some(plugin_dir.display().to_string());
         manifest.actions = vec![PluginAction {
@@ -813,7 +978,10 @@ mod tests {
             confirmed_direct: false,
             context: json!({}),
         };
-        assert!(matches!(execute_plugin_action(&root, &manifest, &request, "run1"), Err(PluginRegistryError::Invalid(_))));
+        assert!(matches!(
+            execute_plugin_action(&root, &manifest, &request, "run1"),
+            Err(PluginRegistryError::Invalid(_))
+        ));
         let _ = fs::remove_dir_all(root);
     }
 }

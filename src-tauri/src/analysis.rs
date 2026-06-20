@@ -12,7 +12,9 @@ pub enum AnalysisError {
     Io(#[from] std::io::Error),
 }
 
-pub fn parse_analysis_results(request: AnalysisParseRequest) -> Result<AnalysisParseResult, AnalysisError> {
+pub fn parse_analysis_results(
+    request: AnalysisParseRequest,
+) -> Result<AnalysisParseResult, AnalysisError> {
     let project_root = PathBuf::from(&request.project_path);
     if !project_root.exists() {
         return Err(AnalysisError::MissingProjectPath(request.project_path));
@@ -28,7 +30,8 @@ pub fn parse_analysis_results(request: AnalysisParseRequest) -> Result<AnalysisP
     let mut warnings = Vec::new();
     for relative in paths {
         let lower = relative.to_ascii_lowercase();
-        if !lower.starts_with("analysis/") || !(lower.ends_with(".xvg") || lower.ends_with(".csv")) {
+        if !lower.starts_with("analysis/") || !(lower.ends_with(".xvg") || lower.ends_with(".csv"))
+        {
             continue;
         }
         let path = safe_join(&project_root, &relative);
@@ -49,7 +52,11 @@ pub fn parse_analysis_results(request: AnalysisParseRequest) -> Result<AnalysisP
         }
     }
 
-    series.sort_by(|left, right| left.path.cmp(&right.path).then_with(|| left.label.cmp(&right.label)));
+    series.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.label.cmp(&right.label))
+    });
     Ok(AnalysisParseResult {
         project_path: project_root.display().to_string(),
         series,
@@ -67,7 +74,11 @@ fn discover_analysis_paths(project_root: &Path) -> Result<Vec<String>, AnalysisE
     Ok(paths)
 }
 
-fn visit_analysis_files(project_root: &Path, current: &Path, paths: &mut Vec<String>) -> Result<(), AnalysisError> {
+fn visit_analysis_files(
+    project_root: &Path,
+    current: &Path,
+    paths: &mut Vec<String>,
+) -> Result<(), AnalysisError> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
@@ -171,9 +182,19 @@ fn parse_csv(relative: &str, contents: &str, max_points: usize) -> Vec<AnalysisS
             } else {
                 Some(series(
                     relative,
-                    format!("{}: {}", label_from_path(relative), header.get(index + 1).cloned().unwrap_or_else(|| "value".to_string())),
+                    format!(
+                        "{}: {}",
+                        label_from_path(relative),
+                        header
+                            .get(index + 1)
+                            .cloned()
+                            .unwrap_or_else(|| "value".to_string())
+                    ),
                     header[0].clone(),
-                    header.get(index + 1).cloned().unwrap_or_else(|| "value".to_string()),
+                    header
+                        .get(index + 1)
+                        .cloned()
+                        .unwrap_or_else(|| "value".to_string()),
                     points,
                 ))
             }
@@ -181,7 +202,13 @@ fn parse_csv(relative: &str, contents: &str, max_points: usize) -> Vec<AnalysisS
         .collect()
 }
 
-fn series(relative: &str, label: String, x_label: String, y_label: String, points: Vec<AnalysisPoint>) -> AnalysisSeries {
+fn series(
+    relative: &str,
+    label: String,
+    x_label: String,
+    y_label: String,
+    points: Vec<AnalysisPoint>,
+) -> AnalysisSeries {
     let min_y = points.iter().map(|point| point.y).reduce(f64::min);
     let max_y = points.iter().map(|point| point.y).reduce(f64::max);
     let last_y = points.last().map(|point| point.y);
@@ -319,7 +346,10 @@ mod tests {
         .expect("analysis");
 
         assert_eq!(result.series.len(), 2);
-        assert!(result.series.iter().any(|series| series.y_label == "Temperature (K)"));
+        assert!(result
+            .series
+            .iter()
+            .any(|series| series.y_label == "Temperature (K)"));
         assert!(result.series.iter().all(|series| series.points.len() == 2));
 
         fs::remove_dir_all(root).expect("cleanup");

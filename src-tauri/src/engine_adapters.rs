@@ -17,38 +17,59 @@ pub enum EngineAdapterError {
     Serialization(#[from] serde_json::Error),
 }
 
-pub fn prepare_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+pub fn prepare_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     match request.plan.engine_id.as_str() {
         "gromacs" => prepare_gromacs_run_package(request),
         "openmm" => prepare_openmm_run_package(request),
         "ambertools" => prepare_ambertools_run_package(request),
         "namd" => prepare_namd_run_package(request),
-        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd" | "charmm"
-        | "desmond" | "acemd" => prepare_preview_run_package(request),
+        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd"
+        | "charmm" | "desmond" | "acemd" => prepare_preview_run_package(request),
         other => Err(EngineAdapterError::UnsupportedEngine(other.to_string())),
     }
 }
 
-pub fn parse_engine_log(request: EngineLogParseRequest) -> Result<EngineLogReport, EngineAdapterError> {
+pub fn parse_engine_log(
+    request: EngineLogParseRequest,
+) -> Result<EngineLogReport, EngineAdapterError> {
     match request.engine_id.as_str() {
         "gromacs" => Ok(parse_gromacs_log(&request.log_contents)),
         "openmm" => Ok(parse_openmm_log(&request.log_contents)),
         "ambertools" => Ok(parse_ambertools_log(&request.log_contents)),
         "namd" => Ok(parse_namd_log(&request.log_contents)),
-        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd" | "charmm"
-        | "desmond" | "acemd" => Ok(parse_generic_engine_log(&request.engine_id, &request.log_contents)),
+        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd"
+        | "charmm" | "desmond" | "acemd" => Ok(parse_generic_engine_log(
+            &request.engine_id,
+            &request.log_contents,
+        )),
         other => Err(EngineAdapterError::UnsupportedEngine(other.to_string())),
     }
 }
 
-pub fn classify_engine_failure(request: FailureAnalysisRequest) -> Result<FailureAnalysis, EngineAdapterError> {
+pub fn classify_engine_failure(
+    request: FailureAnalysisRequest,
+) -> Result<FailureAnalysis, EngineAdapterError> {
     match request.engine_id.as_str() {
-        "gromacs" => Ok(classify_gromacs_failure(&request.log_contents, request.exit_code)),
-        "openmm" => Ok(classify_openmm_failure(&request.log_contents, request.exit_code)),
-        "ambertools" => Ok(classify_ambertools_failure(&request.log_contents, request.exit_code)),
-        "namd" => Ok(classify_namd_failure(&request.log_contents, request.exit_code)),
-        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd" | "charmm"
-        | "desmond" | "acemd" => Ok(classify_generic_engine_failure(
+        "gromacs" => Ok(classify_gromacs_failure(
+            &request.log_contents,
+            request.exit_code,
+        )),
+        "openmm" => Ok(classify_openmm_failure(
+            &request.log_contents,
+            request.exit_code,
+        )),
+        "ambertools" => Ok(classify_ambertools_failure(
+            &request.log_contents,
+            request.exit_code,
+        )),
+        "namd" => Ok(classify_namd_failure(
+            &request.log_contents,
+            request.exit_code,
+        )),
+        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "amber_pmemd"
+        | "charmm" | "desmond" | "acemd" => Ok(classify_generic_engine_failure(
             &request.engine_id,
             &request.log_contents,
             request.exit_code,
@@ -65,7 +86,9 @@ pub fn discover_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan, En
     }
 }
 
-fn prepare_gromacs_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+fn prepare_gromacs_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     let plan = request.plan;
     let run_slug = format!("gromacs-{}", plan.id.simple());
     let run_directory = format!("runs/{run_slug}");
@@ -75,10 +98,15 @@ fn prepare_gromacs_run_package(request: EngineRunRequest) -> Result<EngineRunPac
         warnings.push("未设置输入结构路径；脚本使用 inputs/system.pdb 占位。".to_string());
     }
     if plan.system.has_ligand {
-        warnings.push("检测到配体体系；GROMACS 原生流程需要先由 CGenFF/GAFF2 等工具提供配体拓扑。".to_string());
+        warnings.push(
+            "检测到配体体系；GROMACS 原生流程需要先由 CGenFF/GAFF2 等工具提供配体拓扑。"
+                .to_string(),
+        );
     }
     if plan.system.has_membrane {
-        warnings.push("膜体系需要外部构建或 CHARMM-GUI 导入；当前 GROMACS 模板只覆盖水溶液体系。".to_string());
+        warnings.push(
+            "膜体系需要外部构建或 CHARMM-GUI 导入；当前 GROMACS 模板只覆盖水溶液体系。".to_string(),
+        );
     }
 
     let mut files = vec![
@@ -128,7 +156,9 @@ fn prepare_gromacs_run_package(request: EngineRunRequest) -> Result<EngineRunPac
     })
 }
 
-fn prepare_openmm_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+fn prepare_openmm_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     let plan = request.plan;
     let run_slug = format!("openmm-{}", plan.id.simple());
     let run_directory = format!("runs/{run_slug}");
@@ -141,7 +171,10 @@ fn prepare_openmm_run_package(request: EngineRunRequest) -> Result<EngineRunPack
         warnings.push("OpenMM 首版模板不自动完成配体参数化；请先提供兼容的拓扑/力场 XML 或改用 AmberTools/GROMACS 准备链。".to_string());
     }
     if plan.system.has_membrane {
-        warnings.push("膜体系需要外部构建并确认力场 XML；当前 OpenMM 模板只覆盖普通显式溶剂体系。".to_string());
+        warnings.push(
+            "膜体系需要外部构建并确认力场 XML；当前 OpenMM 模板只覆盖普通显式溶剂体系。"
+                .to_string(),
+        );
     }
 
     let commands = openmm_commands(&run_directory);
@@ -191,14 +224,18 @@ fn prepare_openmm_run_package(request: EngineRunRequest) -> Result<EngineRunPack
     })
 }
 
-fn prepare_ambertools_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+fn prepare_ambertools_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     let plan = request.plan;
     let run_slug = format!("ambertools-{}", plan.id.simple());
     let run_directory = format!("runs/{run_slug}");
     let mut warnings = Vec::new();
 
     if plan.system.source_path.is_none() {
-        warnings.push("未设置输入结构路径；AmberTools tleap 脚本使用 inputs/system.pdb 占位。".to_string());
+        warnings.push(
+            "未设置输入结构路径；AmberTools tleap 脚本使用 inputs/system.pdb 占位。".to_string(),
+        );
     }
     if plan.system.has_ligand {
         warnings.push("配体体系需要 antechamber/parmchk2 或用户提供 mol2/frcmod；当前模板预留加载位置但不自动参数化。".to_string());
@@ -284,13 +321,16 @@ fn prepare_ambertools_run_package(request: EngineRunRequest) -> Result<EngineRun
     })
 }
 
-fn prepare_namd_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+fn prepare_namd_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     let plan = request.plan;
     let run_slug = format!("namd-{}", plan.id.simple());
     let run_directory = format!("runs/{run_slug}");
     let warnings = vec![
         "NAMD 是用户自带许可/安装的外部模块；AutoMD 不下载、不分发 NAMD 二进制文件。".to_string(),
-        "当前模板需要用户提供 PSF/PDB 或从 CHARMM-GUI、VMD psfgen、AmberTools 等流程导入。".to_string(),
+        "当前模板需要用户提供 PSF/PDB 或从 CHARMM-GUI、VMD psfgen、AmberTools 等流程导入。"
+            .to_string(),
     ];
 
     let commands = namd_commands(&run_directory, plan.resources.cpu_threads);
@@ -350,7 +390,9 @@ struct PreviewRunSpec {
     scope_note: String,
 }
 
-fn prepare_preview_run_package(request: EngineRunRequest) -> Result<EngineRunPackage, EngineAdapterError> {
+fn prepare_preview_run_package(
+    request: EngineRunRequest,
+) -> Result<EngineRunPackage, EngineAdapterError> {
     let plan = request.plan;
     let run_slug = format!("{}-{}", plan.engine_id.replace('_', "-"), plan.id.simple());
     let run_directory = format!("runs/{run_slug}");
@@ -368,7 +410,10 @@ fn prepare_preview_run_package(request: EngineRunRequest) -> Result<EngineRunPac
             spec.display_name
         ));
     }
-    if matches!(plan.engine_id.as_str(), "amber_pmemd" | "charmm" | "desmond" | "acemd") {
+    if matches!(
+        plan.engine_id.as_str(),
+        "amber_pmemd" | "charmm" | "desmond" | "acemd"
+    ) {
         spec.warnings.push(format!(
             "{} 是用户自带授权的外部模块；AutoMD 不下载、不分发、不代管许可证。",
             spec.display_name
@@ -414,7 +459,10 @@ fn prepare_preview_run_package(request: EngineRunRequest) -> Result<EngineRunPac
     })
 }
 
-fn preview_run_spec(plan: &SimulationPlan, run_directory: &str) -> Result<PreviewRunSpec, EngineAdapterError> {
+fn preview_run_spec(
+    plan: &SimulationPlan,
+    run_directory: &str,
+) -> Result<PreviewRunSpec, EngineAdapterError> {
     match plan.engine_id.as_str() {
         "lammps" => Ok(lammps_preview_spec(plan, run_directory)),
         "cp2k" => Ok(cp2k_preview_spec(plan, run_directory)),
@@ -650,7 +698,11 @@ fn charmm_preview_spec(run_directory: &str) -> PreviewRunSpec {
         display_name: "CHARMM".to_string(),
         generated_slug: "charmm".to_string(),
         run_script_name: "run-charmm.sh".to_string(),
-        files: vec![preview_file("generated/charmm/automd.inp", "charmm", charmm_input(run_directory))],
+        files: vec![preview_file(
+            "generated/charmm/automd.inp",
+            "charmm",
+            charmm_input(run_directory),
+        )],
         commands: vec![
             preview_command(
                 "charmm-env",
@@ -662,10 +714,16 @@ fn charmm_preview_spec(run_directory: &str) -> PreviewRunSpec {
                 "charmm-run",
                 "运行用户授权 CHARMM",
                 format!("charmm -i generated/charmm/automd.inp -o {run_directory}/charmm.log"),
-                vec![format!("{run_directory}/charmm.log"), format!("{run_directory}/prod.dcd")],
+                vec![
+                    format!("{run_directory}/charmm.log"),
+                    format!("{run_directory}/prod.dcd"),
+                ],
             ),
         ],
-        warnings: vec!["CHARMM 是用户自带授权模块；输入脚本需要按本地 topology/parameter 文件编辑。".to_string()],
+        warnings: vec![
+            "CHARMM 是用户自带授权模块；输入脚本需要按本地 topology/parameter 文件编辑。"
+                .to_string(),
+        ],
         scope_note: "Licensed CHARMM entrypoint with native input script.".to_string(),
     }
 }
@@ -749,10 +807,10 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
     let padding = format_number(plan.solvent.padding_nm);
     let salt = format_number(plan.solvent.ionic_strength_molar);
     let threads = plan.resources.cpu_threads.max(1);
-    let gpu_suffix = if plan.resources.gpu_count > 0 {
-        " -nb gpu -pme gpu"
+    let mdrun_mode = if plan.resources.gpu_count > 0 {
+        "auto"
     } else {
-        ""
+        "cpu"
     };
 
     vec![
@@ -760,7 +818,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "prepare-pdb2gmx".to_string(),
             label: "生成 GROMACS 拓扑".to_string(),
             command: format!(
-                "gmx pdb2gmx -f {input_structure} -o generated/gromacs/processed.gro -p generated/gromacs/topol.top -ff {force_field} -water {water}"
+                "AUTOMD_GROMACS_FF=\"$(automd_pick_gromacs_force_field {force_field})\" && gmx pdb2gmx -ignh -f {input_structure} -o generated/gromacs/processed.gro -p generated/gromacs/topol.top -ff \"$AUTOMD_GROMACS_FF\" -water {water}"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec!["generated/gromacs/processed.gro".to_string(), "generated/gromacs/topol.top".to_string()],
@@ -801,7 +859,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "em".to_string(),
             label: "能量最小化".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/em.mdp -c generated/gromacs/ions.gro -p generated/gromacs/topol.top -o {run_directory}/em.tpr && gmx mdrun -deffnm {run_directory}/em -ntomp {threads}{gpu_suffix}"
+                "gmx grompp -f generated/gromacs/em.mdp -c generated/gromacs/ions.gro -p generated/gromacs/topol.top -o {run_directory}/em.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun cpu -deffnm {run_directory}/em -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec![format!("{run_directory}/em.gro"), format!("{run_directory}/em.log"), format!("{run_directory}/em.edr")],
@@ -810,7 +868,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "nvt".to_string(),
             label: "NVT 平衡".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/nvt.mdp -c {run_directory}/em.gro -r {run_directory}/em.gro -p generated/gromacs/topol.top -o {run_directory}/nvt.tpr && gmx mdrun -deffnm {run_directory}/nvt -ntomp {threads}{gpu_suffix}"
+                "gmx grompp -f generated/gromacs/nvt.mdp -c {run_directory}/em.gro -r {run_directory}/em.gro -p generated/gromacs/topol.top -o {run_directory}/nvt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/nvt -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec![format!("{run_directory}/nvt.gro"), format!("{run_directory}/nvt.cpt"), format!("{run_directory}/nvt.log")],
@@ -819,7 +877,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "npt".to_string(),
             label: "NPT 平衡".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/npt.mdp -c {run_directory}/nvt.gro -r {run_directory}/nvt.gro -t {run_directory}/nvt.cpt -p generated/gromacs/topol.top -o {run_directory}/npt.tpr && gmx mdrun -deffnm {run_directory}/npt -ntomp {threads}{gpu_suffix}"
+                "gmx grompp -f generated/gromacs/npt.mdp -c {run_directory}/nvt.gro -r {run_directory}/nvt.gro -t {run_directory}/nvt.cpt -p generated/gromacs/topol.top -o {run_directory}/npt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/npt -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec![format!("{run_directory}/npt.gro"), format!("{run_directory}/npt.cpt"), format!("{run_directory}/npt.log")],
@@ -828,7 +886,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "production".to_string(),
             label: "生产模拟".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/md.mdp -c {run_directory}/npt.gro -t {run_directory}/npt.cpt -p generated/gromacs/topol.top -o {run_directory}/md.tpr && gmx mdrun -deffnm {run_directory}/md -cpi {run_directory}/md.cpt -ntomp {threads}{gpu_suffix}"
+                "gmx grompp -f generated/gromacs/md.mdp -c {run_directory}/npt.gro -t {run_directory}/npt.cpt -p generated/gromacs/topol.top -o {run_directory}/md.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/md -cpi {run_directory}/md.cpt -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec![format!("{run_directory}/md.xtc"), format!("{run_directory}/md.cpt"), format!("{run_directory}/md.edr"), format!("{run_directory}/md.log")],
@@ -837,7 +895,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             stage_id: "analysis".to_string(),
             label: "基础分析".to_string(),
             command: format!(
-                "printf 'Backbone\\nSystem\\n' | gmx rms -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rmsd.xvg && printf 'Protein\\n' | gmx gyrate -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rg.xvg"
+                "printf 'System\\nSystem\\n' | gmx rms -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rmsd.xvg && printf 'System\\n' | gmx gyrate -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rg.xvg"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec!["analysis/rmsd.xvg".to_string(), "analysis/rg.xvg".to_string()],
@@ -973,7 +1031,10 @@ fn ambertools_tleap(plan: &SimulationPlan) -> String {
     let water = amber_water_model(&plan.force_field.water_model);
     let padding = format_number(plan.solvent.padding_nm);
     let force_field = amber_force_field(&plan.force_field.protein);
-    let solvate_command = if matches!(plan.solvent.box_shape.as_str(), "octahedron" | "dodecahedron") {
+    let solvate_command = if matches!(
+        plan.solvent.box_shape.as_str(),
+        "octahedron" | "dodecahedron"
+    ) {
         "solvateoct"
     } else {
         "solvatebox"
@@ -1098,7 +1159,10 @@ fn namd_conf(plan: &SimulationPlan, run_directory: &str) -> String {
     let duration_ns = stage_parameter(plan, "production", "durationNs")
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(1.0);
-    let steps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs.parse::<f32>().unwrap_or(2.0));
+    let steps = nsteps_from_ps(
+        duration_ns * 1000.0,
+        timestep_fs.parse::<f32>().unwrap_or(2.0),
+    );
     format!(
         r#"# AutoMD generated NAMD configuration.
 # User must provide compatible PSF/PDB files and satisfy NAMD license terms.
@@ -1181,7 +1245,11 @@ echo "[AutoMD] {display_name} workflow completed"
         name = plan.name,
         plan_id = plan.id,
         generated_slug = spec.generated_slug,
-        run_directory = format!("runs/{}-{}", plan.engine_id.replace('_', "-"), plan.id.simple()),
+        run_directory = format!(
+            "runs/{}-{}",
+            plan.engine_id.replace('_', "-"),
+            plan.id.simple()
+        ),
     )
 }
 
@@ -1233,7 +1301,10 @@ fn lammps_input(plan: &SimulationPlan, run_directory: &str) -> String {
     let duration_ns = stage_parameter(plan, "production", "durationNs")
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(1.0);
-    let nsteps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs.parse::<f32>().unwrap_or(1.0));
+    let nsteps = nsteps_from_ps(
+        duration_ns * 1000.0,
+        timestep_fs.parse::<f32>().unwrap_or(1.0),
+    );
     let temperature = stage_parameter(plan, "nvt", "temperatureK").unwrap_or("300");
     format!(
         r#"# AutoMD generated LAMMPS template.
@@ -1269,7 +1340,10 @@ fn cp2k_input(plan: &SimulationPlan, run_directory: &str) -> String {
     let duration_ns = stage_parameter(plan, "production", "durationNs")
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(0.001);
-    let nsteps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs.parse::<f32>().unwrap_or(1.0));
+    let nsteps = nsteps_from_ps(
+        duration_ns * 1000.0,
+        timestep_fs.parse::<f32>().unwrap_or(1.0),
+    );
     let temperature = stage_parameter(plan, "nvt", "temperatureK").unwrap_or("300");
     format!(
         r#"# AutoMD generated CP2K template. Review basis, potential, cell, and KIND blocks.
@@ -1325,7 +1399,10 @@ fn genesis_input(plan: &SimulationPlan, run_directory: &str) -> String {
     let duration_ns = stage_parameter(plan, "production", "durationNs")
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(1.0);
-    let nsteps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs.parse::<f32>().unwrap_or(2.0));
+    let nsteps = nsteps_from_ps(
+        duration_ns * 1000.0,
+        timestep_fs.parse::<f32>().unwrap_or(2.0),
+    );
     let temperature = stage_parameter(plan, "nvt", "temperatureK").unwrap_or("300");
     format!(
         r#"[INPUT]
@@ -1494,8 +1571,8 @@ fn openmm_runner_py(plan: &SimulationPlan, run_directory: &str) -> String {
         .source_path
         .as_deref()
         .unwrap_or("inputs/system.pdb");
-    let input_structure_json =
-        serde_json::to_string(input_structure).unwrap_or_else(|_| "\"inputs/system.pdb\"".to_string());
+    let input_structure_json = serde_json::to_string(input_structure)
+        .unwrap_or_else(|_| "\"inputs/system.pdb\"".to_string());
     let force_fields = serde_json::to_string(&openmm_force_field_files(plan))
         .unwrap_or_else(|_| "[\"amber14-all.xml\",\"amber14/tip3pfb.xml\"]".to_string());
 
@@ -1518,6 +1595,11 @@ def stage_parameter(plan: dict, stage_id: str, key: str, fallback: str) -> str:
     return fallback
 
 
+def stage_bool(plan: dict, stage_id: str, key: str, fallback: bool) -> bool:
+    value = stage_parameter(plan, stage_id, key, "true" if fallback else "false").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
 def resolve_project_root(plan_path: Path) -> Path:
     for parent in plan_path.parents:
         if parent.name == "generated":
@@ -1538,6 +1620,7 @@ def main() -> int:
             DCDReporter,
             ForceField,
             HBonds,
+            Modeller,
             PDBFile,
             PME,
             Simulation,
@@ -1585,8 +1668,16 @@ def main() -> int:
     print(f"OpenMM force fields: {', '.join(DEFAULT_FORCE_FIELDS)}", flush=True)
     pdb = PDBFile(str(source))
     forcefield = ForceField(*DEFAULT_FORCE_FIELDS)
+    topology = pdb.topology
+    positions = pdb.positions
+    if stage_bool(plan, "prepare", "addHydrogens", True):
+        print("Stage 0/4: adding hydrogens with OpenMM Modeller", flush=True)
+        modeller = Modeller(topology, positions)
+        modeller.addHydrogens(forcefield)
+        topology = modeller.topology
+        positions = modeller.positions
     system = forcefield.createSystem(
-        pdb.topology,
+        topology,
         nonbondedMethod=PME,
         nonbondedCutoff=1 * nanometer,
         constraints=HBonds,
@@ -1594,7 +1685,7 @@ def main() -> int:
     integrator = LangevinMiddleIntegrator(temperature * kelvin, 1 / picosecond, timestep_fs * 0.001 * picoseconds)
     if random_seed > 0:
         integrator.setRandomNumberSeed(random_seed)
-    simulation = Simulation(pdb.topology, system, integrator)
+    simulation = Simulation(topology, system, integrator)
 
     if args.resume:
         checkpoint_path = Path(args.resume)
@@ -1604,13 +1695,26 @@ def main() -> int:
             simulation.context.loadCheckpoint(handle.read())
         print(f"Loaded checkpoint: {checkpoint_path}", flush=True)
     else:
-        simulation.context.setPositions(pdb.positions)
+        simulation.context.setPositions(positions)
         if random_seed > 0:
             simulation.context.setVelocitiesToTemperature(temperature * kelvin, random_seed)
         print("Stage 1/4: energy minimization", flush=True)
         simulation.minimizeEnergy()
 
     state_path = analysis_dir / "openmm_state.csv"
+    fixed_outputs = [
+        state_path,
+        trajectories_dir / "openmm.dcd",
+        trajectories_dir / "openmm-final.pdb",
+        checkpoints_dir / "openmm.chk",
+        out_dir / "openmm.chk",
+    ]
+    for output_path in fixed_outputs:
+        try:
+            output_path.unlink()
+        except FileNotFoundError:
+            pass
+
     state_handle = state_path.open("w", encoding="utf-8")
     try:
         simulation.reporters.append(StateDataReporter(
@@ -1674,13 +1778,41 @@ echo "AutoMD OpenMM run: {name}"
 echo "Plan id: {plan_id}"
 mkdir -p generated/openmm runs analysis reports checkpoints trajectories
 
+{prelude}
+
 {body}
 
 echo "[AutoMD] OpenMM workflow completed"
 "#,
         name = plan.name,
-        plan_id = plan.id
+        plan_id = plan.id,
+        prelude = openmm_shell_prelude()
     )
+}
+
+fn openmm_shell_prelude() -> &'static str {
+    r#"if [ -n "${AUTOMD_OPENMM_PYTHON:-}" ] && [ -x "$AUTOMD_OPENMM_PYTHON" ]; then
+  :
+elif [ -x "$HOME/.automd/engines/openmm/bin/python" ]; then
+  AUTOMD_OPENMM_PYTHON="$HOME/.automd/engines/openmm/bin/python"
+elif [ -x "$HOME/.automd/engines/_tools/automd-science/bin/python" ]; then
+  AUTOMD_OPENMM_PYTHON="$HOME/.automd/engines/_tools/automd-science/bin/python"
+elif [ -x "$HOME/Library/Application Support/com.noir.automd/engines/openmm/bin/python" ]; then
+  AUTOMD_OPENMM_PYTHON="$HOME/Library/Application Support/com.noir.automd/engines/openmm/bin/python"
+elif [ -x "$HOME/Library/Application Support/com.noir.automd/engines/_tools/automd-science/bin/python" ]; then
+  AUTOMD_OPENMM_PYTHON="$HOME/Library/Application Support/com.noir.automd/engines/_tools/automd-science/bin/python"
+elif [ -x "$HOME/.local/share/com.noir.automd/engines/_tools/automd-science/bin/python" ]; then
+  AUTOMD_OPENMM_PYTHON="$HOME/.local/share/com.noir.automd/engines/_tools/automd-science/bin/python"
+else
+  AUTOMD_OPENMM_PYTHON="$(command -v python3 || command -v python || true)"
+fi
+if [ -z "${AUTOMD_OPENMM_PYTHON:-}" ]; then
+  echo "[AutoMD] Python/OpenMM environment not found. Register or install OpenMM on the Engines page." >&2
+  exit 127
+fi
+python() { "$AUTOMD_OPENMM_PYTHON" "$@"; }
+echo "[AutoMD] Using Python/OpenMM: $AUTOMD_OPENMM_PYTHON"
+"#
 }
 
 fn openmm_run_readme(plan: &SimulationPlan, warnings: &[String]) -> String {
@@ -1889,7 +2021,11 @@ pbc             = xyz
     )
 }
 
-fn gromacs_equilibration_mdp(plan: &SimulationPlan, stage_id: &str, pressure_coupling: bool) -> String {
+fn gromacs_equilibration_mdp(
+    plan: &SimulationPlan,
+    stage_id: &str,
+    pressure_coupling: bool,
+) -> String {
     let duration_ps = stage_parameter(plan, stage_id, "durationPs")
         .and_then(|value| value.parse::<f32>().ok())
         .unwrap_or(if stage_id == "nvt" { 100.0 } else { 1000.0 });
@@ -1916,7 +2052,6 @@ compressibility = 4.5e-5"#
 
     format!(
         r#"; AutoMD generated GROMACS MDP: {stage_id}
-define          = -DPOSRES
 integrator      = md
 dt              = {dt}
 nsteps          = {nsteps}
@@ -1932,9 +2067,9 @@ rcoulomb        = 1.0
 rvdw            = 1.0
 coulombtype     = PME
 tcoupl          = V-rescale
-tc-grps         = Protein Non-Protein
-tau_t           = 0.1 0.1
-ref_t           = {temperature} {temperature}
+tc-grps         = System
+tau_t           = 0.1
+ref_t           = {temperature}
 {pcoupl}
 gen_vel         = {gen_vel}
 gen_temp        = {temperature}
@@ -1982,9 +2117,9 @@ rcoulomb        = 1.0
 rvdw            = 1.0
 coulombtype     = PME
 tcoupl          = V-rescale
-tc-grps         = Protein Non-Protein
-tau_t           = 0.1 0.1
-ref_t           = {temperature} {temperature}
+tc-grps         = System
+tau_t           = 0.1
+ref_t           = {temperature}
 pcoupl          = C-rescale
 pcoupltype      = isotropic
 tau_p           = 5.0
@@ -2019,13 +2154,144 @@ echo "AutoMD GROMACS run: {name}"
 echo "Plan id: {plan_id}"
 mkdir -p generated/gromacs runs analysis reports checkpoints trajectories
 
+{prelude}
+
 {body}
 
 echo "[AutoMD] GROMACS workflow completed"
 "#,
         name = plan.name,
-        plan_id = plan.id
+        plan_id = plan.id,
+        prelude = gromacs_shell_prelude()
     )
+}
+
+fn gromacs_shell_prelude() -> &'static str {
+    r#"if command -v gmx >/dev/null 2>&1; then
+  AUTOMD_GMX_BIN="$(command -v gmx)"
+elif [ -x "$HOME/Library/Application Support/com.noir.automd/engines/gromacs/bin/gmx" ]; then
+  AUTOMD_GMX_BIN="$HOME/Library/Application Support/com.noir.automd/engines/gromacs/bin/gmx"
+elif [ -x "$HOME/.automd/engines/gromacs/bin/gmx" ]; then
+  AUTOMD_GMX_BIN="$HOME/.automd/engines/gromacs/bin/gmx"
+else
+  echo "[AutoMD] GROMACS executable not found. Register or install GROMACS on the Engines page." >&2
+  exit 127
+fi
+gmx() { "$AUTOMD_GMX_BIN" "$@"; }
+echo "[AutoMD] Using GROMACS: $AUTOMD_GMX_BIN"
+AUTOMD_GROMACS_GPU_SUFFIX=""
+AUTOMD_GROMACS_GPU_SUFFIX_READY=0
+automd_gromacs_gpu_suffix() {
+  if [ "${AUTOMD_GROMACS_GPU_SUFFIX_READY:-0}" = "1" ]; then
+    printf '%s' "$AUTOMD_GROMACS_GPU_SUFFIX"
+    return 0
+  fi
+  AUTOMD_GROMACS_GPU_SUFFIX_READY=1
+  AUTOMD_GROMACS_GPU_SUFFIX=""
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "[AutoMD] GROMACS GPU was requested, but no NVIDIA GPU was detected; running GROMACS CPU mode." >&2
+    printf '%s' "$AUTOMD_GROMACS_GPU_SUFFIX"
+    return 0
+  fi
+  local gpu_list
+  gpu_list="$(nvidia-smi -L 2>/dev/null || true)"
+  if ! printf '%s\n' "$gpu_list" | grep -Eq '^GPU[[:space:]]+[0-9]+'; then
+    echo "[AutoMD] GROMACS GPU was requested, but nvidia-smi did not list a usable GPU; running GROMACS CPU mode." >&2
+    printf '%s' "$AUTOMD_GROMACS_GPU_SUFFIX"
+    return 0
+  fi
+  local version
+  version="$(gmx mdrun -version 2>/dev/null || true)"
+  if printf '%s\n' "$version" | grep -Eiq 'GPU support[[:space:]]*:[[:space:]]*(CUDA|SYCL|OpenCL|HIP)'; then
+    AUTOMD_GROMACS_GPU_SUFFIX=" -nb gpu -pme gpu"
+  else
+    echo "[AutoMD] GROMACS GPU was requested, but this gmx build did not report CUDA/SYCL/OpenCL/HIP support; running GROMACS CPU mode." >&2
+  fi
+  printf '%s' "$AUTOMD_GROMACS_GPU_SUFFIX"
+}
+automd_gromacs_mdrun() {
+  local mode="${1:-cpu}"
+  shift || true
+  if [ "$mode" != "auto" ]; then
+    gmx mdrun "$@"
+    return $?
+  fi
+
+  local suffix
+  suffix="$(automd_gromacs_gpu_suffix)"
+  if [ -z "$suffix" ]; then
+    gmx mdrun "$@"
+    return $?
+  fi
+
+  local args=("$@")
+  local deffnm=""
+  local i
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-deffnm" ] && [ $((i + 1)) -lt ${#args[@]} ]; then
+      deffnm="${args[$((i + 1))]}"
+      break
+    fi
+  done
+
+  echo "[AutoMD] Trying GROMACS GPU mode$suffix" >&2
+  set +e
+  gmx mdrun "${args[@]}" -nb gpu -pme gpu
+  local status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ -n "$deffnm" ] && [ -f "$deffnm.log" ] && grep -Eiq 'no GPU|Cannot run .*GPU|GPU.*not.*detected|No compatible GPU' "$deffnm.log"; then
+    echo "[AutoMD] GROMACS GPU mode failed because no compatible GPU was available to mdrun; retrying CPU mode." >&2
+    rm -f "$deffnm.log" "$deffnm.edr" "$deffnm.trr" "$deffnm.xtc" "$deffnm.cpt" "$deffnm.gro"
+    gmx mdrun "${args[@]}"
+    return $?
+  fi
+
+  return "$status"
+}
+automd_gromacs_top_dirs() {
+  [ -n "${GMXLIB:-}" ] && printf '%s\n' "$GMXLIB"
+  [ -n "${CONDA_PREFIX:-}" ] && printf '%s\n' "$CONDA_PREFIX/share/gromacs/top"
+  local bin_dir
+  bin_dir="$(dirname "$AUTOMD_GMX_BIN")"
+  printf '%s\n' \
+    "$bin_dir/../share/gromacs/top" \
+    "$bin_dir/../../share/gromacs/top" \
+    "$HOME/.automd/engines/gromacs/share/gromacs/top" \
+    "$HOME/Library/Application Support/com.noir.automd/engines/gromacs/share/gromacs/top" \
+    "/usr/local/gromacs/share/gromacs/top" \
+    "/usr/share/gromacs/top"
+}
+automd_gromacs_force_field_exists() {
+  local ff="$1"
+  local top_dir
+  while IFS= read -r top_dir; do
+    [ -n "$top_dir" ] || continue
+    [ -d "$top_dir/$ff.ff" ] && return 0
+  done <<EOF_AUTOMD_GROMACS_TOP_DIRS
+$(automd_gromacs_top_dirs)
+EOF_AUTOMD_GROMACS_TOP_DIRS
+  return 1
+}
+automd_pick_gromacs_force_field() {
+  local preferred="$1"
+  local ff
+  for ff in "$preferred" amber99sb-ildn charmm27 oplsaa amber99sb amber03; do
+    if automd_gromacs_force_field_exists "$ff"; then
+      if [ "$ff" != "$preferred" ]; then
+        echo "[AutoMD] Preferred GROMACS force field '$preferred' is not installed; using '$ff'." >&2
+      fi
+      printf '%s\n' "$ff"
+      return 0
+    fi
+  done
+  echo "[AutoMD] Could not confirm installed GROMACS force fields; trying '$preferred'." >&2
+  printf '%s\n' "$preferred"
+}
+"#
 }
 
 fn gromacs_run_readme(plan: &SimulationPlan, warnings: &[String]) -> String {
@@ -2073,7 +2339,11 @@ fn parse_gromacs_log(log_contents: &str) -> EngineLogReport {
 
         if let Some(value) = parse_ns_per_day(trimmed) {
             ns_per_day = Some(value);
-            events.push(event(EngineLogEventKind::Performance, line_number, format!("{value:.3} ns/day")));
+            events.push(event(
+                EngineLogEventKind::Performance,
+                line_number,
+                format!("{value:.3} ns/day"),
+            ));
         }
 
         if let Some((step, total)) = parse_step_progress(trimmed) {
@@ -2081,19 +2351,37 @@ fn parse_gromacs_log(log_contents: &str) -> EngineLogReport {
             if let Some(total) = total.filter(|value| *value > 0) {
                 progress_percent = Some((step as f32 / total as f32 * 100.0).min(100.0));
             }
-            events.push(event(EngineLogEventKind::Progress, line_number, trimmed.to_string()));
+            events.push(event(
+                EngineLogEventKind::Progress,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
 
         let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("writing checkpoint") || lower.contains("checkpoint") && lower.contains(".cpt") {
-            events.push(event(EngineLogEventKind::Checkpoint, line_number, trimmed.to_string()));
+        if lower.contains("writing checkpoint")
+            || lower.contains("checkpoint") && lower.contains(".cpt")
+        {
+            events.push(event(
+                EngineLogEventKind::Checkpoint,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
         if trimmed.contains("WARNING") || lower.starts_with("warning") {
-            events.push(event(EngineLogEventKind::Warning, line_number, trimmed.to_string()));
+            events.push(event(
+                EngineLogEventKind::Warning,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
         if lower.contains("fatal error") || lower.contains("error in user input") {
             fatal_error = Some(trimmed.to_string());
-            events.push(event(EngineLogEventKind::Error, line_number, trimmed.to_string()));
+            events.push(event(
+                EngineLogEventKind::Error,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
     }
 
@@ -2125,6 +2413,20 @@ fn parse_openmm_log(log_contents: &str) -> EngineLogReport {
         if lower.contains("loaded checkpoint") {
             report.events.push(event(
                 EngineLogEventKind::Checkpoint,
+                index + 1,
+                trimmed.to_string(),
+            ));
+        }
+        if lower.contains("traceback")
+            || lower.starts_with("valueerror:")
+            || lower.starts_with("runtimeerror:")
+            || lower.starts_with("exception:")
+            || lower.contains("no template found for residue")
+            || lower.contains("openmm python module not found")
+        {
+            report.fatal_error = Some(trimmed.to_string());
+            report.events.push(event(
+                EngineLogEventKind::Error,
                 index + 1,
                 trimmed.to_string(),
             ));
@@ -2252,25 +2554,44 @@ fn parse_generic_engine_log(engine_id: &str, log_contents: &str) -> EngineLogRep
         }
         let line_number = index + 1;
         let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("workflow completed") || lower.contains("normal termination") || lower.contains("finished") {
+        if lower.contains("workflow completed")
+            || lower.contains("normal termination")
+            || lower.contains("finished")
+        {
             report.progress_percent = Some(100.0);
-            report.events.push(event(EngineLogEventKind::Info, line_number, trimmed.to_string()));
+            report.events.push(event(
+                EngineLogEventKind::Info,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
-        if contains_any(&lower, &["restart", "checkpoint", "write_restart", "revcon"]) {
-            report
-                .events
-                .push(event(EngineLogEventKind::Checkpoint, line_number, trimmed.to_string()));
+        if contains_any(
+            &lower,
+            &["restart", "checkpoint", "write_restart", "revcon"],
+        ) {
+            report.events.push(event(
+                EngineLogEventKind::Checkpoint,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
-        if contains_any(&lower, &["fatal", "error:", "segmentation fault", "traceback"]) {
+        if contains_any(
+            &lower,
+            &["fatal", "error:", "segmentation fault", "traceback"],
+        ) {
             report.fatal_error = Some(trimmed.to_string());
-            report
-                .events
-                .push(event(EngineLogEventKind::Error, line_number, trimmed.to_string()));
+            report.events.push(event(
+                EngineLogEventKind::Error,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
         if contains_any(&lower, &["warning", "caution"]) {
-            report
-                .events
-                .push(event(EngineLogEventKind::Warning, line_number, trimmed.to_string()));
+            report.events.push(event(
+                EngineLogEventKind::Warning,
+                line_number,
+                trimmed.to_string(),
+            ));
         }
     }
 
@@ -2279,27 +2600,98 @@ fn parse_generic_engine_log(engine_id: &str, log_contents: &str) -> EngineLogRep
 
 fn classify_gromacs_failure(log_contents: &str, exit_code: Option<i32>) -> FailureAnalysis {
     let lower = log_contents.to_ascii_lowercase();
-    let category = if contains_any(&lower, &["gmx: command not found", "gmx_mpi: command not found", "no such file or directory: gmx", "failed to spawn process"]) {
+    let category = if contains_any(
+        &lower,
+        &[
+            "gmx: command not found",
+            "gmx_mpi: command not found",
+            "no such file or directory: gmx",
+            "failed to spawn process",
+        ],
+    ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["permission denied", "no space left on device", "cannot allocate memory", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "no space left on device",
+            "cannot allocate memory",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
-    } else if contains_any(&lower, &["cannot run short-ranged nonbonded interactions on a gpu", "no compatible gpus", "cuda error", "opencl error", "gpu-aware mpi"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "cannot run short-ranged nonbonded interactions on a gpu",
+            "no compatible gpus",
+            "cuda error",
+            "opencl error",
+            "gpu-aware mpi",
+        ],
+    ) {
         FailureCategory::GpuUnavailable
-    } else if contains_any(&lower, &["mpi_abort", "mpi error", "rank ", "pmi", "pmix", "orted"]) {
+    } else if contains_any(
+        &lower,
+        &["mpi_abort", "mpi error", "rank ", "pmi", "pmix", "orted"],
+    ) {
         FailureCategory::MpiFailure
-    } else if contains_any(&lower, &["does not match topology", "number of coordinates", "coordinate file", "molecule type"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "does not match topology",
+            "number of coordinates",
+            "coordinate file",
+            "molecule type",
+        ],
+    ) {
         FailureCategory::ParameterMismatch
-    } else if contains_any(&lower, &["atomtype", "no default", "no such moleculetype", "residue type", "force field"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "atomtype",
+            "no default",
+            "no such moleculetype",
+            "residue type",
+            "force field",
+        ],
+    ) {
         if contains_any(&lower, &["force field", "atomtype", "no default"]) {
             FailureCategory::MissingForceField
         } else {
             FailureCategory::MissingTopology
         }
-    } else if contains_any(&lower, &["file input/output error", "no such file", "cannot open file", "required option was not provided", ".tpr", ".gro", ".pdb", ".top"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "file input/output error",
+            "no such file",
+            "cannot open file",
+            "required option was not provided",
+            ".tpr",
+            ".gro",
+            ".pdb",
+            ".top",
+        ],
+    ) {
         FailureCategory::MissingInput
-    } else if contains_any(&lower, &["lincs warning", "blowing up", "not finite", "nan", "inf", "pressure scaling more than", "too many warnings"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "lincs warning",
+            "blowing up",
+            "not finite",
+            "nan",
+            "inf",
+            "pressure scaling more than",
+            "too many warnings",
+        ],
+    ) {
         FailureCategory::NumericalInstability
-    } else if contains_any(&lower, &["slurm", "sbatch", "scancel", "pbs", "qsub", "lsf", "bsub"]) {
+    } else if contains_any(
+        &lower,
+        &["slurm", "sbatch", "scancel", "pbs", "qsub", "lsf", "bsub"],
+    ) {
         FailureCategory::SchedulerFailure
     } else {
         FailureCategory::Unknown
@@ -2333,7 +2725,10 @@ fn classify_openmm_failure(log_contents: &str, exit_code: Option<i32>) -> Failur
         ],
     ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["input file not found", "no such file", "cannot open file"]) {
+    } else if contains_any(
+        &lower,
+        &["input file not found", "no such file", "cannot open file"],
+    ) {
         FailureCategory::MissingInput
     } else if contains_any(
         &lower,
@@ -2348,9 +2743,24 @@ fn classify_openmm_failure(log_contents: &str, exit_code: Option<i32>) -> Failur
         FailureCategory::MissingForceField
     } else if contains_any(&lower, &["cuda", "opencl", "platform", "gpu"]) {
         FailureCategory::GpuUnavailable
-    } else if contains_any(&lower, &["nan", "not finite", "particle coordinate is nan", "energy is nan"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "nan",
+            "not finite",
+            "particle coordinate is nan",
+            "energy is nan",
+        ],
+    ) {
         FailureCategory::NumericalInstability
-    } else if contains_any(&lower, &["permission denied", "no space left on device", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "no space left on device",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
     } else {
         FailureCategory::Unknown
@@ -2386,9 +2796,26 @@ fn classify_ambertools_failure(log_contents: &str, exit_code: Option<i32>) -> Fa
         ],
     ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["permission denied", "no space left on device", "cannot allocate memory", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "no space left on device",
+            "cannot allocate memory",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
-    } else if contains_any(&lower, &["could not open file", "no such file", "cannot open", "does not exist", "not found: inputs/"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "could not open file",
+            "no such file",
+            "cannot open",
+            "does not exist",
+            "not found: inputs/",
+        ],
+    ) {
         FailureCategory::MissingInput
     } else if contains_any(
         &lower,
@@ -2405,9 +2832,22 @@ fn classify_ambertools_failure(log_contents: &str, exit_code: Option<i32>) -> Fa
         ],
     ) {
         FailureCategory::MissingForceField
-    } else if contains_any(&lower, &["sander bomb", "vlimit exceeded", "nan", "not finite", "ewald bomb", "shake failure"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "sander bomb",
+            "vlimit exceeded",
+            "nan",
+            "not finite",
+            "ewald bomb",
+            "shake failure",
+        ],
+    ) {
         FailureCategory::NumericalInstability
-    } else if contains_any(&lower, &["prmtop", "inpcrd", "rst7", "coordinate", "topology"]) {
+    } else if contains_any(
+        &lower,
+        &["prmtop", "inpcrd", "rst7", "coordinate", "topology"],
+    ) {
         FailureCategory::MissingTopology
     } else {
         FailureCategory::Unknown
@@ -2442,17 +2882,52 @@ fn classify_namd_failure(log_contents: &str, exit_code: Option<i32>) -> FailureA
         ],
     ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["license", "registration", "permission to use namd"]) {
+    } else if contains_any(
+        &lower,
+        &["license", "registration", "permission to use namd"],
+    ) {
         FailureCategory::LicenseRequired
-    } else if contains_any(&lower, &["unable to open", "no such file", "could not open", "cannot open"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "unable to open",
+            "no such file",
+            "could not open",
+            "cannot open",
+        ],
+    ) {
         FailureCategory::MissingInput
-    } else if contains_any(&lower, &["unable to find", "parameters", "unknown atom", "psf", "parameter file"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "unable to find",
+            "parameters",
+            "unknown atom",
+            "psf",
+            "parameter file",
+        ],
+    ) {
         FailureCategory::MissingForceField
     } else if contains_any(&lower, &["cuda", "gpu", "hip", "rocm"]) {
         FailureCategory::GpuUnavailable
-    } else if contains_any(&lower, &["nan", "not finite", "atoms moving too fast", "bad global exclusion count"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "nan",
+            "not finite",
+            "atoms moving too fast",
+            "bad global exclusion count",
+        ],
+    ) {
         FailureCategory::NumericalInstability
-    } else if contains_any(&lower, &["permission denied", "no space left on device", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "no space left on device",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
     } else {
         FailureCategory::Unknown
@@ -2474,7 +2949,11 @@ fn classify_namd_failure(log_contents: &str, exit_code: Option<i32>) -> FailureA
     }
 }
 
-fn classify_generic_engine_failure(engine_id: &str, log_contents: &str, exit_code: Option<i32>) -> FailureAnalysis {
+fn classify_generic_engine_failure(
+    engine_id: &str,
+    log_contents: &str,
+    exit_code: Option<i32>,
+) -> FailureAnalysis {
     let lower = log_contents.to_ascii_lowercase();
     let category = if contains_any(
         &lower,
@@ -2486,9 +2965,21 @@ fn classify_generic_engine_failure(engine_id: &str, log_contents: &str, exit_cod
         ],
     ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["license", "licensed", "authorization", "schrodinger"]) {
+    } else if contains_any(
+        &lower,
+        &["license", "licensed", "authorization", "schrodinger"],
+    ) {
         FailureCategory::LicenseRequired
-    } else if contains_any(&lower, &["cannot open", "could not open", "unable to open", "missing input", "file not found"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "cannot open",
+            "could not open",
+            "unable to open",
+            "missing input",
+            "file not found",
+        ],
+    ) {
         FailureCategory::MissingInput
     } else if contains_any(
         &lower,
@@ -2509,9 +3000,19 @@ fn classify_generic_engine_failure(engine_id: &str, log_contents: &str, exit_cod
         FailureCategory::GpuUnavailable
     } else if contains_any(&lower, &["mpi", "mpirun", "rank ", "pmi", "pmix"]) {
         FailureCategory::MpiFailure
-    } else if contains_any(&lower, &["nan", "not finite", "blow", "shake", "lincs", "bad contact"]) {
+    } else if contains_any(
+        &lower,
+        &["nan", "not finite", "blow", "shake", "lincs", "bad contact"],
+    ) {
         FailureCategory::NumericalInstability
-    } else if contains_any(&lower, &["permission denied", "no space left on device", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "no space left on device",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
     } else {
         FailureCategory::Unknown
@@ -2533,7 +3034,9 @@ fn classify_generic_engine_failure(engine_id: &str, log_contents: &str, exit_cod
     }
 }
 
-fn discover_gromacs_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan, EngineAdapterError> {
+fn discover_gromacs_resume_plan(
+    request: ResumePlanRequest,
+) -> Result<ResumePlan, EngineAdapterError> {
     let project_root = PathBuf::from(&request.project_path);
     let run_root = safe_join(&project_root, &request.run_directory);
     let checkpoint_root = safe_join(&project_root, "checkpoints");
@@ -2545,7 +3048,10 @@ fn discover_gromacs_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan
         if root.exists() {
             collect_checkpoint_candidates(&project_root, root, &mut seen, &mut candidates)?;
         } else if root == &run_root {
-            warnings.push(format!("Run directory not found yet: {}", request.run_directory));
+            warnings.push(format!(
+                "Run directory not found yet: {}",
+                request.run_directory
+            ));
         }
     }
 
@@ -2574,7 +3080,9 @@ fn discover_gromacs_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan
     })
 }
 
-fn discover_openmm_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan, EngineAdapterError> {
+fn discover_openmm_resume_plan(
+    request: ResumePlanRequest,
+) -> Result<ResumePlan, EngineAdapterError> {
     let project_root = PathBuf::from(&request.project_path);
     let run_root = safe_join(&project_root, &request.run_directory);
     let checkpoint_root = safe_join(&project_root, "checkpoints");
@@ -2584,9 +3092,18 @@ fn discover_openmm_resume_plan(request: ResumePlanRequest) -> Result<ResumePlan,
 
     for root in [&run_root, &checkpoint_root] {
         if root.exists() {
-            collect_openmm_checkpoint_candidates(&project_root, &request.run_directory, root, &mut seen, &mut candidates)?;
+            collect_openmm_checkpoint_candidates(
+                &project_root,
+                &request.run_directory,
+                root,
+                &mut seen,
+                &mut candidates,
+            )?;
         } else if root == &run_root {
-            warnings.push(format!("Run directory not found yet: {}", request.run_directory));
+            warnings.push(format!(
+                "Run directory not found yet: {}",
+                request.run_directory
+            ));
         }
     }
 
@@ -2635,7 +3152,10 @@ fn collect_checkpoint_candidates(
             let relative_path = relative_path(project_root, &path);
             if seen.insert(relative_path.clone()) {
                 let metadata = entry.metadata()?;
-                let modified_at = metadata.modified().ok().map(chrono::DateTime::<chrono::Utc>::from);
+                let modified_at = metadata
+                    .modified()
+                    .ok()
+                    .map(chrono::DateTime::<chrono::Utc>::from);
                 let stage_hint = stage_hint_from_checkpoint(&relative_path);
                 let command_hint = Some(gromacs_resume_command(&relative_path));
                 candidates.push(CheckpointCandidate {
@@ -2663,7 +3183,13 @@ fn collect_openmm_checkpoint_candidates(
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_openmm_checkpoint_candidates(project_root, run_directory, &path, seen, candidates)?;
+            collect_openmm_checkpoint_candidates(
+                project_root,
+                run_directory,
+                &path,
+                seen,
+                candidates,
+            )?;
         } else if path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -2672,7 +3198,10 @@ fn collect_openmm_checkpoint_candidates(
             let relative_path = relative_path(project_root, &path);
             if seen.insert(relative_path.clone()) {
                 let metadata = entry.metadata()?;
-                let modified_at = metadata.modified().ok().map(chrono::DateTime::<chrono::Utc>::from);
+                let modified_at = metadata
+                    .modified()
+                    .ok()
+                    .map(chrono::DateTime::<chrono::Utc>::from);
                 candidates.push(CheckpointCandidate {
                     path: relative_path.clone(),
                     size_bytes: metadata.len(),
@@ -2726,10 +3255,9 @@ fn openmm_resume_command(run_directory: &str, checkpoint_path: &str) -> String {
 }
 
 fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' ))
-    {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+    }) {
         value.to_string()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
@@ -2740,7 +3268,12 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
-fn failure_headline(engine_name: &str, log_contents: &str, exit_code: Option<i32>, category: &FailureCategory) -> String {
+fn failure_headline(
+    engine_name: &str,
+    log_contents: &str,
+    exit_code: Option<i32>,
+    category: &FailureCategory,
+) -> String {
     let interesting = log_contents
         .lines()
         .map(str::trim)
@@ -3057,7 +3590,10 @@ fn namd_failure_suggestions(category: FailureCategory) -> Vec<FailureSuggestion>
     }
 }
 
-fn generic_failure_suggestions(engine_id: &str, category: FailureCategory) -> Vec<FailureSuggestion> {
+fn generic_failure_suggestions(
+    engine_id: &str,
+    category: FailureCategory,
+) -> Vec<FailureSuggestion> {
     let name = engine_display_name(engine_id);
     match category {
         FailureCategory::MissingExecutable => vec![suggestion(
@@ -3137,7 +3673,12 @@ fn engine_display_name(engine_id: &str) -> &'static str {
     }
 }
 
-fn suggestion(title: &str, detail: &str, action_label: &str, command_hint: Option<&str>) -> FailureSuggestion {
+fn suggestion(
+    title: &str,
+    detail: &str,
+    action_label: &str,
+    command_hint: Option<&str>,
+) -> FailureSuggestion {
     FailureSuggestion {
         title: title.to_string(),
         detail: detail.to_string(),
@@ -3183,7 +3724,12 @@ fn parse_amber_nstep(line: &str) -> Option<u64> {
 
 fn parse_namd_step(line: &str) -> Option<u64> {
     let mut tokens = line.split_whitespace();
-    match tokens.next()?.trim_end_matches(':').to_ascii_lowercase().as_str() {
+    match tokens
+        .next()?
+        .trim_end_matches(':')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "energy" | "timing" => tokens.next()?.parse::<u64>().ok(),
         _ => None,
     }
@@ -3206,12 +3752,17 @@ fn stage_parameter<'a>(plan: &'a SimulationPlan, stage_id: &str, key: &str) -> O
 }
 
 fn nsteps_from_ps(duration_ps: f32, timestep_fs: f32) -> u64 {
-    ((duration_ps * 1000.0) / timestep_fs.max(0.001)).round().max(1.0) as u64
+    ((duration_ps * 1000.0) / timestep_fs.max(0.001))
+        .round()
+        .max(1.0) as u64
 }
 
 fn format_number(value: f32) -> String {
     let rounded = format!("{value:.4}");
-    rounded.trim_end_matches('0').trim_end_matches('.').to_string()
+    rounded
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn openmm_force_field_files(plan: &SimulationPlan) -> Vec<String> {
@@ -3311,9 +3862,18 @@ mod tests {
         .expect("gromacs package");
 
         assert_eq!(package.engine_id, "gromacs");
-        assert!(package.files.iter().any(|file| file.path == "generated/gromacs/em.mdp"));
-        assert!(package.files.iter().any(|file| file.path.ends_with("run-gromacs.sh")));
-        assert!(package.commands.iter().any(|command| command.command.contains("gmx grompp")));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path == "generated/gromacs/em.mdp"));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("run-gromacs.sh")));
+        assert!(package
+            .commands
+            .iter()
+            .any(|command| command.command.contains("gmx grompp")));
     }
 
     #[test]
@@ -3333,8 +3893,47 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == "generated/openmm/run_openmm.py"));
-        assert!(package.files.iter().any(|file| file.path.ends_with("run-openmm.sh")));
-        assert!(package.commands.iter().any(|command| command.command.contains("run_openmm.py")));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("run-openmm.sh")));
+        let run_script = package
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("run-openmm.sh"))
+            .expect("OpenMM run script");
+        assert!(run_script
+            .contents
+            .contains("engines/_tools/automd-science/bin/python"));
+        assert!(package
+            .commands
+            .iter()
+            .any(|command| command.command.contains("run_openmm.py")));
+    }
+
+    #[test]
+    fn openmm_runner_adds_hydrogens_before_create_system() {
+        let mut plan = test_plan();
+        plan.engine_id = "openmm".to_string();
+
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("openmm package");
+        let runner = package
+            .files
+            .iter()
+            .find(|file| file.path == "generated/openmm/run_openmm.py")
+            .expect("openmm runner")
+            .contents
+            .as_str();
+
+        assert!(runner.contains("Modeller,"));
+        assert!(runner.contains("modeller.addHydrogens(forcefield)"));
+        assert!(runner.contains("forcefield.createSystem(\n        topology,"));
+        assert!(runner.contains("simulation.context.setPositions(positions)"));
     }
 
     #[test]
@@ -3351,13 +3950,34 @@ mod tests {
         .expect("ambertools package");
 
         assert_eq!(package.engine_id, "ambertools");
-        assert!(package.files.iter().any(|file| file.path == "generated/ambertools/tleap.in"));
-        assert!(package.files.iter().any(|file| file.path == "generated/ambertools/prod.mdin"));
-        assert!(package.files.iter().any(|file| file.path == "generated/ambertools/cpptraj.in"));
-        assert!(package.files.iter().any(|file| file.path.ends_with("run-ambertools.sh")));
-        assert!(package.commands.iter().any(|command| command.command.contains("sander -O")));
-        assert!(package.commands.iter().any(|command| command.command.contains("cpptraj")));
-        assert!(package.warnings.iter().any(|warning| warning.contains("mol2/frcmod")));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path == "generated/ambertools/tleap.in"));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path == "generated/ambertools/prod.mdin"));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path == "generated/ambertools/cpptraj.in"));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("run-ambertools.sh")));
+        assert!(package
+            .commands
+            .iter()
+            .any(|command| command.command.contains("sander -O")));
+        assert!(package
+            .commands
+            .iter()
+            .any(|command| command.command.contains("cpptraj")));
+        assert!(package
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("mol2/frcmod")));
     }
 
     #[test]
@@ -3374,11 +3994,23 @@ mod tests {
 
         assert_eq!(package.engine_id, "namd");
         assert!(package.files.iter().any(|file| {
-            file.path == "generated/namd/automd.conf" && file.contents.contains("structure          inputs/system.psf")
+            file.path == "generated/namd/automd.conf"
+                && file
+                    .contents
+                    .contains("structure          inputs/system.psf")
         }));
-        assert!(package.files.iter().any(|file| file.path.ends_with("run-namd.sh")));
-        assert!(package.commands.iter().any(|command| command.command.contains("NAMD_BIN")));
-        assert!(package.warnings.iter().any(|warning| warning.contains("不下载")));
+        assert!(package
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("run-namd.sh")));
+        assert!(package
+            .commands
+            .iter()
+            .any(|command| command.command.contains("NAMD_BIN")));
+        assert!(package
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("不下载")));
     }
 
     #[test]
@@ -3395,9 +4027,15 @@ mod tests {
             .unwrap_or_else(|error| panic!("{engine_id} should prepare package: {error}"));
 
             assert_eq!(package.engine_id, engine_id);
-            assert!(!package.commands.is_empty(), "{engine_id} should expose commands");
             assert!(
-                package.files.iter().any(|file| file.path.contains("automd-plan.json")),
+                !package.commands.is_empty(),
+                "{engine_id} should expose commands"
+            );
+            assert!(
+                package
+                    .files
+                    .iter()
+                    .any(|file| file.path.contains("automd-plan.json")),
                 "{engine_id} should preserve the normalized plan"
             );
         }
@@ -3409,6 +4047,48 @@ mod tests {
         let mdp = gromacs_mdp(&plan, "production");
         assert!(mdp.contains("nsteps          = 50000000"));
         assert!(mdp.contains("dt              = 0.002"));
+        assert!(mdp.contains("tc-grps         = System"));
+        assert!(mdp.contains("tau_t           = 0.1"));
+        assert!(mdp.contains("ref_t           = 300"));
+        assert!(!mdp.contains("Protein Non-Protein"));
+        assert!(!mdp.contains("-DPOSRES"));
+    }
+
+    #[test]
+    fn equilibration_mdp_uses_system_temperature_group() {
+        let plan = test_plan();
+        for stage in ["nvt", "npt"] {
+            let mdp = gromacs_mdp(&plan, stage);
+            assert!(mdp.contains("tc-grps         = System"));
+            assert!(mdp.contains("tau_t           = 0.1"));
+            assert!(mdp.contains("ref_t           = 300"));
+            assert!(!mdp.contains("Protein Non-Protein"));
+            assert!(!mdp.contains("-DPOSRES"));
+        }
+    }
+
+    #[test]
+    fn gromacs_run_script_selects_available_force_field() {
+        let plan = test_plan();
+        let commands = gromacs_commands(&plan, "runs/gromacs-test");
+        let run_script = gromacs_run_script(&plan, &commands);
+
+        assert!(run_script.contains("automd_pick_gromacs_force_field"));
+        assert!(run_script.contains("automd_gromacs_gpu_suffix"));
+        assert!(run_script.contains("automd_gromacs_mdrun()"));
+        assert!(run_script.contains("retrying CPU mode"));
+        assert!(run_script.contains("nvidia-smi -L"));
+        assert!(run_script.contains("AUTOMD_GROMACS_FF="));
+        assert!(run_script.contains("gmx pdb2gmx -ignh"));
+        assert!(run_script.contains(
+            "OMP_NUM_THREADS=8 automd_gromacs_mdrun cpu -deffnm runs/gromacs-test/em -ntomp 8"
+        ));
+        assert!(run_script.contains(
+            "OMP_NUM_THREADS=8 automd_gromacs_mdrun auto -deffnm runs/gromacs-test/md -cpi runs/gromacs-test/md.cpt -ntomp 8"
+        ));
+        assert!(run_script.contains("printf 'System\\nSystem\\n' | gmx rms"));
+        assert!(run_script.contains("printf 'System\\n' | gmx gyrate"));
+        assert!(run_script.contains("-ff \"$AUTOMD_GROMACS_FF\""));
     }
 
     #[test]
@@ -3426,7 +4106,26 @@ Bad topology
         assert_eq!(report.ns_per_day, Some(82.125));
         assert_eq!(report.progress_percent, Some(25.0));
         assert!(report.fatal_error.is_some());
-        assert!(report.events.iter().any(|event| event.kind == EngineLogEventKind::Checkpoint));
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.kind == EngineLogEventKind::Checkpoint));
+    }
+
+    #[test]
+    fn openmm_log_parser_marks_python_tracebacks_as_fatal() {
+        let report = parse_engine_log(EngineLogParseRequest {
+            engine_id: "openmm".to_string(),
+            log_contents: "Traceback (most recent call last):\nValueError: No template found for residue 104 (LEU).\n".to_string(),
+        })
+        .expect("openmm log report");
+
+        assert_eq!(report.engine_id, "openmm");
+        assert!(report.fatal_error.is_some());
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.kind == EngineLogEventKind::Error));
     }
 
     #[test]
@@ -3446,7 +4145,9 @@ Bad topology
     fn ambertools_log_parser_and_classifier_identify_parameter_gap() {
         let report = parse_engine_log(EngineLogParseRequest {
             engine_id: "ambertools".to_string(),
-            log_contents: "NSTEP = 500 TIME(PS) = 1.0\nSANDER BOMB in subroutine\nUnknown atom type c3\n".to_string(),
+            log_contents:
+                "NSTEP = 500 TIME(PS) = 1.0\nSANDER BOMB in subroutine\nUnknown atom type c3\n"
+                    .to_string(),
         })
         .expect("ambertools log report");
 
@@ -3469,14 +4170,19 @@ Bad topology
     fn namd_log_parser_and_classifier_identify_missing_executable() {
         let report = parse_engine_log(EngineLogParseRequest {
             engine_id: "namd".to_string(),
-            log_contents: "ENERGY: 100 0 0 0\nWRITING COORDINATES TO RESTART FILE\nEnd of program\n".to_string(),
+            log_contents:
+                "ENERGY: 100 0 0 0\nWRITING COORDINATES TO RESTART FILE\nEnd of program\n"
+                    .to_string(),
         })
         .expect("namd log report");
 
         assert_eq!(report.engine_id, "namd");
         assert_eq!(report.current_step, Some(100));
         assert_eq!(report.progress_percent, Some(100.0));
-        assert!(report.events.iter().any(|event| event.kind == EngineLogEventKind::Checkpoint));
+        assert!(report
+            .events
+            .iter()
+            .any(|event| event.kind == EngineLogEventKind::Checkpoint));
 
         let analysis = classify_engine_failure(FailureAnalysisRequest {
             engine_id: "namd".to_string(),
@@ -3505,7 +4211,10 @@ Bad topology
         .expect("resume plan");
 
         assert_eq!(resume_plan.checkpoints.len(), 1);
-        assert_eq!(resume_plan.recommended.expect("recommended").path, "runs/gromacs-test/md.cpt");
+        assert_eq!(
+            resume_plan.recommended.expect("recommended").path,
+            "runs/gromacs-test/md.cpt"
+        );
         assert_eq!(
             resume_plan.resume_command.expect("resume command"),
             "gmx mdrun -deffnm runs/gromacs-test/md -cpi runs/gromacs-test/md.cpt -append"
@@ -3516,7 +4225,8 @@ Bad topology
 
     #[test]
     fn openmm_resume_plan_discovers_checkpoint_and_command() {
-        let root = std::env::temp_dir().join(format!("automd-openmm-resume-test-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("automd-openmm-resume-test-{}", Uuid::new_v4()));
         let run_dir = "runs/openmm-test";
         let checkpoint_path = root.join(run_dir).join("openmm.chk");
         fs::create_dir_all(checkpoint_path.parent().expect("checkpoint parent")).expect("run dir");
@@ -3530,7 +4240,10 @@ Bad topology
         .expect("resume plan");
 
         assert_eq!(resume_plan.checkpoints.len(), 1);
-        assert_eq!(resume_plan.recommended.expect("recommended").path, "runs/openmm-test/openmm.chk");
+        assert_eq!(
+            resume_plan.recommended.expect("recommended").path,
+            "runs/openmm-test/openmm.chk"
+        );
         assert_eq!(
             resume_plan.resume_command.expect("resume command"),
             "python generated/openmm/run_openmm.py --plan generated/openmm/automd-plan.json --out runs/openmm-test --resume runs/openmm-test/openmm.chk"
@@ -3553,7 +4266,10 @@ Bad topology
 
         assert!(package.files.iter().all(|file| file.written));
         assert!(root.join("generated/gromacs/em.mdp").exists());
-        assert!(root.join(&package.run_directory).join("run-gromacs.sh").exists());
+        assert!(root
+            .join(&package.run_directory)
+            .join("run-gromacs.sh")
+            .exists());
 
         fs::remove_dir_all(root).expect("cleanup temp root");
     }

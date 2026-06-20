@@ -11,18 +11,31 @@ pub fn diagnostics(engines_root: Option<&Path>) -> ScienceSidecarDiagnostics {
         .or_else(|| which::which("python3").ok())
         .map(|path| path.display().to_string());
     let python_command = python_executable.as_deref().unwrap_or("python3");
-    let sidecar_bin = engines_root.map(|root| root.join("_tools").join("automd-science").join(bin_dir_name()));
+    let sidecar_bin = engines_root.map(|root| {
+        root.join("_tools")
+            .join("automd-science")
+            .join(bin_dir_name())
+    });
     let mut tools = vec![
         python_module(python_command, "openmm", "OpenMM", "openmm"),
         python_module(python_command, "pdbfixer", "PDBFixer", "pdbfixer"),
         python_module(python_command, "mdanalysis", "MDAnalysis", "MDAnalysis"),
         python_module(python_command, "mdtraj", "MDTraj", "mdtraj"),
         python_module(python_command, "rdkit", "RDKit", "rdkit"),
-        python_module(python_command, "openbabel", "Open Babel Python", "openbabel"),
+        python_module(
+            python_command,
+            "openbabel",
+            "Open Babel Python",
+            "openbabel",
+        ),
     ];
     tools.extend([
         executable("tleap", "AmberTools tleap", sidecar_bin.as_deref()),
-        executable("antechamber", "AmberTools antechamber", sidecar_bin.as_deref()),
+        executable(
+            "antechamber",
+            "AmberTools antechamber",
+            sidecar_bin.as_deref(),
+        ),
         executable("parmchk2", "AmberTools parmchk2", sidecar_bin.as_deref()),
         executable("cpptraj", "AmberTools cpptraj", sidecar_bin.as_deref()),
     ]);
@@ -71,7 +84,9 @@ pub fn prepare_structure_package(
     let mut warnings = Vec::new();
 
     if plan.system.source_path.is_none() {
-        warnings.push("未设置输入结构路径；prepare_structure.py 会使用 inputs/system.pdb 占位。".to_string());
+        warnings.push(
+            "未设置输入结构路径；prepare_structure.py 会使用 inputs/system.pdb 占位。".to_string(),
+        );
     }
     if plan.system.has_ligand {
         warnings.push("检测到配体体系；侧车会生成 ligand_parameterization.md，但不会在无验证参数时自动合并配体拓扑。".to_string());
@@ -182,7 +197,10 @@ pub fn prepare_analysis_package(
     let mut warnings = Vec::new();
 
     if plan.system.source_path.is_none() && request.project_path.is_none() {
-        warnings.push("未设置 topology/source path；脚本会默认尝试 generated/prep/prepared_structure.pdb。".to_string());
+        warnings.push(
+            "未设置 topology/source path；脚本会默认尝试 generated/prep/prepared_structure.pdb。"
+                .to_string(),
+        );
     }
     if trajectory_path.ends_with(".xtc")
         || trajectory_path.ends_with(".trr")
@@ -237,7 +255,14 @@ pub fn prepare_analysis_package(
         EngineRunFile {
             path: "generated/analysis/README.md".to_string(),
             language: "markdown".to_string(),
-            contents: analysis_readme(&plan, &topology_path, &trajectory_path, &selection, &expected_outputs, &warnings),
+            contents: analysis_readme(
+                &plan,
+                &topology_path,
+                &trajectory_path,
+                &selection,
+                &expected_outputs,
+                &warnings,
+            ),
             written: false,
         },
     ];
@@ -261,7 +286,12 @@ pub fn prepare_analysis_package(
     })
 }
 
-fn python_module(python_command: &str, id: &str, label: &str, import_name: &str) -> ScienceToolDiagnostic {
+fn python_module(
+    python_command: &str,
+    id: &str,
+    label: &str,
+    import_name: &str,
+) -> ScienceToolDiagnostic {
     let script = format!(
         r#"import importlib.util
 import importlib.metadata as metadata
@@ -300,7 +330,11 @@ except Exception:
     }
 }
 
-fn executable(command: &str, label: &str, preferred_bin_dir: Option<&Path>) -> ScienceToolDiagnostic {
+fn executable(
+    command: &str,
+    label: &str,
+    preferred_bin_dir: Option<&Path>,
+) -> ScienceToolDiagnostic {
     let preferred_path = preferred_bin_dir
         .map(|dir| dir.join(command))
         .filter(|path| path.is_file());
@@ -333,8 +367,10 @@ fn prepare_structure_py(plan: &SimulationPlan) -> String {
         .source_path
         .as_deref()
         .unwrap_or("inputs/system.pdb");
-    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "\"inputs/system.pdb\"".to_string());
-    let water_model = serde_json::to_string(&plan.force_field.water_model).unwrap_or_else(|_| "\"TIP3P\"".to_string());
+    let input_json =
+        serde_json::to_string(input).unwrap_or_else(|_| "\"inputs/system.pdb\"".to_string());
+    let water_model = serde_json::to_string(&plan.force_field.water_model)
+        .unwrap_or_else(|_| "\"TIP3P\"".to_string());
     let padding_nm = plan.solvent.padding_nm;
     let ionic_strength = plan.solvent.ionic_strength_molar;
     let neutralize = plan.solvent.neutralize;
@@ -448,9 +484,12 @@ if __name__ == "__main__":
 }
 
 fn analysis_sidecar_py(topology_path: &str, trajectory_path: &str, selection: &str) -> String {
-    let topology_json = serde_json::to_string(topology_path).unwrap_or_else(|_| "\"generated/prep/prepared_structure.pdb\"".to_string());
-    let trajectory_json = serde_json::to_string(trajectory_path).unwrap_or_else(|_| "\"trajectories/openmm.dcd\"".to_string());
-    let selection_json = serde_json::to_string(selection).unwrap_or_else(|_| "\"protein and name CA\"".to_string());
+    let topology_json = serde_json::to_string(topology_path)
+        .unwrap_or_else(|_| "\"generated/prep/prepared_structure.pdb\"".to_string());
+    let trajectory_json = serde_json::to_string(trajectory_path)
+        .unwrap_or_else(|_| "\"trajectories/openmm.dcd\"".to_string());
+    let selection_json =
+        serde_json::to_string(selection).unwrap_or_else(|_| "\"protein and name CA\"".to_string());
     let template = r#"#!/usr/bin/env python3
 from __future__ import annotations
 

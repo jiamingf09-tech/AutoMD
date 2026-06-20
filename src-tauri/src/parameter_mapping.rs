@@ -13,11 +13,23 @@ pub fn map_parameters(request: ParameterMappingRequest) -> ParameterMappingRepor
         match engine_id.as_str() {
             "gromacs" => map_gromacs_stage(&mut mapper, &plan, stage),
             "openmm" => map_openmm_stage(&mut mapper, &plan, stage),
-            "ambertools" => map_amber_stage(&mut mapper, &plan, stage, "ambertools", "generated/ambertools"),
-            "amber_pmemd" => map_amber_stage(&mut mapper, &plan, stage, "amber_pmemd", "generated/amber_pmemd"),
+            "ambertools" => map_amber_stage(
+                &mut mapper,
+                &plan,
+                stage,
+                "ambertools",
+                "generated/ambertools",
+            ),
+            "amber_pmemd" => map_amber_stage(
+                &mut mapper,
+                &plan,
+                stage,
+                "amber_pmemd",
+                "generated/amber_pmemd",
+            ),
             "namd" => map_namd_stage(&mut mapper, &plan, stage),
-            "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "charmm" | "desmond"
-            | "acemd" => map_preview_stage(&mut mapper, &plan, stage, &engine_id),
+            "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "charmm"
+            | "desmond" | "acemd" => map_preview_stage(&mut mapper, &plan, stage, &engine_id),
             other => mapper.warn(format!(
                 "Unknown engine '{other}'; parameter mappings are marked for manual review."
             )),
@@ -138,7 +150,9 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                         } else {
                             ParameterMappingStatus::ManualReview
                         },
-                        notes: vec!["GROMACS uses short integrator identifiers in MDP files.".to_string()],
+                        notes: vec![
+                            "GROMACS uses short integrator identifiers in MDP files.".to_string()
+                        ],
                     },
                 );
             }
@@ -159,7 +173,9 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                     timestep_fs,
                     "nsteps",
                     target_file,
-                    vec!["Uses production timestepFs for equilibration MDP generation.".to_string()],
+                    vec![
+                        "Uses production timestepFs for equilibration MDP generation.".to_string(),
+                    ],
                 );
             }
             if let Some(value) = parameter(stage, "temperatureK") {
@@ -180,7 +196,9 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                         },
                         target_file,
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Applied to both default temperature-coupling groups.".to_string()],
+                        notes: vec![
+                            "Applied to both default temperature-coupling groups.".to_string()
+                        ],
                     },
                 );
             }
@@ -216,7 +234,9 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                         engine_value: value.to_string(),
                         target_file,
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Used when velocities are generated for equilibration.".to_string()],
+                        notes: vec![
+                            "Used when velocities are generated for equilibration.".to_string()
+                        ],
                     },
                 );
             }
@@ -239,7 +259,15 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
             let target_file = "generated/gromacs/md.mdp";
             let timestep_fs = production_timestep_fs(plan, mapper, 2.0);
             if let Some(value) = parameter(stage, "durationNs") {
-                map_steps_from_duration_ns(mapper, stage, value, timestep_fs, "nsteps", target_file, Vec::new());
+                map_steps_from_duration_ns(
+                    mapper,
+                    stage,
+                    value,
+                    timestep_fs,
+                    "nsteps",
+                    target_file,
+                    Vec::new(),
+                );
             }
             if let Some(value) = parameter(stage, "timestepFs") {
                 map_timestep_ps(mapper, stage, value, "dt", target_file);
@@ -309,7 +337,8 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                     MappingSpec {
                         normalized_key: "temperatureK",
                         normalized_value: format!("{value} K"),
-                        engine_key: "temperature / LangevinMiddleIntegrator / setVelocitiesToTemperature",
+                        engine_key:
+                            "temperature / LangevinMiddleIntegrator / setVelocitiesToTemperature",
                         engine_value: value.to_string(),
                         target_file,
                         status: ParameterMappingStatus::Mapped,
@@ -344,7 +373,10 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                         engine_value: "not emitted".to_string(),
                         target_file,
                         status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Current OpenMM runner performs minimization then production only.".to_string()],
+                        notes: vec![
+                            "Current OpenMM runner performs minimization then production only."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -405,7 +437,10 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                         engine_value: "not emitted".to_string(),
                         target_file,
                         status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Current OpenMM runner performs minimization then production only.".to_string()],
+                        notes: vec![
+                            "Current OpenMM runner performs minimization then production only."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -420,11 +455,20 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                     timestep_fs,
                     "total_steps",
                     target_file,
-                    vec!["Computed in generated Python as duration_ns * 1_000_000 / timestep_fs.".to_string()],
+                    vec![
+                        "Computed in generated Python as duration_ns * 1_000_000 / timestep_fs."
+                            .to_string(),
+                    ],
                 );
             }
             if let Some(value) = parameter(stage, "timestepFs") {
-                map_timestep_ps(mapper, stage, value, "LangevinMiddleIntegrator step size", target_file);
+                map_timestep_ps(
+                    mapper,
+                    stage,
+                    value,
+                    "LangevinMiddleIntegrator step size",
+                    target_file,
+                );
             }
             if let Some(value) = parameter(stage, "checkpointEveryPs") {
                 map_steps_from_duration_ps(
@@ -435,7 +479,10 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                     timestep_fs,
                     "report_interval",
                     target_file,
-                    vec!["Shared by StateDataReporter, DCDReporter, and CheckpointReporter.".to_string()],
+                    vec![
+                        "Shared by StateDataReporter, DCDReporter, and CheckpointReporter."
+                            .to_string(),
+                    ],
                 );
             }
             if let Some(value) = parameter(stage, "randomSeed") {
@@ -498,7 +545,10 @@ fn map_amber_stage(
                         engine_value: "not emitted".to_string(),
                         target_file: "generated/ambertools/min.mdin",
                         status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Amber minimization tolerance is not exposed in the current template.".to_string()],
+                        notes: vec![
+                            "Amber minimization tolerance is not exposed in the current template."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -545,7 +595,10 @@ fn map_amber_stage(
                         engine_value: value.to_string(),
                         target_file: &format!("{generated_dir}/prod.mdin"),
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Used as production ig when production.randomSeed is absent.".to_string()],
+                        notes: vec![
+                            "Used as production ig when production.randomSeed is absent."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -561,7 +614,10 @@ fn map_amber_stage(
                         engine_value: value.to_string(),
                         target_file: "generated/ambertools/equil.mdin / prod.mdin",
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Used by NPT equilibration and as production temperature fallback.".to_string()],
+                        notes: vec![
+                            "Used by NPT equilibration and as production temperature fallback."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -631,7 +687,10 @@ fn map_amber_stage(
                         engine_value: value.to_string(),
                         target_file: &target_file,
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Amber Langevin random seed; -1 keeps Amber's random behavior.".to_string()],
+                        notes: vec![
+                            "Amber Langevin random seed; -1 keeps Amber's random behavior."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -655,7 +714,11 @@ fn map_amber_stage(
         }
         "prepare" => map_prepare_manual(mapper, stage, "generated/ambertools/tleap.in"),
         "analysis" => map_analysis_manual(mapper, stage, "generated/ambertools/cpptraj.in"),
-        _ => map_stage_manual(mapper, stage, &format!("generated/{engine_id}/automd-plan.json")),
+        _ => map_stage_manual(
+            mapper,
+            stage,
+            &format!("generated/{engine_id}/automd-plan.json"),
+        ),
     }
 }
 
@@ -689,7 +752,9 @@ fn map_namd_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &S
                         engine_value: value.to_string(),
                         target_file,
                         status: ParameterMappingStatus::Mapped,
-                        notes: vec!["Applied to initial temperature and Langevin thermostat.".to_string()],
+                        notes: vec![
+                            "Applied to initial temperature and Langevin thermostat.".to_string()
+                        ],
                     },
                 );
             }
@@ -703,7 +768,10 @@ fn map_namd_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &S
                         engine_value: "not emitted".to_string(),
                         target_file,
                         status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Current NAMD external template emits a single production run.".to_string()],
+                        notes: vec![
+                            "Current NAMD external template emits a single production run."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -719,7 +787,10 @@ fn map_namd_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &S
                         engine_value: value.to_string(),
                         target_file,
                         status: ParameterMappingStatus::Approximated,
-                        notes: vec!["Used only if the template is extended to a separate NPT stage.".to_string()],
+                        notes: vec![
+                            "Used only if the template is extended to a separate NPT stage."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -733,7 +804,9 @@ fn map_namd_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &S
                         engine_value: "not emitted".to_string(),
                         target_file,
                         status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Current NAMD template has no Langevin piston/NPT block.".to_string()],
+                        notes: vec![
+                            "Current NAMD template has no Langevin piston/NPT block.".to_string()
+                        ],
                     },
                 );
             }
@@ -790,14 +863,31 @@ fn map_namd_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &S
     }
 }
 
-fn map_preview_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: &SimulationStage, engine_id: &str) {
+fn map_preview_stage(
+    mapper: &mut ParameterMapper,
+    plan: &SimulationPlan,
+    stage: &SimulationStage,
+    engine_id: &str,
+) {
     let target_file = preview_target_file(engine_id);
     match engine_id {
         "lammps" | "cp2k" | "genesis" => {
             if stage.id == "production" {
-                let timestep_fs = production_timestep_fs(plan, mapper, if engine_id == "genesis" { 2.0 } else { 1.0 });
+                let timestep_fs = production_timestep_fs(
+                    plan,
+                    mapper,
+                    if engine_id == "genesis" { 2.0 } else { 1.0 },
+                );
                 if let Some(value) = parameter(stage, "durationNs") {
-                    map_steps_from_duration_ns(mapper, stage, value, timestep_fs, "steps/run", target_file, Vec::new());
+                    map_steps_from_duration_ns(
+                        mapper,
+                        stage,
+                        value,
+                        timestep_fs,
+                        "steps/run",
+                        target_file,
+                        Vec::new(),
+                    );
                     if let Some(last) = mapper.items.last_mut() {
                         last.status = ParameterMappingStatus::Approximated;
                         last.notes.push("Preview template still requires topology/force-field review before real execution.".to_string());
@@ -818,7 +908,9 @@ fn map_preview_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                     );
                 }
             }
-            if (stage.id == "nvt" || stage.id == "npt") && parameter(stage, "temperatureK").is_some() {
+            if (stage.id == "nvt" || stage.id == "npt")
+                && parameter(stage, "temperatureK").is_some()
+            {
                 let value = parameter(stage, "temperatureK").unwrap_or("300");
                 mapper.add(
                     stage,
@@ -834,7 +926,9 @@ fn map_preview_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                 );
             }
         }
-        "amber_pmemd" => map_amber_stage(mapper, plan, stage, "amber_pmemd", "generated/amber_pmemd"),
+        "amber_pmemd" => {
+            map_amber_stage(mapper, plan, stage, "amber_pmemd", "generated/amber_pmemd")
+        }
         _ => map_stage_manual(mapper, stage, target_file),
     }
 }
@@ -850,7 +944,10 @@ fn map_prepare_manual(mapper: &mut ParameterMapper, stage: &SimulationStage, tar
                 engine_value: "sidecar / native setup".to_string(),
                 target_file,
                 status: ParameterMappingStatus::ManualReview,
-                notes: vec!["Structure preparation spans external tools and generated setup scripts.".to_string()],
+                notes: vec![
+                    "Structure preparation spans external tools and generated setup scripts."
+                        .to_string(),
+                ],
             },
         );
     }
@@ -884,7 +981,10 @@ fn map_stage_manual(mapper: &mut ParameterMapper, stage: &SimulationStage, targe
                 engine_value: "manual review".to_string(),
                 target_file,
                 status: ParameterMappingStatus::ManualReview,
-                notes: vec!["This engine/stage is available through an editable native template.".to_string()],
+                notes: vec![
+                    "This engine/stage is available through an editable native template."
+                        .to_string(),
+                ],
             },
         );
     }
@@ -902,7 +1002,9 @@ fn map_steps_from_duration_ns(
     match parse_positive(duration_ns) {
         Some(duration_ns) => {
             let steps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs);
-            notes.push(format!("Computed from {duration_ns} ns and {timestep_fs} fs timestep."));
+            notes.push(format!(
+                "Computed from {duration_ns} ns and {timestep_fs} fs timestep."
+            ));
             mapper.add(
                 stage,
                 MappingSpec {
@@ -925,7 +1027,10 @@ fn map_steps_from_duration_ns(
                 engine_value: "invalid duration".to_string(),
                 target_file,
                 status: ParameterMappingStatus::Unsupported,
-                notes: vec!["Enter a positive numeric duration before generating native inputs.".to_string()],
+                notes: vec![
+                    "Enter a positive numeric duration before generating native inputs."
+                        .to_string(),
+                ],
             },
         ),
     }
@@ -944,7 +1049,9 @@ fn map_steps_from_duration_ps(
     match parse_positive(duration_ps) {
         Some(duration_ps) => {
             let steps = nsteps_from_ps(duration_ps, timestep_fs);
-            notes.push(format!("Computed from {duration_ps} ps and {timestep_fs} fs timestep."));
+            notes.push(format!(
+                "Computed from {duration_ps} ps and {timestep_fs} fs timestep."
+            ));
             mapper.add(
                 stage,
                 MappingSpec {
@@ -967,7 +1074,10 @@ fn map_steps_from_duration_ps(
                 engine_value: "invalid interval".to_string(),
                 target_file,
                 status: ParameterMappingStatus::Unsupported,
-                notes: vec!["Enter a positive numeric ps value before generating native inputs.".to_string()],
+                notes: vec![
+                    "Enter a positive numeric ps value before generating native inputs."
+                        .to_string(),
+                ],
             },
         ),
     }
@@ -1002,13 +1112,20 @@ fn map_timestep_ps(
                 engine_value: "invalid timestep".to_string(),
                 target_file,
                 status: ParameterMappingStatus::Unsupported,
-                notes: vec!["Enter a positive numeric timestep before generating native inputs.".to_string()],
+                notes: vec![
+                    "Enter a positive numeric timestep before generating native inputs."
+                        .to_string(),
+                ],
             },
         ),
     }
 }
 
-fn production_timestep_fs(plan: &SimulationPlan, mapper: &mut ParameterMapper, fallback: f32) -> f32 {
+fn production_timestep_fs(
+    plan: &SimulationPlan,
+    mapper: &mut ParameterMapper,
+    fallback: f32,
+) -> f32 {
     match plan
         .stages
         .iter()
@@ -1040,12 +1157,17 @@ fn parse_positive(value: &str) -> Option<f32> {
 }
 
 fn nsteps_from_ps(duration_ps: f32, timestep_fs: f32) -> u64 {
-    ((duration_ps * 1000.0) / timestep_fs.max(0.001)).round().max(1.0) as u64
+    ((duration_ps * 1000.0) / timestep_fs.max(0.001))
+        .round()
+        .max(1.0) as u64
 }
 
 fn format_number(value: f32) -> String {
     let rounded = format!("{value:.4}");
-    rounded.trim_end_matches('0').trim_end_matches('.').to_string()
+    rounded
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn format_number_with_unit(value: f32, unit: &str) -> String {
@@ -1101,7 +1223,9 @@ mod tests {
         let checkpoint = report
             .items
             .iter()
-            .find(|item| item.stage_id == "production" && item.normalized_key == "checkpointEveryPs")
+            .find(|item| {
+                item.stage_id == "production" && item.normalized_key == "checkpointEveryPs"
+            })
             .expect("checkpoint mapping");
         assert_eq!(checkpoint.engine_key, "nstcheckpoint");
         assert_eq!(checkpoint.engine_value, "50000");
@@ -1126,7 +1250,9 @@ mod tests {
         let interval = report
             .items
             .iter()
-            .find(|item| item.stage_id == "production" && item.normalized_key == "checkpointEveryPs")
+            .find(|item| {
+                item.stage_id == "production" && item.normalized_key == "checkpointEveryPs"
+            })
             .expect("openmm interval mapping");
         assert_eq!(interval.engine_key, "report_interval");
         assert_eq!(interval.engine_value, "50000");

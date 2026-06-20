@@ -72,9 +72,9 @@
 
   --text: #e8efeb;
   --text-strong: #f2f7f4;
-  --text-2: #b6c2bb;
-  --text-3: #98a49d;
-  --text-4: #828e87;
+  --text-2: #c4cec8;
+  --text-3: #afbbb4;
+  --text-4: #9aa69f;
   --text-on-brand: #06140f;
 
   --brand: #2bb6a6;
@@ -482,6 +482,7 @@ ul {
   overflow-y: auto;
   padding: 22px;
   gap: 16px;
+  scroll-padding-top: 96px;
 }
 
 .topbar {
@@ -521,9 +522,9 @@ ul {
 }
 
 .current-project-sticky {
-  position: sticky;
-  top: 8px;
-  z-index: 20;
+  position: relative;
+  top: auto;
+  z-index: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -533,7 +534,8 @@ ul {
   background: var(--surface);
   box-shadow: var(--shadow-1);
   padding: 12px 16px;
-  margin-bottom: 4px;
+  margin-bottom: 10px;
+  scroll-margin-top: 96px;
 }
 
 .current-project-actions button {
@@ -703,7 +705,7 @@ ul {
 }
 
 .project-grid {
-  grid-template-columns: 1.05fr 1fr 1.25fr;
+  grid-template-columns: 0.9fr 1.35fr 1.15fr;
 }
 
 .engine-reminder {
@@ -767,7 +769,7 @@ ul {
 
 .project-index-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-items: stretch;
 }
@@ -806,9 +808,10 @@ ul {
 
 .project-index-row > button:first-child .truncate {
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .project-index-row > button:last-child {
@@ -862,8 +865,17 @@ ul {
 .index-action-group {
   display: flex;
   align-items: stretch;
+  justify-content: flex-end;
   gap: 6px;
   min-width: 0;
+}
+
+.manual-parse-result {
+  margin: 12px 0 18px;
+}
+
+.manual-parse-result h4 {
+  margin-top: 0;
 }
 
 .index-rename-btn {
@@ -1628,10 +1640,15 @@ ul {
   border-style: dashed;
 }
 
-.plugin-builder-grid,
+.plugin-builder-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+
 .plugin-detail-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.15fr);
   gap: 14px;
 }
 
@@ -1639,10 +1656,17 @@ ul {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
   padding: 14px;
+}
+
+.plugin-import-box input,
+.plugin-import-box select,
+.plugin-import-box textarea {
+  min-width: 0;
 }
 /* the form-grid carries its own top margin; the flex gap already spaces it. */
 .plugin-import-box > .form-grid {
@@ -1662,6 +1686,7 @@ details.plugin-import-box > button {
 }
 
 .plugin-template-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   margin-top: 12px;
 }
 
@@ -1742,6 +1767,18 @@ details.plugin-import-box > button {
 .selected-lite {
   border-color: var(--brand);
   background: var(--brand-softer);
+}
+
+:root[data-theme="dark"] .engine-card,
+:root[data-theme="dark"] .engine-target-card {
+  background: var(--surface);
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .engine-card.selected,
+:root[data-theme="dark"] .engine-target-card.selected,
+:root[data-theme="dark"] .selected-lite {
+  background: #162f2a;
 }
 
 .engine-target-switcher {
@@ -2860,14 +2897,17 @@ details.plugin-import-box > button {
   display: grid;
   gap: 6px;
   margin-top: 12px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .artifact-head,
 .artifact-row {
   display: grid;
-  grid-template-columns: 110px minmax(0, 1.4fr) 82px minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1.7fr) 78px minmax(120px, 1fr);
   gap: 8px;
   align-items: center;
+  min-width: 620px;
 }
 
 .artifact-head {
@@ -2882,6 +2922,18 @@ details.plugin-import-box > button {
   border-radius: var(--r-md);
   padding: 8px;
   font-size: 12px;
+}
+
+.artifact-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.artifact-row .artifact-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .trajectory-panel {
@@ -3261,6 +3313,8 @@ details.plugin-import-box > button {
   .remote-profile-form,
   .metric-grid,
   .batch-controls,
+  .plugin-builder-grid,
+  .plugin-detail-grid,
   .plugin-metrics,
   .analysis-stats {
     grid-template-columns: 1fr;

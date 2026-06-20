@@ -61,7 +61,10 @@ impl TaskManager {
         }
     }
 
-    pub fn start(&self, request: StartLocalRunRequest) -> Result<LocalTaskSnapshot, TaskRunnerError> {
+    pub fn start(
+        &self,
+        request: StartLocalRunRequest,
+    ) -> Result<LocalTaskSnapshot, TaskRunnerError> {
         let task_id = Uuid::new_v4();
         let plan = request.plan.clone();
         let project_root = self.resolve_project_root(&request)?;
@@ -109,7 +112,10 @@ impl TaskManager {
             snapshot.progress_percent = 100.0;
             snapshot.command = "dry-run package generation only".to_string();
             snapshot.finished_at = Some(Utc::now());
-            append_log(&mut snapshot, "Dry run completed without launching a process.".to_string());
+            append_log(
+                &mut snapshot,
+                "Dry run completed without launching a process.".to_string(),
+            );
             write_run_manifest(&snapshot, &plan, &project_root)?;
             let mut managed = ManagedTask {
                 snapshot: snapshot.clone(),
@@ -121,11 +127,20 @@ impl TaskManager {
             attach_artifacts_and_report(&mut managed);
             snapshot = managed.snapshot.clone();
             let record = Arc::new(Mutex::new(managed));
-            self.tasks.lock().expect("task map lock").insert(task_id, record);
+            self.tasks
+                .lock()
+                .expect("task map lock")
+                .insert(task_id, record);
             return Ok(snapshot);
         }
 
-        let command = process_spec_for(&request.mode, &plan, &project_root, &snapshot.run_directory, &self.workspace_root)?;
+        let command = process_spec_for(
+            &request.mode,
+            &plan,
+            &project_root,
+            &snapshot.run_directory,
+            &self.workspace_root,
+        )?;
         snapshot.command = command.display.clone();
         write_run_manifest(&snapshot, &plan, &project_root)?;
 
@@ -136,7 +151,10 @@ impl TaskManager {
             plan: plan.clone(),
             project_root: project_root.clone(),
         }));
-        self.tasks.lock().expect("task map lock").insert(task_id, Arc::clone(&record));
+        self.tasks
+            .lock()
+            .expect("task map lock")
+            .insert(task_id, Arc::clone(&record));
 
         thread::spawn(move || run_process(record, command, plan.engine_id));
 
@@ -185,11 +203,16 @@ impl TaskManager {
         Ok(task.snapshot.clone())
     }
 
-    fn resolve_project_root(&self, request: &StartLocalRunRequest) -> Result<PathBuf, TaskRunnerError> {
+    fn resolve_project_root(
+        &self,
+        request: &StartLocalRunRequest,
+    ) -> Result<PathBuf, TaskRunnerError> {
         match (&request.project_path, &request.mode) {
             (Some(path), _) => Ok(PathBuf::from(path)),
             (None, LocalRunMode::Real) => Err(TaskRunnerError::MissingProjectPath),
-            (None, _) => Ok(std::env::temp_dir().join("automd").join(request.plan.id.to_string())),
+            (None, _) => Ok(std::env::temp_dir()
+                .join("automd")
+                .join(request.plan.id.to_string())),
         }
     }
 }
@@ -237,7 +260,8 @@ fn process_spec_for(
             })
         }
         LocalRunMode::Real => {
-            let script = safe_join(project_root, run_directory).join(engine_run_script_name(&plan.engine_id));
+            let script = safe_join(project_root, run_directory)
+                .join(engine_run_script_name(&plan.engine_id));
             Ok(ProcessSpec {
                 program: shell_program(),
                 args: shell_args(&script),
@@ -307,7 +331,10 @@ fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: St
             task.snapshot.status = TaskStatus::Failed;
             task.snapshot.error_message = Some(error.to_string());
             task.snapshot.finished_at = Some(Utc::now());
-            append_log(&mut task.snapshot, format!("Failed to spawn process: {error}"));
+            append_log(
+                &mut task.snapshot,
+                format!("Failed to spawn process: {error}"),
+            );
             let log_contents = task.snapshot.log_tail.join("\n");
             attach_failure_analysis(&mut task, log_contents, None);
             attach_artifacts(&mut task);
@@ -356,7 +383,10 @@ fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: St
                         task.snapshot.status = TaskStatus::Failed;
                         task.snapshot.error_message = Some(error.to_string());
                         task.snapshot.finished_at = Some(Utc::now());
-                        append_log(&mut task.snapshot, format!("Failed while waiting for process: {error}"));
+                        append_log(
+                            &mut task.snapshot,
+                            format!("Failed while waiting for process: {error}"),
+                        );
                         let log_contents = task.snapshot.log_tail.join("\n");
                         let exit_code = task.snapshot.exit_code;
                         attach_failure_analysis(&mut task, log_contents, exit_code);
@@ -379,14 +409,21 @@ fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: St
             if exit_code == Some(0) && task.snapshot.error_message.is_none() {
                 task.snapshot.status = TaskStatus::Completed;
                 task.snapshot.progress_percent = 100.0;
-                append_log(&mut task.snapshot, "Process completed successfully.".to_string());
+                append_log(
+                    &mut task.snapshot,
+                    "Process completed successfully.".to_string(),
+                );
                 attach_artifacts_and_report(&mut task);
             } else if task.snapshot.status != TaskStatus::Cancelled {
                 task.snapshot.status = TaskStatus::Failed;
                 if task.snapshot.error_message.is_none() {
-                    task.snapshot.error_message = Some(format!("Process exited with code {exit_code:?}"));
+                    task.snapshot.error_message =
+                        Some(format!("Process exited with code {exit_code:?}"));
                 }
-                append_log(&mut task.snapshot, format!("Process failed with code {exit_code:?}."));
+                append_log(
+                    &mut task.snapshot,
+                    format!("Process failed with code {exit_code:?}."),
+                );
                 let log_contents = task.snapshot.log_tail.join("\n");
                 attach_failure_analysis(&mut task, log_contents, exit_code);
                 attach_artifacts(&mut task);
@@ -412,9 +449,14 @@ fn attach_artifacts_and_report(task: &mut ManagedTask) {
             }) {
                 Ok(markdown) => {
                     task.snapshot.report_path = Some(markdown.path.clone());
-                    append_log(&mut task.snapshot, format!("Report written: {}", markdown.path));
+                    append_log(
+                        &mut task.snapshot,
+                        format!("Report written: {}", markdown.path),
+                    );
                 }
-                Err(error) => append_log(&mut task.snapshot, format!("Report export failed: {error}")),
+                Err(error) => {
+                    append_log(&mut task.snapshot, format!("Report export failed: {error}"))
+                }
             }
             match artifacts::export_report(ReportExportRequest {
                 project_path: task.project_root.display().to_string(),
@@ -423,11 +465,20 @@ fn attach_artifacts_and_report(task: &mut ManagedTask) {
                 artifact_index: Some(index),
                 format: ReportFormat::Html,
             }) {
-                Ok(html) => append_log(&mut task.snapshot, format!("HTML report written: {}", html.path)),
-                Err(error) => append_log(&mut task.snapshot, format!("HTML report export failed: {error}")),
+                Ok(html) => append_log(
+                    &mut task.snapshot,
+                    format!("HTML report written: {}", html.path),
+                ),
+                Err(error) => append_log(
+                    &mut task.snapshot,
+                    format!("HTML report export failed: {error}"),
+                ),
             }
         }
-        Err(error) => append_log(&mut task.snapshot, format!("Artifact indexing failed: {error}")),
+        Err(error) => append_log(
+            &mut task.snapshot,
+            format!("Artifact indexing failed: {error}"),
+        ),
     }
 }
 
@@ -442,7 +493,10 @@ fn attach_artifacts(task: &mut ManagedTask) {
             );
             attach_resume_plan(task);
         }
-        Err(error) => append_log(&mut task.snapshot, format!("Artifact indexing failed: {error}")),
+        Err(error) => append_log(
+            &mut task.snapshot,
+            format!("Artifact indexing failed: {error}"),
+        ),
     }
 }
 
@@ -466,7 +520,10 @@ fn attach_failure_analysis(task: &mut ManagedTask, log_contents: String, exit_co
             );
             task.snapshot.failure_analysis = Some(analysis);
         }
-        Err(error) => append_log(&mut task.snapshot, format!("Failure diagnosis unavailable: {error}")),
+        Err(error) => append_log(
+            &mut task.snapshot,
+            format!("Failure diagnosis unavailable: {error}"),
+        ),
     }
 }
 
@@ -486,7 +543,10 @@ fn attach_resume_plan(task: &mut ManagedTask) {
             }
             task.snapshot.resume_plan = Some(resume_plan);
         }
-        Err(error) => append_log(&mut task.snapshot, format!("Checkpoint discovery unavailable: {error}")),
+        Err(error) => append_log(
+            &mut task.snapshot,
+            format!("Checkpoint discovery unavailable: {error}"),
+        ),
     }
 }
 
@@ -551,7 +611,11 @@ fn environment_snapshot(project_root: &Path) -> RunEnvironmentSnapshot {
     }
 }
 
-fn spawn_reader(pipe: Option<impl std::io::Read + Send + 'static>, label: &'static str, tx: mpsc::Sender<String>) {
+fn spawn_reader(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+    label: &'static str,
+    tx: mpsc::Sender<String>,
+) {
     if let Some(pipe) = pipe {
         thread::spawn(move || {
             let reader = BufReader::new(pipe);
@@ -671,7 +735,9 @@ mod tests {
     fn dry_run_prepares_package_without_process() {
         let manager = manager();
         let plan = plan();
-        let project_root = std::env::temp_dir().join("automd").join(plan.id.to_string());
+        let project_root = std::env::temp_dir()
+            .join("automd")
+            .join(plan.id.to_string());
         let snapshot = manager
             .start(StartLocalRunRequest {
                 plan,
@@ -774,7 +840,10 @@ mod tests {
             .resume_plan
             .as_ref()
             .is_some_and(|resume_plan| !resume_plan.checkpoints.is_empty()));
-        assert!(final_snapshot.log_tail.iter().any(|line| line.contains("Performance:")));
+        assert!(final_snapshot
+            .log_tail
+            .iter()
+            .any(|line| line.contains("Performance:")));
     }
 
     #[test]

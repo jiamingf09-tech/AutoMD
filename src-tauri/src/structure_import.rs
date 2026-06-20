@@ -26,10 +26,14 @@ pub enum StructureImportError {
 const VIEWER_STRUCTURE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 const STRUCTURE_INDEX_FILE: &str = ".automd-structures.json";
 
-pub fn import_structure(request: StructureImportRequest) -> Result<StructureImportResult, StructureImportError> {
+pub fn import_structure(
+    request: StructureImportRequest,
+) -> Result<StructureImportResult, StructureImportError> {
     let project_root = PathBuf::from(&request.project_path);
     if !project_root.exists() {
-        return Err(StructureImportError::MissingProjectPath(request.project_path));
+        return Err(StructureImportError::MissingProjectPath(
+            request.project_path,
+        ));
     }
     let inputs_dir = project_root.join("inputs");
     fs::create_dir_all(&inputs_dir)?;
@@ -46,7 +50,10 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
     let destination = unique_destination(&inputs_dir, &slug, extension, request.overwrite);
 
     if destination.exists() && !request.overwrite {
-        return Err(StructureImportError::DestinationExists(relative_path(&project_root, &destination)));
+        return Err(StructureImportError::DestinationExists(relative_path(
+            &project_root,
+            &destination,
+        )));
     }
 
     let contents = match request.source_kind {
@@ -93,7 +100,10 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
         ImportedStructureEntry {
             id: relative.clone(),
             name: display_name.clone(),
-            source_path: request.source_path.clone().or_else(|| request.smiles.clone()),
+            source_path: request
+                .source_path
+                .clone()
+                .or_else(|| request.smiles.clone()),
             imported_path: relative.clone(),
             source_kind: source_kind.clone(),
             imported_at,
@@ -118,7 +128,9 @@ pub fn import_structure(request: StructureImportRequest) -> Result<StructureImpo
     })
 }
 
-pub fn list_imported_structures(project_path: String) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
+pub fn list_imported_structures(
+    project_path: String,
+) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
     let project_root = PathBuf::from(&project_path);
     if !project_root.exists() {
         return Err(StructureImportError::MissingProjectPath(project_path));
@@ -143,7 +155,8 @@ pub fn list_imported_structures(project_path: String) -> Result<Vec<ImportedStru
             }
             if let Some(source_kind) = source_kind_from_path(&relative) {
                 let contents = fs::read_to_string(&path).unwrap_or_default();
-                let summary = (!contents.is_empty()).then(|| summarize_contents(&source_kind, &contents));
+                let summary =
+                    (!contents.is_empty()).then(|| summarize_contents(&source_kind, &contents));
                 let imported_at = item
                     .metadata()
                     .ok()
@@ -164,15 +177,23 @@ pub fn list_imported_structures(project_path: String) -> Result<Vec<ImportedStru
         }
     }
 
-    entries.sort_by(|a, b| b.imported_at.cmp(&a.imported_at).then_with(|| a.imported_path.cmp(&b.imported_path)));
+    entries.sort_by(|a, b| {
+        b.imported_at
+            .cmp(&a.imported_at)
+            .then_with(|| a.imported_path.cmp(&b.imported_path))
+    });
     write_structure_index(&project_root, &entries)?;
     Ok(entries)
 }
 
-pub fn delete_imported_structure(request: DeleteImportedStructureRequest) -> Result<bool, StructureImportError> {
+pub fn delete_imported_structure(
+    request: DeleteImportedStructureRequest,
+) -> Result<bool, StructureImportError> {
     let project_root = PathBuf::from(&request.project_path);
     if !project_root.exists() {
-        return Err(StructureImportError::MissingProjectPath(request.project_path));
+        return Err(StructureImportError::MissingProjectPath(
+            request.project_path,
+        ));
     }
     let relative = request.imported_path.trim();
     if !relative.starts_with("inputs/") {
@@ -188,10 +209,14 @@ pub fn delete_imported_structure(request: DeleteImportedStructureRequest) -> Res
     Ok(true)
 }
 
-pub fn read_structure_file(request: StructureFileRequest) -> Result<StructureFilePayload, StructureImportError> {
+pub fn read_structure_file(
+    request: StructureFileRequest,
+) -> Result<StructureFilePayload, StructureImportError> {
     let project_root = PathBuf::from(&request.project_path);
     if !project_root.exists() {
-        return Err(StructureImportError::MissingProjectPath(request.project_path));
+        return Err(StructureImportError::MissingProjectPath(
+            request.project_path,
+        ));
     }
     let source_path = request.source_path.trim();
     if source_path.is_empty() {
@@ -226,7 +251,12 @@ fn summarize_contents(kind: &StructureSourceKind, contents: &str) -> StructureSu
             atom_count: None,
             residue_count: None,
             chain_count: None,
-            molecule_count: Some(contents.lines().filter(|line| !line.trim().is_empty()).count() as u32),
+            molecule_count: Some(
+                contents
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count() as u32,
+            ),
             model_count: None,
             format_note: "SMILES line input".to_string(),
         },
@@ -277,7 +307,10 @@ fn summarize_pdb_like(contents: &str, format_note: &str) -> StructureSummary {
 }
 
 fn summarize_sdf(contents: &str) -> StructureSummary {
-    let molecules = contents.matches("$$$$").count().max(if contents.trim().is_empty() { 0 } else { 1 }) as u32;
+    let molecules = contents
+        .matches("$$$$")
+        .count()
+        .max(if contents.trim().is_empty() { 0 } else { 1 }) as u32;
     StructureSummary {
         atom_count: None,
         residue_count: None,
@@ -333,14 +366,19 @@ fn infer_membrane(contents: &str) -> bool {
 
 fn import_warnings(kind: &StructureSourceKind, summary: &StructureSummary) -> Vec<String> {
     let mut warnings = Vec::new();
-    if matches!(kind, StructureSourceKind::Sdf | StructureSourceKind::Mol2 | StructureSourceKind::Smiles) {
+    if matches!(
+        kind,
+        StructureSourceKind::Sdf | StructureSourceKind::Mol2 | StructureSourceKind::Smiles
+    ) {
         warnings.push("小分子输入已保存；真实 MD 前仍需要配体参数化和拓扑生成。".to_string());
     }
     if summary.atom_count == Some(0) {
         warnings.push("未检测到 ATOM/HETATM 记录；请确认文件格式和内容。".to_string());
     }
     if matches!(kind, StructureSourceKind::EngineProject) {
-        warnings.push("已有引擎工程已记录为 manifest；后续适配器会读取其中的原生输入文件。".to_string());
+        warnings.push(
+            "已有引擎工程已记录为 manifest；后续适配器会读取其中的原生输入文件。".to_string(),
+        );
     }
     warnings
 }
@@ -425,7 +463,9 @@ fn structure_index_path(project_root: &Path) -> PathBuf {
     project_root.join(STRUCTURE_INDEX_FILE)
 }
 
-fn read_structure_index(project_root: &Path) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
+fn read_structure_index(
+    project_root: &Path,
+) -> Result<Vec<ImportedStructureEntry>, StructureImportError> {
     let path = structure_index_path(project_root);
     if !path.is_file() {
         return Ok(Vec::new());
@@ -434,13 +474,19 @@ fn read_structure_index(project_root: &Path) -> Result<Vec<ImportedStructureEntr
     Ok(serde_json::from_str::<Vec<ImportedStructureEntry>>(&contents).unwrap_or_default())
 }
 
-fn write_structure_index(project_root: &Path, entries: &[ImportedStructureEntry]) -> Result<(), StructureImportError> {
+fn write_structure_index(
+    project_root: &Path,
+    entries: &[ImportedStructureEntry],
+) -> Result<(), StructureImportError> {
     let contents = serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string());
     fs::write(structure_index_path(project_root), contents)?;
     Ok(())
 }
 
-fn upsert_imported_structure(project_root: &Path, entry: ImportedStructureEntry) -> Result<(), StructureImportError> {
+fn upsert_imported_structure(
+    project_root: &Path,
+    entry: ImportedStructureEntry,
+) -> Result<(), StructureImportError> {
     let mut entries = read_structure_index(project_root)?;
     entries.retain(|existing| existing.imported_path != entry.imported_path);
     entries.push(entry);
@@ -452,7 +498,10 @@ fn field(line: &str, start: usize, end: usize) -> &str {
 }
 
 fn engine_project_manifest(source: &Path) -> Result<String, std::io::Error> {
-    let mut lines = vec![format!("AutoMD engine project manifest: {}", source.display())];
+    let mut lines = vec![format!(
+        "AutoMD engine project manifest: {}",
+        source.display()
+    )];
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
@@ -636,7 +685,9 @@ mod tests {
         .expect("delete");
 
         assert!(!root.join(&imported.imported_path).exists());
-        assert!(list_imported_structures(root.display().to_string()).expect("list after delete").is_empty());
+        assert!(list_imported_structures(root.display().to_string())
+            .expect("list after delete")
+            .is_empty());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -693,7 +744,10 @@ mod tests {
         assert_eq!(result.imported_path, "inputs/ethanol.smi");
         assert_eq!(result.summary.molecule_count, Some(1));
         assert!(result.system.has_ligand);
-        assert!(result.warnings.iter().any(|warning| warning.contains("配体参数化")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("配体参数化")));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -717,7 +771,10 @@ mod tests {
 
         assert_eq!(result.imported_path, "inputs/native-gromacs.manifest.txt");
         assert!(root.join("inputs/native-gromacs.manifest.txt").exists());
-        assert!(result.warnings.iter().any(|warning| warning.contains("manifest")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("manifest")));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

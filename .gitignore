@@ -16,3 +16,6 @@ src-tauri/gen/
 
 # macOS installer artifacts
 *.dmg
+
+# Local QA scratch output (screenshots, fetched remote job artifacts)
+qa/

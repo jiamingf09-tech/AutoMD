@@ -69,7 +69,11 @@ pub fn export_report(request: ReportExportRequest) -> Result<ExportedReport, Art
     };
     let report_dir = project_root.join("reports");
     fs::create_dir_all(&report_dir)?;
-    let path = report_dir.join(format!("automd-report-{}.{}", request.plan.id.simple(), extension));
+    let path = report_dir.join(format!(
+        "automd-report-{}.{}",
+        request.plan.id.simple(),
+        extension
+    ));
     fs::write(&path, &contents)?;
 
     Ok(ExportedReport {
@@ -149,11 +153,21 @@ fn classify_artifact(relative: &str) -> ArtifactKind {
         ArtifactKind::Trajectory
     } else if lower.ends_with(".edr") || lower.contains("energy") {
         ArtifactKind::Energy
-    } else if lower.starts_with("analysis/") && (lower.ends_with(".xvg") || lower.ends_with(".csv") || lower.ends_with(".jsonl")) {
+    } else if lower.starts_with("analysis/")
+        && (lower.ends_with(".xvg") || lower.ends_with(".csv") || lower.ends_with(".jsonl"))
+    {
         ArtifactKind::AnalysisTable
-    } else if lower.ends_with(".png") || lower.ends_with(".svg") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+    } else if lower.ends_with(".png")
+        || lower.ends_with(".svg")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+    {
         ArtifactKind::Figure
-    } else if lower.starts_with("reports/") || lower.ends_with(".html") || lower.ends_with(".md") || lower.ends_with(".pdf") {
+    } else if lower.starts_with("reports/")
+        || lower.ends_with(".html")
+        || lower.ends_with(".md")
+        || lower.ends_with(".pdf")
+    {
         ArtifactKind::Report
     } else if lower.starts_with("remote/")
         || lower.starts_with("build-recipes/")
@@ -206,7 +220,10 @@ fn summarize_xvg(path: &Path) -> Result<String, std::io::Error> {
 
 fn summarize_jsonl(path: &Path) -> Result<String, std::io::Error> {
     let contents = fs::read_to_string(path)?;
-    let rows = contents.lines().filter(|line| !line.trim().is_empty()).count();
+    let rows = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
     Ok(format!("{rows} JSONL rows"))
 }
 
@@ -218,7 +235,11 @@ fn summarize_log(path: &Path) -> Result<String, std::io::Error> {
     Ok(format!("{lines} lines; warnings={warnings}; fatal={fatal}"))
 }
 
-fn report_markdown(plan: &SimulationPlan, task: Option<&LocalTaskSnapshot>, index: &ArtifactIndex) -> String {
+fn report_markdown(
+    plan: &SimulationPlan,
+    task: Option<&LocalTaskSnapshot>,
+    index: &ArtifactIndex,
+) -> String {
     let task_section = match task {
         Some(task) => format!(
             r#"## Task
@@ -402,7 +423,10 @@ fn report_pdf(markdown: &str) -> String {
         pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
     }
     let xref_offset = pdf.len();
-    pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+    pdf.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objects.len() + 1
+    ));
     for offset in offsets {
         pdf.push_str(&format!("{offset:010} 00000 n \n"));
     }
@@ -490,10 +514,22 @@ mod tests {
         fs::create_dir_all(root.join("runs/gromacs-test")).expect("run dir");
         fs::create_dir_all(root.join("remote")).expect("remote dir");
         fs::create_dir_all(root.join("build-recipes/gromacs")).expect("build recipe dir");
-        fs::write(root.join("analysis/rmsd.xvg"), "@ title \"RMSD\"\n0 0.1\n1 0.2\n").expect("xvg");
+        fs::write(
+            root.join("analysis/rmsd.xvg"),
+            "@ title \"RMSD\"\n0 0.1\n1 0.2\n",
+        )
+        .expect("xvg");
         fs::write(root.join("runs/gromacs-test/md.cpt"), "checkpoint").expect("cpt");
-        fs::write(root.join("remote/submit.slurm"), "#!/usr/bin/env bash\n#SBATCH --job-name=test\n").expect("slurm");
-        fs::write(root.join("build-recipes/gromacs/automd-build-recipe.json"), "{}").expect("build manifest");
+        fs::write(
+            root.join("remote/submit.slurm"),
+            "#!/usr/bin/env bash\n#SBATCH --job-name=test\n",
+        )
+        .expect("slurm");
+        fs::write(
+            root.join("build-recipes/gromacs/automd-build-recipe.json"),
+            "{}",
+        )
+        .expect("build manifest");
 
         let index = collect_artifacts(ArtifactIndexRequest {
             project_path: root.display().to_string(),
@@ -501,20 +537,27 @@ mod tests {
         })
         .expect("artifact index");
 
-        assert!(index.artifacts.iter().any(|artifact| artifact.kind == ArtifactKind::AnalysisTable));
-        assert!(index.artifacts.iter().any(|artifact| artifact.kind == ArtifactKind::Checkpoint));
         assert!(index
             .artifacts
             .iter()
-            .any(|artifact| artifact.summary.as_deref().unwrap_or_default().contains("2 data rows")));
+            .any(|artifact| artifact.kind == ArtifactKind::AnalysisTable));
         assert!(index
             .artifacts
             .iter()
-            .any(|artifact| artifact.path == "remote/submit.slurm" && artifact.kind == ArtifactKind::Metadata));
+            .any(|artifact| artifact.kind == ArtifactKind::Checkpoint));
+        assert!(index.artifacts.iter().any(|artifact| artifact
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("2 data rows")));
         assert!(index
             .artifacts
             .iter()
-            .any(|artifact| artifact.path == "build-recipes/gromacs/automd-build-recipe.json" && artifact.kind == ArtifactKind::Metadata));
+            .any(|artifact| artifact.path == "remote/submit.slurm"
+                && artifact.kind == ArtifactKind::Metadata));
+        assert!(index.artifacts.iter().any(|artifact| artifact.path
+            == "build-recipes/gromacs/automd-build-recipe.json"
+            && artifact.kind == ArtifactKind::Metadata));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -570,8 +613,12 @@ mod tests {
         assert!(exported.path.starts_with("reports/"));
         assert!(root.join(&exported.path).exists());
         assert!(exported.contents.contains("AutoMD Simulation Report"));
-        assert!(exported.contents.contains("- Command: `dry-run package generation only`"));
-        assert!(exported.contents.contains("runs/gromacs-test/automd-run-manifest.json"));
+        assert!(exported
+            .contents
+            .contains("- Command: `dry-run package generation only`"));
+        assert!(exported
+            .contents
+            .contains("runs/gromacs-test/automd-run-manifest.json"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

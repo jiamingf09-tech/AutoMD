@@ -114,6 +114,20 @@ interface PerformancePreferences {
   diskId: string;
 }
 
+interface PersistedUiState {
+  version: 1;
+  activeTab?: TabId;
+  selectedEngineId?: string;
+  selectedEngineTargetId?: string;
+  currentProjectId?: string | null;
+  activeStructureId?: string | null;
+  selectedRemoteProfileId?: string | null;
+  localRunMode?: LocalRunMode;
+  remoteWorkflowMode?: RemoteWorkflowMode;
+  plan?: SimulationPlan | null;
+  updatedAt?: string;
+}
+
 type BackgroundTaskKind = "search" | "download" | "install" | "build" | "compile";
 type BackgroundTaskStatus = "running" | "completed" | "failed";
 
@@ -547,6 +561,79 @@ const buildWorkflowModeText: Record<BuildWorkflowMode, string> = {
   execute: "执行构建"
 };
 
+const deployStrategyText: Record<EngineDeployStrategy, string> = {
+  auto: "自动选择",
+  package: "包管理安装",
+  sourceBuild: "源码构建",
+  recipeOnly: "仅生成接入清单"
+};
+
+const sourceBuildCapableEngines = new Set(["gromacs", "cp2k", "tinker"]);
+
+const UI_STATE_KEY = "automd-ui-state-v1";
+const tabIds = new Set<TabId>(["overview", "workflow", "run", "remote", "report", "engines", "plugins", "pluginDetail", "guide"]);
+const localRunModes = new Set<LocalRunMode>(["dryRun", "mock", "real"]);
+const remoteWorkflowModes = new Set<RemoteWorkflowMode>(["dryRun", "writeFiles", "execute"]);
+
+function isTabId(value: unknown): value is TabId {
+  return typeof value === "string" && tabIds.has(value as TabId);
+}
+
+function isLocalRunMode(value: unknown): value is LocalRunMode {
+  return typeof value === "string" && localRunModes.has(value as LocalRunMode);
+}
+
+function isRemoteWorkflowMode(value: unknown): value is RemoteWorkflowMode {
+  return typeof value === "string" && remoteWorkflowModes.has(value as RemoteWorkflowMode);
+}
+
+function isSimulationPlanLike(value: unknown): value is SimulationPlan {
+  if (!value || typeof value !== "object") return false;
+  const plan = value as Partial<SimulationPlan>;
+  return typeof plan.id === "string" && typeof plan.engineId === "string" && Array.isArray(plan.stages);
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function loadUiState(): PersistedUiState {
+  if (typeof window === "undefined") return { version: 1 };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(UI_STATE_KEY) ?? "{}") as Record<string, unknown>;
+    return {
+      version: 1,
+      activeTab: isTabId(parsed.activeTab) ? parsed.activeTab : undefined,
+      selectedEngineId: stringOrNull(parsed.selectedEngineId) ?? undefined,
+      selectedEngineTargetId: stringOrNull(parsed.selectedEngineTargetId) ?? undefined,
+      currentProjectId: stringOrNull(parsed.currentProjectId),
+      activeStructureId: stringOrNull(parsed.activeStructureId),
+      selectedRemoteProfileId: stringOrNull(parsed.selectedRemoteProfileId),
+      localRunMode: isLocalRunMode(parsed.localRunMode) ? parsed.localRunMode : undefined,
+      remoteWorkflowMode: isRemoteWorkflowMode(parsed.remoteWorkflowMode) ? parsed.remoteWorkflowMode : undefined,
+      plan: isSimulationPlanLike(parsed.plan) ? parsed.plan : null,
+      updatedAt: stringOrNull(parsed.updatedAt) ?? undefined
+    };
+  } catch {
+    return { version: 1 };
+  }
+}
+
+function saveUiState(patch: Partial<PersistedUiState>) {
+  if (typeof window === "undefined") return;
+  try {
+    const next: PersistedUiState = {
+      ...loadUiState(),
+      ...patch,
+      version: 1,
+      updatedAt: new Date().toISOString()
+    };
+    window.localStorage.setItem(UI_STATE_KEY, JSON.stringify(next));
+  } catch {
+    // UI state is a convenience cache. Ignore quota/private-mode failures.
+  }
+}
+
 const failureCategoryText: Record<FailureAnalysis["category"], string> = {
   missingExecutable: "缺少可执行文件",
   missingInput: "缺少输入文件",
@@ -573,10 +660,10 @@ const pluginKindText: Record<PluginKind, string> = {
 function defaultBuildRecipeOptions(engineId: string): BuildRecipeOptions {
   return {
     engineId,
-    enableMpi: true,
-    enableGpu: true,
-    gpuBackend: "cuda",
-    enablePlumed: engineId === "gromacs",
+    enableMpi: false,
+    enableGpu: false,
+    gpuBackend: null,
+    enablePlumed: false,
     installPrefix: null
   };
 }
@@ -597,7 +684,12 @@ interface StructureEntry {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const initialUiStateRef = useRef<PersistedUiState | null>(null);
+  if (!initialUiStateRef.current) {
+    initialUiStateRef.current = loadUiState();
+  }
+  const initialUiState = initialUiStateRef.current;
+  const [activeTab, setActiveTab] = useState<TabId>(() => initialUiState.activeTab ?? "overview");
   const workspaceRef = useRef<HTMLElement | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "light";
@@ -616,7 +708,7 @@ function App() {
   }, [activeTab]);
   const [engines, setEngines] = useState<EngineCapability[]>([]);
   const [engineTargets, setEngineTargets] = useState<EngineTarget[]>([]);
-  const [selectedEngineTargetId, setSelectedEngineTargetId] = useState("local");
+  const [selectedEngineTargetId, setSelectedEngineTargetId] = useState(() => initialUiState.selectedEngineTargetId ?? "local");
   const [engineInstallations, setEngineInstallations] = useState<EngineInstallationRecord[]>([]);
   const [installableEngines, setInstallableEngines] = useState<string[]>(["gromacs", "openmm", "ambertools", "lammps", "cp2k", "hoomd"]);
   const [installableTools, setInstallableTools] = useState<string[]>(["mpirun", "plumed"]);
@@ -655,10 +747,10 @@ function App() {
   const [directPluginRunTarget, setDirectPluginRunTarget] = useState<{ manifest: PluginManifest; action: PluginAction } | null>(null);
   const [pluginBusy, setPluginBusy] = useState(false);
   const [remoteProfiles, setRemoteProfiles] = useState<RemoteProfile[]>([]);
-  const [selectedRemoteProfileId, setSelectedRemoteProfileId] = useState<string | null>(null);
+  const [selectedRemoteProfileId, setSelectedRemoteProfileId] = useState<string | null>(() => initialUiState.selectedRemoteProfileId ?? null);
   const [remotePackage, setRemotePackage] = useState<RemoteExecutionPackage | null>(null);
   const [remoteJobSnapshot, setRemoteJobSnapshot] = useState<RemoteJobSnapshot | null>(null);
-  const [remoteWorkflowMode, setRemoteWorkflowMode] = useState<RemoteWorkflowMode>("dryRun");
+  const [remoteWorkflowMode, setRemoteWorkflowMode] = useState<RemoteWorkflowMode>(() => initialUiState.remoteWorkflowMode ?? "dryRun");
   const [remoteWorkflowJobId, setRemoteWorkflowJobId] = useState("");
   const [remoteWorkflowTimeout, setRemoteWorkflowTimeout] = useState(120);
   const [remoteWorkflowResult, setRemoteWorkflowResult] = useState<RemoteWorkflowStepResult | null>(null);
@@ -677,6 +769,7 @@ function App() {
   });
   // In-app SSH connect → submit → monitor → fetch (session-only password).
   const [remotePassword, setRemotePassword] = useState("");
+  const [remotePasswordReadyProfileIds, setRemotePasswordReadyProfileIds] = useState<string[]>([]);
   const [remoteConnectionTest, setRemoteConnectionTest] = useState<RemoteConnectionTest | null>(null);
   const [remoteConnecting, setRemoteConnecting] = useState(false);
   const [remotePreflight, setRemotePreflight] = useState<RemoteSubmitPreflight | null>(null);
@@ -692,20 +785,21 @@ function App() {
   const [deleteTarget, setDeleteTarget] = useState<ProjectSummary | null>(null);
   const [deleteStage, setDeleteStage] = useState<"warn" | "confirm">("warn");
   const [deletingProject, setDeletingProject] = useState(false);
-  const [plan, setPlan] = useState<SimulationPlan | null>(null);
+  const [plan, setPlan] = useState<SimulationPlan | null>(() => initialUiState.plan ?? null);
   const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [parameterMappingReport, setParameterMappingReport] = useState<ParameterMappingReport | null>(null);
   const [task, setTask] = useState<SimulationTask | null>(null);
   const [taskRecords, setTaskRecords] = useState<TaskRecord[]>([]);
   const [slurmScript, setSlurmScript] = useState("");
   const [runPackage, setRunPackage] = useState<EngineRunPackage | null>(null);
+  const [runPackageBusy, setRunPackageBusy] = useState(false);
   const [batchReplicateCount, setBatchReplicateCount] = useState(3);
   const [batchSeedStart, setBatchSeedStart] = useState(20260603);
   const [batchPackage, setBatchPackage] = useState<BatchExperimentPackage | null>(null);
   const [nativeFile, setNativeFile] = useState<ProjectTextFilePayload | null>(null);
   const [nativeFileDraft, setNativeFileDraft] = useState("");
   const [nativeFileMessage, setNativeFileMessage] = useState<string | null>(null);
-  const [localRunMode, setLocalRunMode] = useState<LocalRunMode>("mock");
+  const [localRunMode, setLocalRunMode] = useState<LocalRunMode>(() => initialUiState.localRunMode ?? "mock");
   const [localSnapshot, setLocalSnapshot] = useState<LocalTaskSnapshot | null>(null);
   const [artifactIndex, setArtifactIndex] = useState<ArtifactIndex | null>(null);
   const [artifactRecords, setArtifactRecords] = useState<ArtifactRecord[]>([]);
@@ -728,14 +822,14 @@ function App() {
   const [engineDeployResult, setEngineDeployResult] = useState<EngineDeployResult | null>(null);
   const [projectName, setProjectName] = useState("Demo protein-ligand MD");
   const [domain, setDomain] = useState<ProjectDomain>("biomolecular");
-  const [selectedEngineId, setSelectedEngineId] = useState("gromacs");
+  const [selectedEngineId, setSelectedEngineId] = useState(() => initialUiState.selectedEngineId ?? "gromacs");
   const [importSourceKind, setImportSourceKind] = useState<StructureSourceKind>("pdb");
   const [importSourcePath, setImportSourcePath] = useState("");
   const [importSmiles, setImportSmiles] = useState("");
   const [importDisplayName, setImportDisplayName] = useState("");
   const [structureImportResult, setStructureImportResult] = useState<StructureImportResult | null>(null);
   const [structures, setStructures] = useState<StructureEntry[]>([]);
-  const [activeStructureId, setActiveStructureId] = useState<string | null>(null);
+  const [activeStructureId, setActiveStructureId] = useState<string | null>(() => initialUiState.activeStructureId ?? null);
   const [renamingStructureId, setRenamingStructureId] = useState<string | null>(null);
   const [renamingStructureDraft, setRenamingStructureDraft] = useState('');
   const [deleteStructureTarget, setDeleteStructureTarget] = useState<StructureEntry | null>(null);
@@ -877,6 +971,30 @@ function App() {
   const showStructureRequiredWarning = showProjectBanner && Boolean(activeProject) && !activeStructure;
 
   useEffect(() => {
+    saveUiState({
+      activeTab,
+      selectedEngineId,
+      selectedEngineTargetId,
+      currentProjectId: activeProject?.id ?? null,
+      activeStructureId,
+      selectedRemoteProfileId,
+      localRunMode,
+      remoteWorkflowMode,
+      plan
+    });
+  }, [
+    activeTab,
+    selectedEngineId,
+    selectedEngineTargetId,
+    activeProject?.id,
+    activeStructureId,
+    selectedRemoteProfileId,
+    localRunMode,
+    remoteWorkflowMode,
+    plan
+  ]);
+
+  useEffect(() => {
     if (!diagnostics || performancePreferences.cpuThreads > 0) return;
     const next = { ...performancePreferences, cpuThreads: suggestedCpuThreads(diagnostics) };
     savePerformancePreferences(next);
@@ -1009,6 +1127,7 @@ function App() {
 
   async function bootstrap() {
     try {
+      const persisted = initialUiStateRef.current ?? { version: 1 };
       const [capabilities, targets, installations, runtime, science, plugins, profiles, storedProjects, storedTasks] = await Promise.all([
         api.engineCapabilities(),
         api.engineTargets(),
@@ -1020,38 +1139,61 @@ function App() {
         api.listProjects(),
         api.listTaskRecords(null)
       ]);
+      const restoredProject = persisted.currentProjectId
+        ? storedProjects.find((project) => project.id === persisted.currentProjectId) ?? storedProjects[0] ?? null
+        : storedProjects[0] ?? null;
+      const restoredTargetId = persisted.selectedEngineTargetId && targets.some((target) => target.id === persisted.selectedEngineTargetId)
+        ? persisted.selectedEngineTargetId
+        : targets[0]?.id ?? "local";
+      const restoredProfile = persisted.selectedRemoteProfileId
+        ? profiles.find((profile) => profile.id === persisted.selectedRemoteProfileId) ?? profiles[0]
+        : profiles[0];
+      const restoredEngineId =
+        [persisted.selectedEngineId, restoredProject?.preferredEngineId, selectedEngineId, capabilities[0]?.id]
+          .find((engineId) => engineId && capabilities.some((capability) => capability.id === engineId)) ?? "gromacs";
       setEngines(capabilities);
       setEngineTargets(targets);
+      setSelectedEngineTargetId(restoredTargetId);
       setEngineInstallations(installations);
       void api.listInstallableEngines().then(setInstallableEngines).catch(() => undefined);
       void api.listInstallableTools().then(setInstallableTools).catch(() => undefined);
-      if (capabilities[0]) {
-        setEngineInstallationDraft((current) => ({ ...current, engineId: capabilities[0].id }));
+      if (restoredEngineId) {
+        setSelectedEngineId(restoredEngineId);
+        setEngineInstallationDraft((current) => ({ ...current, engineId: restoredEngineId }));
       }
       setDiagnostics(runtime);
       setScienceDiagnostics(science);
       setPluginRegistry(plugins);
       setRemoteProfiles(profiles);
-      setSelectedRemoteProfileId((current) => current ?? profiles[0]?.id ?? null);
-      setRemoteProfileDraft((current) => {
-        const hydrated = profiles.find((profile) => profile.id === current.id) ?? profiles[0];
-        return hydrated ?? current;
-      });
+      setSelectedRemoteProfileId(restoredProfile?.id ?? null);
+      setRemoteProfileDraft((current) => restoredProfile ?? current);
       setProjects(storedProjects);
+      setCurrentProject(restoredProject);
       setTaskRecords(storedTasks);
       let restoredStructures: StructureEntry[] = [];
-      if (storedProjects[0]) {
-        restoredStructures = await refreshCachedMetadata(storedProjects[0].path);
+      if (restoredProject) {
+        restoredStructures = await refreshCachedMetadata(restoredProject.path);
+        const restoredStructure = persisted.activeStructureId
+          ? restoredStructures.find((structure) => structure.id === persisted.activeStructureId) ?? restoredStructures[0]
+          : restoredStructures[0];
+        if (restoredStructure) {
+          setActiveStructureId(restoredStructure.id);
+        }
       }
-      if (capabilities.length > 0 && !capabilities.some((engine) => engine.id === selectedEngineId)) {
-        setSelectedEngineId(capabilities[0].id);
-      }
-      if (!plan) {
+      const cachedPlan = persisted.plan;
+      if (cachedPlan && (!restoredProject || cachedPlan.projectId === restoredProject.id)) {
+        const hydratedPlan = restoredStructures.some((structure) => structure.id === persisted.activeStructureId)
+          ? cachedPlan
+          : restoredStructures[0]
+            ? { ...cachedPlan, system: systemFromStructure(restoredStructures[0]) }
+            : cachedPlan;
+        setPlan(applyPerformanceToPlan({ ...hydratedPlan, engineId: restoredEngineId }, performancePreferences, runtime));
+      } else {
         const initialPlan = await api.generatePlan({
-          projectId: storedProjects[0]?.id ?? null,
+          projectId: restoredProject?.id ?? null,
           name: "Default biomolecular workflow",
-          engineId: "gromacs",
-          domain: "biomolecular"
+          engineId: restoredEngineId,
+          domain: restoredProject?.domain ?? "biomolecular"
         });
         const restoredPlan = restoredStructures[0]
           ? { ...initialPlan, system: systemFromStructure(restoredStructures[0]) }
@@ -1699,7 +1841,7 @@ function App() {
         targetLabel: "本机",
         engineId: engine.id,
         location: result.path,
-        version: null,
+        version: result.version ?? engine.detection.version ?? null,
         authorizationStatus: engine.license.requiresUserLicense ? "missingLicense" : "ready",
         platform: diagnostics?.os === "macos" ? "macos" : diagnostics?.os === "windows" ? "windows" : diagnostics?.os === "linux" ? "linux" : null,
         arch: diagnostics?.arch ?? null,
@@ -1770,6 +1912,12 @@ function App() {
     try {
       setSelectedEngineId(engine.id);
       updateBackgroundTask(taskId, { progress: 25, detail: "解析部署策略…" });
+      updateBackgroundTask(taskId, {
+        progress: target?.kind === "remote" ? 35 : 30,
+        detail: target?.kind === "remote"
+          ? `远程 helper 正在安装，超时 ${buildWorkflowTimeout} 秒…`
+          : "正在执行本机安装/构建…"
+      });
       const result = await api.installOrBuildEngine({
         targetId: target?.id ?? "local",
         engineId: engine.id,
@@ -1849,27 +1997,46 @@ function App() {
     if (!requireActiveStructure("生成运行计划")) {
       return;
     }
+    if (runPackageBusy) {
+      return;
+    }
+    setRunPackageBusy(true);
     try {
       const activeProject = currentProject ?? projects[0] ?? null;
-      const [queuedTask, script, preparedPackage] = await Promise.all([
-        api.createMockTask(plan),
-        api.slurmScript(plan),
-        api.prepareRunPackage({
-          plan,
-          projectPath: activeProject?.path ?? null,
-          writeToDisk: Boolean(activeProject)
-        })
-      ]);
-      setTask(queuedTask);
-      setSlurmScript(script);
+      const preparedPackage = await api.prepareRunPackage({
+        plan,
+        projectPath: activeProject?.path ?? null,
+        writeToDisk: Boolean(activeProject)
+      });
       setRunPackage(preparedPackage);
       setBatchPackage(null);
       setNativeFile(null);
       setNativeFileDraft("");
       setNativeFileMessage(null);
+      if (activeProject) {
+        await refreshArtifacts();
+      }
       setActiveTab("run");
+      notifySuccess(`${engineLabel[plan.engineId] ?? plan.engineId} run package 已生成。`, "运行包已生成");
+      try {
+        const [queuedTask, script] = await Promise.all([
+          api.createMockTask(plan),
+          api.slurmScript(plan)
+        ]);
+        setTask(queuedTask);
+        setSlurmScript(script);
+      } catch (previewError) {
+        setTask(null);
+        setSlurmScript("");
+        notifyWarning(
+          `运行包已生成，但任务/调度脚本预览未生成：${previewError instanceof Error ? previewError.message : String(previewError)}`,
+          "预览未完成"
+        );
+      }
     } catch (caught) {
       reportError(caught);
+    } finally {
+      setRunPackageBusy(false);
     }
   }
 
@@ -1993,21 +2160,24 @@ function App() {
       return;
     }
     try {
-      const [report, failure] = await Promise.all([
-        api.parseEngineLog({
-          engineId: plan.engineId,
-          logContents: sampleLog
-        }),
-        api.classifyFailure({
+      const report = await api.parseEngineLog({
+        engineId: plan.engineId,
+        logContents: sampleLog
+      });
+      setLogReport(report);
+      const hasFailureSignal = Boolean(report.fatalError) || report.events.some((event) => event.kind === "error");
+      if (hasFailureSignal) {
+        const failure = await api.classifyFailure({
           engineId: plan.engineId,
           logContents: sampleLog,
           exitCode: null
-        })
-      ]);
-      setLogReport(report);
-      setSampleFailureAnalysis(failure);
-      if (failure && failure.severity !== "info") {
-        notifyFailure(failure);
+        });
+        setSampleFailureAnalysis(failure);
+        if (failure && failure.severity !== "info") {
+          notifyFailure(failure);
+        }
+      } else {
+        setSampleFailureAnalysis(null);
       }
     } catch (caught) {
       reportError(caught);
@@ -2149,9 +2319,10 @@ function App() {
     if (!activeProject) {
       return;
     }
-    const artifactPaths = index?.artifacts
+    const analysisArtifactPaths = index?.artifacts
       .filter((artifact) => artifact.kind === "analysisTable")
-      .map((artifact) => artifact.path) ?? null;
+      .map((artifact) => artifact.path) ?? [];
+    const artifactPaths = analysisArtifactPaths.length ? analysisArtifactPaths : null;
     try {
       const parsed = await api.parseAnalysisResults({
         projectPath: activeProject.path,
@@ -2251,11 +2422,27 @@ function App() {
       return;
     }
     try {
+      const sourceArtifactIndex =
+        artifactIndex ??
+        (artifactRecords.length
+          ? {
+              projectPath: activeProject.path,
+              runDirectory: localSnapshot?.runDirectory ?? runPackage?.runDirectory ?? null,
+              artifacts: artifactRecords.map((artifact) => ({
+                path: artifact.path,
+                kind: artifact.kind,
+                sizeBytes: artifact.sizeBytes,
+                modifiedAt: artifact.modifiedAt,
+                summary: artifact.summary
+              })),
+              generatedAt: new Date().toISOString()
+            }
+          : null);
       const report = await api.exportReport({
         projectPath: activeProject.path,
         plan,
         task: localSnapshot,
-        artifactIndex,
+        artifactIndex: artifactIndexForPlan(sourceArtifactIndex, plan),
         format
       });
       setExportedReport(report);
@@ -2267,6 +2454,7 @@ function App() {
 
   async function generateRecipes(engineId = selectedEngineId) {
     try {
+      setSelectedEngineId(engineId);
       const options = defaultBuildRecipeOptions(engineId);
       const [container, build] = await Promise.all([
         api.containerRecipe(engineId),
@@ -2274,6 +2462,7 @@ function App() {
       ]);
       setContainerRecipe(container);
       setBuildRecipe(build);
+      setRecipeExportResult(null);
       setBuildWorkflowResult(null);
       setEngineDeployResult(null);
       setActiveTab("engines");
@@ -2289,6 +2478,7 @@ function App() {
       return;
     }
     try {
+      setSelectedEngineId(engineId);
       const options = defaultBuildRecipeOptions(engineId);
       const [container, build, exported] = await Promise.all([
         api.containerRecipe(engineId),
@@ -2328,9 +2518,19 @@ function App() {
       warnRemoteHelperRequired(target);
       return;
     }
-    const taskId = startBackgroundTask(`构建向导 ${engineLabel[engineId] ?? engineId}`, "build", "准备构建 recipe");
+    setSelectedEngineId(engineId);
+    setRecipeExportResult(null);
+    setBuildWorkflowResult(null);
+    setEngineDeployResult(null);
+    const label = `构建向导 ${engineLabel[engineId] ?? engineId}`;
+    if (backgroundTasks.some((task) => task.status === "running" && task.label === label)) {
+      setShowBgTasks(true);
+      return;
+    }
+    const taskId = startBackgroundTask(label, "build", "准备构建 recipe");
     try {
       const options = defaultBuildRecipeOptions(engineId);
+      const deployStrategy: EngineDeployStrategy = sourceBuildCapableEngines.has(engineId) ? "sourceBuild" : "recipeOnly";
       updateBackgroundTask(taskId, { progress: 35, detail: "生成容器 recipe 和源码脚本" });
       const [container, build, result] = await Promise.all([
         api.containerRecipe(engineId),
@@ -2338,7 +2538,7 @@ function App() {
         api.installOrBuildEngine({
           targetId: selectedEngineTarget?.id ?? "local",
           engineId,
-          strategy: buildWorkflowMode === "dryRun" || buildWorkflowMode === "writeFiles" ? "recipeOnly" : "sourceBuild",
+          strategy: deployStrategy,
           mode: buildWorkflowMode,
           buildOptions: options,
           projectPath: activeProject.path,
@@ -2437,6 +2637,7 @@ function App() {
       setRemoteProfiles((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
       setSelectedRemoteProfileId(saved.id);
       setRemoteProfileDraft(saved);
+      setSelectedEngineTargetId(`remote:${saved.id}`);
       if (plan && activeStructure && plan.system.sourcePath) {
         const activeProject = currentProject ?? projects[0] ?? null;
         const generated = await api.remoteExecutionPackage({
@@ -2560,6 +2761,7 @@ function App() {
         logOutput: remoteLogOutput
       });
       setRemoteJobSnapshot(snapshot);
+      notifySuccess(`已解析远程状态：${snapshot.status}。`, "状态解析完成");
     } catch (caught) {
       reportError(caught);
     }
@@ -2606,15 +2808,22 @@ function App() {
   }
 
   // --- In-app SSH: connect → (helper) → preflight → submit → monitor → fetch ---
+  const remotePasswordReady = (profile = remoteProfileDraft) =>
+    profile.authMethod !== "password" ||
+    remotePassword.length > 0 ||
+    remotePasswordReadyProfileIds.includes(profile.id);
   const remotePasswordArg = () =>
-    remoteProfileDraft.authMethod === "password" ? remotePassword : null;
+    remoteProfileDraft.authMethod === "password" && remotePassword ? remotePassword : null;
+  const markRemotePasswordReady = (profileId: string) => {
+    setRemotePasswordReadyProfileIds((items) => items.includes(profileId) ? items : [...items, profileId]);
+  };
 
   async function testRemoteConnection() {
     if (!remoteProfileDraft.host.trim()) {
       setError("请先填写主机/IP，再测试连接。");
       return;
     }
-    if (remoteProfileDraft.authMethod === "password" && !remotePassword) {
+    if (!remotePasswordReady(remoteProfileDraft)) {
       setError("密码认证：请先输入密码再测试连接。");
       return;
     }
@@ -2625,14 +2834,46 @@ function App() {
       setRemoteConnectionTest(result);
       if (result.ok) {
         const nextScheduler = result.scheduler ?? "ssh";
-        if (nextScheduler !== remoteProfileDraft.scheduler) {
-          setRemoteProfileDraft({ ...remoteProfileDraft, scheduler: nextScheduler });
+        const connectedProfile = {
+          ...remoteProfileDraft,
+          host: remoteProfileDraft.host.trim(),
+          username: remoteProfileDraft.username.trim(),
+          scheduler: nextScheduler
+        };
+        const saved = await api.saveRemoteProfile(connectedProfile);
+        setRemoteProfiles((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+        setSelectedRemoteProfileId(saved.id);
+        setRemoteProfileDraft(saved);
+        if (saved.authMethod === "password" && remotePassword) {
+          markRemotePasswordReady(saved.id);
         }
+        const targetId = `remote:${saved.id}`;
+        const helperStatus = await api.checkRemoteHelper(saved.id).catch(() => null);
+        const [targets, capabilities] = await Promise.all([
+          api.engineTargets(),
+          api.engineCapabilitiesForTarget(targetId)
+        ]);
+        setEngineTargets(targets);
+        setSelectedEngineTargetId(targetId);
+        setEngines(capabilities);
+        setRemotePreflight(null);
         removeNotificationsMatching((item) =>
           item.severity === "error" &&
-          (item.message.includes("密码认证：请先输入密码再测试连接") || item.message.includes("请先填写主机/IP，再测试连接"))
+          (
+            item.message.includes("密码认证：请先输入密码再测试连接") ||
+            item.message.includes("请先填写主机/IP，再测试连接") ||
+            item.message.includes(remoteProfileDraft.host) ||
+            item.message.includes(saved.host)
+          )
         );
-        notifySuccess(result.message, "已连接");
+        notifySuccess(`${result.message}。已保存并选中该远程目标。`, "已连接");
+        if (helperStatus && helperStatus.status !== "ready" && helperStatus.status !== "outdated") {
+          pushNotification({
+            severity: "info",
+            title: "远程 helper 待安装",
+            message: "连接已保存，但该服务器上的 AutoMD helper 尚未就绪。请在远程页安装或检测 helper 后再扫描引擎。"
+          });
+        }
       } else {
         pushNotification({ severity: "error", title: "连接失败", message: result.message });
       }
@@ -2682,8 +2923,12 @@ function App() {
       return;
     }
     setRemoteBusy("submit");
-    const taskId = startBackgroundTask("提交远程作业", "install", `${remoteProfileDraft.name} · ${remoteProfileDraft.host}`);
-    notifyInstalling(`远程作业（${remoteProfileDraft.host}）`);
+    const taskId = startBackgroundTask("提交远程作业", "build", `${remoteProfileDraft.name} · ${remoteProfileDraft.host}`);
+    pushNotification({
+      severity: "info",
+      title: "正在提交",
+      message: `远程作业（${remoteProfileDraft.host}）正在后台上传并提交，进度见左下角「后台任务」。`
+    });
     try {
       updateBackgroundTask(taskId, { progress: 45, detail: "上传项目并提交到调度器…" });
       const submission = await api.submitRemoteJob({
@@ -2804,6 +3049,21 @@ function App() {
     setPlan((current) => (current ? updater(current) : current));
   }
 
+  function switchPlanEngine(engineId: string) {
+    setSelectedEngineId(engineId);
+    updatePlan((current) => ({ ...current, engineId }));
+    setTask(null);
+    setRunPackage(null);
+    setBatchPackage(null);
+    setNativeFile(null);
+    setNativeFileDraft("");
+    setNativeFileMessage(null);
+    setLocalSnapshot(null);
+    setManualResumePlan(null);
+    setExportedReport(null);
+    setRemotePreflight(null);
+  }
+
   function updateStageParameter(stageId: string, key: string, value: string) {
     updatePlan((current) => ({
       ...current,
@@ -2898,6 +3158,10 @@ function App() {
 
   function notifySuccess(message: string, title = "完成") {
     pushNotification({ severity: "success", title, message });
+  }
+
+  function notifyWarning(message: string, title = "注意") {
+    pushNotification({ severity: "warning", title, message, guide: true });
   }
 
   /** Bottom-right reminder shown the moment a background install starts. */
@@ -3039,10 +3303,9 @@ function App() {
             <div className="topbar-actions">
               <select
                 value={selectedEngineId}
+                aria-label="选择模拟引擎"
                 onChange={(event) => {
-                  const engineId = event.target.value;
-                  setSelectedEngineId(engineId);
-                  updatePlan((current) => ({ ...current, engineId }));
+                  switchPlanEngine(event.target.value);
                 }}
               >
                 {engines.map((engine) => (
@@ -3130,6 +3393,7 @@ function App() {
             setSelectedEngineTargetId={setSelectedEngineTargetId}
             selectedEngineId={selectedEngineId}
             setSelectedEngineId={setSelectedEngineId}
+            selectEngine={switchPlanEngine}
             engineInstallations={engineInstallations}
             engineInstallationDraft={engineInstallationDraft}
             setEngineInstallationDraft={setEngineInstallationDraft}
@@ -3178,6 +3442,7 @@ function App() {
             validation={validation}
             slurmScript={slurmScript}
             runPackage={runPackage}
+            runPackageBusy={runPackageBusy}
             batchReplicateCount={batchReplicateCount}
             setBatchReplicateCount={setBatchReplicateCount}
             batchSeedStart={batchSeedStart}
@@ -3229,6 +3494,7 @@ function App() {
             setRemoteProfileDraft={setRemoteProfileDraft}
             remotePassword={remotePassword}
             setRemotePassword={setRemotePassword}
+            remotePasswordReady={remotePasswordReady(remoteProfileDraft)}
             remoteConnectionTest={remoteConnectionTest}
             remoteConnecting={remoteConnecting}
             testRemoteConnection={testRemoteConnection}
@@ -3862,7 +4128,12 @@ function GuidePanel({
                 <strong>{step.title}</strong>
                 <p>{step.desc}</p>
               </div>
-              <button type="button" className="quickstart-cta" onClick={() => setActiveTab(step.tab)}>
+              <button
+                type="button"
+                className="quickstart-cta"
+                aria-label={`${step.cta}：${step.title}`}
+                onClick={() => setActiveTab(step.tab)}
+              >
                 {step.cta}
               </button>
             </li>
@@ -4435,7 +4706,7 @@ function AppStatusBar({
         .join("\n")
     : "当前没有后台任务";
   const title = gpu
-    ? `${gpu.reason}\n${gpu.detail}\n检查时间：${new Date(gpu.checkedAt).toLocaleString()}`
+    ? `本机运行环境\n${gpu.reason}\n${gpu.detail}\n检查时间：${new Date(gpu.checkedAt).toLocaleString()}`
     : "正在检测 GPU 状态";
 
   return (
@@ -4473,7 +4744,7 @@ function AppStatusBar({
         ) : null}
         <div className={`gpu-status ${gpu?.available ? "available" : "unavailable"}`} title={title}>
           <span className="gpu-status-dot" />
-          <span>{gpu?.label ?? "GPU 状态检测中"}</span>
+          <span>本机：{gpu?.label ?? "GPU 状态检测中"}</span>
           {gpu && !gpu.label.includes("模式") ? (
             <small>{gpu.mode === "gpu" ? "GPU 模式" : "CPU 模式"}</small>
           ) : null}
@@ -4609,7 +4880,7 @@ function NotificationStack({
             className="toast-close"
             onClick={() => onDismiss(item.id)}
             aria-label="关闭"
-            title="关闭（仍计入未处理问题）"
+            title={item.persistent ? "关闭（仍计入未处理问题）" : "关闭通知"}
           >
             ×
           </button>
@@ -5130,6 +5401,7 @@ function EnginesPanel({
   setSelectedEngineTargetId,
   selectedEngineId,
   setSelectedEngineId,
+  selectEngine,
   engineInstallations,
   engineInstallationDraft,
   setEngineInstallationDraft,
@@ -5158,6 +5430,7 @@ function EnginesPanel({
   setSelectedEngineTargetId: (targetId: string) => void;
   selectedEngineId: string;
   setSelectedEngineId: (engineId: string) => void;
+  selectEngine: (engineId: string) => void;
   engineInstallations: EngineInstallationRecord[];
   engineInstallationDraft: EngineInstallationRecord;
   setEngineInstallationDraft: (record: EngineInstallationRecord) => void;
@@ -5267,7 +5540,7 @@ function EnginesPanel({
               key={engine.id}
               className={`engine-card ${selectedEngineId === engine.id ? "selected" : ""}`}
               onClick={() => {
-                setSelectedEngineId(engine.id);
+                selectEngine(engine.id);
                 setEngineInstallationDraft({ ...engineInstallationDraft, engineId: engine.id });
               }}
             >
@@ -5345,7 +5618,7 @@ function EnginesPanel({
                   {selectedEngineId === engine.id && engineDeployResult ? (
                     <div className="build-runner-result compact">
                       <dl className="definition-list">
-                        <div><dt>策略</dt><dd>{engineDeployResult.strategy}</dd></div>
+                        <div><dt>策略</dt><dd>{deployStrategyText[engineDeployResult.strategy]}</dd></div>
                         <div><dt>状态</dt><dd>{engineDeployResult.status}</dd></div>
                         <div><dt>登记</dt><dd>{engineDeployResult.record?.location ?? "未登记"}</dd></div>
                       </dl>
@@ -5894,6 +6167,7 @@ function RunPanel({
   validation,
   slurmScript,
   runPackage,
+  runPackageBusy,
   batchReplicateCount,
   setBatchReplicateCount,
   batchSeedStart,
@@ -5937,6 +6211,7 @@ function RunPanel({
   validation: ValidationReport | null;
   slurmScript: string;
   runPackage: EngineRunPackage | null;
+  runPackageBusy: boolean;
   batchReplicateCount: number;
   setBatchReplicateCount: (value: number) => void;
   batchSeedStart: number;
@@ -5977,6 +6252,8 @@ function RunPanel({
 }) {
   const localTaskActive = Boolean(localSnapshot && !["completed", "failed", "cancelled"].includes(localSnapshot.status));
   const generatedFiles = [...(runPackage?.files ?? []), ...(batchPackage?.files ?? [])];
+  const engineName = plan ? engineLabel[plan.engineId] ?? plan.engineId : "当前引擎";
+  const runScriptName = runScriptNameForEngine(plan?.engineId);
   return (
     <div className="flow-steps">
       <section className="panel flow-step">
@@ -5996,8 +6273,8 @@ function RunPanel({
           </dl>
         ) : null}
         <ValidationList validation={validation} />
-        <button type="button" className="primary fill" onClick={queueMockTask}>
-          生成 run package
+        <button type="button" className="primary fill" onClick={queueMockTask} disabled={runPackageBusy || !plan}>
+          {runPackageBusy ? "生成中..." : "生成 run package"}
         </button>
       </section>
 
@@ -6014,7 +6291,7 @@ function RunPanel({
           <select value={localRunMode} onChange={(event) => setLocalRunMode(event.target.value as LocalRunMode)}>
             <option value="dryRun">Dry run：只写入/校验，不启动进程</option>
             <option value="mock">Mock runner：快速模拟完整生命周期</option>
-            <option value="real">真实本地执行：启动 run-gromacs.sh</option>
+            <option value="real">真实本地执行：启动 {runScriptName}</option>
           </select>
         </label>
         <div className="button-row">
@@ -6140,7 +6417,20 @@ function RunPanel({
         )}
 
         <h4>当前任务记录</h4>
-        {task ? (
+        {localSnapshot ? (
+          <>
+            <div className="progress-shell">
+              <div className="progress-bar" style={{ width: `${localSnapshot.progressPercent}%` }} />
+            </div>
+            <dl className="definition-list">
+              <div><dt>任务</dt><dd className="mono">{localSnapshot.id}</dd></div>
+              <div><dt>状态</dt><dd>{localSnapshot.status}</dd></div>
+              <div><dt>模式</dt><dd>{localRunModeText[localSnapshot.mode]}</dd></div>
+              <div><dt>运行目录</dt><dd className="mono">{localSnapshot.runDirectory}</dd></div>
+            </dl>
+            <pre className="log-tail">{localSnapshot.logTail.join("\n")}</pre>
+          </>
+        ) : task ? (
           <>
             <div className="progress-shell">
               <div className="progress-bar" style={{ width: `${task.progressPercent}%` }} />
@@ -6156,7 +6446,7 @@ function RunPanel({
           <EmptyState title="暂无任务" text="生成运行计划后会创建可恢复的任务记录。" />
         )}
 
-        <h4>GROMACS Run Package</h4>
+        <h4>{engineName} Run Package</h4>
         {runPackage ? (
           <div className="run-package">
             <dl className="definition-list">
@@ -6182,7 +6472,7 @@ function RunPanel({
             </div>
           </div>
         ) : (
-          <EmptyState title="尚未生成 run package" text="点击队列化后会生成 GROMACS .mdp、命令序列和运行脚本。" />
+          <EmptyState title="尚未生成 run package" text={`点击生成后会创建 ${engineName} 的命令序列和 ${runScriptName}。`} />
         )}
 
         <h4>生成文件</h4>
@@ -6411,6 +6701,7 @@ function RemotePanel({
   setRemoteProfileDraft,
   remotePassword,
   setRemotePassword,
+  remotePasswordReady,
   remoteConnectionTest,
   remoteConnecting,
   testRemoteConnection,
@@ -6466,6 +6757,7 @@ function RemotePanel({
   setRemoteProfileDraft: (value: RemoteProfile) => void;
   remotePassword: string;
   setRemotePassword: (value: string) => void;
+  remotePasswordReady: boolean;
   remoteConnectionTest: RemoteConnectionTest | null;
   remoteConnecting: boolean;
   testRemoteConnection: () => void;
@@ -6514,6 +6806,8 @@ function RemotePanel({
 }) {
   const draft = remoteProfileDraft;
   const update = (patch: Partial<RemoteProfile>) => setRemoteProfileDraft({ ...draft, ...patch });
+  const [remotePortText, setRemotePortText] = useState(String(remoteProfileDraft.port));
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const connected = remoteConnectionTest?.ok ?? false;
   const draftSaved = remoteProfiles.some((profile) => profile.id === draft.id);
   const isTemplate = draft.id.endsWith("-template");
@@ -6524,6 +6818,39 @@ function RemotePanel({
   const jobActive = Boolean(
     remoteJobSnapshot && !["completed", "failed", "cancelled"].includes(remoteJobSnapshot.status)
   );
+  useEffect(() => {
+    setRemotePortText(String(remoteProfileDraft.port));
+  }, [remoteProfileDraft.id, remoteProfileDraft.port]);
+  useEffect(() => {
+    if (draft.authMethod !== "password") return;
+    const syncPasswordField = () => {
+      const value = passwordInputRef.current?.value ?? "";
+      if (value !== remotePassword) {
+        setRemotePassword(value);
+      }
+    };
+    const interval = window.setInterval(syncPasswordField, 250);
+    return () => window.clearInterval(interval);
+  }, [draft.authMethod, remotePassword, setRemotePassword]);
+  function updateRemotePortText(value: string) {
+    const digits = value.replace(/[^\d]/g, "").slice(0, 5);
+    setRemotePortText(digits);
+    const port = Number(digits);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      update({ port });
+    }
+  }
+  function normalizeRemotePortText() {
+    const port = Number(remotePortText);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      setRemotePortText(String(port));
+      update({ port });
+      return;
+    }
+    const fallback = draft.port >= 1 && draft.port <= 65535 ? draft.port : 22;
+    setRemotePortText(String(fallback));
+    update({ port: fallback });
+  }
   const [deleteProfileTarget, setDeleteProfileTarget] = useState<RemoteProfile | null>(null);
   const [deleteProfileStage, setDeleteProfileStage] = useState<"warn" | "confirm">("warn");
 
@@ -6551,6 +6878,7 @@ function RemotePanel({
                 const value = event.target.value;
                 if (value === "") {
                   setSelectedRemoteProfileId(null);
+                  setRemotePassword("");
                   setRemoteProfileDraft({
                     id: `custom-${Date.now()}`,
                     name: "",
@@ -6568,6 +6896,7 @@ function RemotePanel({
                   const picked = remoteProfiles.find((profile) => profile.id === value);
                   if (picked) {
                     setSelectedRemoteProfileId(picked.id);
+                    setRemotePassword("");
                     setRemoteProfileDraft(picked);
                   }
                 }
@@ -6595,16 +6924,25 @@ function RemotePanel({
                 value={draft.host}
                 onChange={(event) => update({ host: event.target.value })}
                 placeholder="connect.region.seetacloud.com 或 123.45.67.89 或 login.cluster.edu"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
             </label>
             <label>
               端口
               <input
-                type="number"
-                min={1}
-                max={65535}
-                value={draft.port}
-                onChange={(event) => update({ port: Number(event.target.value) || 22 })}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={remotePortText}
+                onChange={(event) => updateRemotePortText(event.target.value)}
+                onFocus={(event) => event.currentTarget.select()}
+                onBlur={normalizeRemotePortText}
+                placeholder="22"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
             </label>
             <label>
@@ -6619,6 +6957,9 @@ function RemotePanel({
                   });
                 }}
                 placeholder="root / 你的账号"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
             </label>
             <label>
@@ -6636,11 +6977,24 @@ function RemotePanel({
               密码（仅本次会话保存，不写入磁盘）
               <input
                 type="password"
+                aria-label="SSH 密码（仅本次会话保存）"
+                ref={passwordInputRef}
                 value={remotePassword}
                 onChange={(event) => setRemotePassword(event.target.value)}
+                onInput={(event) => setRemotePassword(event.currentTarget.value)}
                 placeholder="实例/账号密码"
                 autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
               />
+              <span className="hint-text">
+                {remotePassword
+                  ? "密码已填入；连接成功后只在当前 App 会话内复用。"
+                  : remotePasswordReady
+                    ? "该连接的密码已在本次会话内缓存，可继续测试、提交和拉取结果。"
+                    : "未输入密码；AutoMD 不会把密码写入磁盘。"}
+              </span>
             </label>
           ) : draft.authMethod === "key" ? (
             <label>
@@ -6650,6 +7004,9 @@ function RemotePanel({
                   value={draft.identityFile ?? ""}
                   onChange={(event) => update({ identityFile: event.target.value || null })}
                   placeholder="~/.ssh/id_ed25519"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                 />
                 <button
                   type="button"
@@ -6783,7 +7140,14 @@ function RemotePanel({
           <div className="form-grid three">
             <label>
               远程工作目录
-              <input value={draft.workdir} onChange={(event) => update({ workdir: event.target.value })} placeholder="/home/用户名/automd 或 /scratch/$USER/automd" />
+              <input
+                value={draft.workdir}
+                onChange={(event) => update({ workdir: event.target.value })}
+                placeholder="/home/用户名/automd 或 /scratch/$USER/automd"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
             </label>
             <label>
               调度器
@@ -7030,6 +7394,23 @@ function RemotePanel({
         <div className="button-row">
           <button type="button" onClick={parseRemoteStatus} disabled={!remotePackage}>解析状态</button>
         </div>
+        {remoteJobSnapshot ? (
+          <div className="remote-snapshot manual-parse-result">
+            <h4>手动解析结果</h4>
+            {remoteJobSnapshot.progressPercent != null ? (
+              <div className="progress-shell">
+                <div className="progress-bar" style={{ width: `${remoteJobSnapshot.progressPercent}%` }} />
+              </div>
+            ) : null}
+            <dl className="definition-list">
+              <div><dt>状态</dt><dd>{remoteJobSnapshot.status}</dd></div>
+              <div><dt>队列态</dt><dd>{remoteJobSnapshot.queueState ?? "未检测"}</dd></div>
+              <div><dt>步数</dt><dd>{remoteJobSnapshot.currentStep ?? "未检测"}</dd></div>
+              <div><dt>性能</dt><dd>{remoteJobSnapshot.nsPerDay != null ? `${remoteJobSnapshot.nsPerDay.toFixed(3)} ns/day` : "未检测"}</dd></div>
+            </dl>
+            {remoteJobSnapshot.reason ? <p className="hint-text">{remoteJobSnapshot.reason}</p> : null}
+          </div>
+        ) : null}
 
         <h4>本机 ssh / rsync 等工具</h4>
         <div className="tool-list local-runtime-tools">
@@ -7512,7 +7893,7 @@ function PluginDetail({
               <div><dt>模式</dt><dd>{pluginRunResult.record.mode}</dd></div>
               <div><dt>状态</dt><dd>{pluginRunResult.record.status}</dd></div>
             </dl>
-            <CodeBlock value={`STDOUT\n${pluginRunResult.stdout || "(empty)"}\n\nSTDERR\n${pluginRunResult.stderr || "(empty)"}`} />
+            <CodeBlock value={`STDOUT\n${formatPluginStream(pluginRunResult.stdout)}\n\nSTDERR\n${formatPluginStream(pluginRunResult.stderr)}`} />
           </div>
         ) : null}
       </div>
@@ -7532,7 +7913,7 @@ function ArtifactTable({ artifacts }: { artifacts: RunArtifact[] }) {
       {artifacts.map((artifact) => (
         <div className="artifact-row" key={`${artifact.kind}-${artifact.path}`}>
           <span>{artifact.kind}</span>
-          <span className="mono truncate">{artifact.path}</span>
+              <span className="mono artifact-path" title={artifact.path}>{artifact.path}</span>
           <span>{formatBytes(artifact.sizeBytes)}</span>
           <span>{artifact.summary ?? " "}</span>
         </div>
@@ -7555,6 +7936,7 @@ function TrajectoryIndexPanel({
   previewTrajectoryFrame: (frameIndex: number) => void;
 }) {
   const trajectories = artifacts.filter((artifact) => artifact.kind === "trajectory");
+  const indexedPath = trajectoryIndex?.trajectoryPath ? normalizeArtifactPath(trajectoryIndex.trajectoryPath) : null;
 
   return (
     <div className="trajectory-panel">
@@ -7567,12 +7949,18 @@ function TrajectoryIndexPanel({
       {trajectories.length ? (
         <div className="trajectory-layout">
           <div className="trajectory-list">
-            {trajectories.map((artifact) => (
-              <button type="button" key={artifact.path} onClick={() => indexTrajectory(artifact.path)}>
-                <span className="mono">{artifact.path}</span>
-                <small>{formatBytes(artifact.sizeBytes)} · {artifact.summary ?? "等待索引"}</small>
-              </button>
-            ))}
+            {trajectories.map((artifact) => {
+              const isIndexed = Boolean(indexedPath && artifactPathMatches(indexedPath, artifact.path));
+              const status = isIndexed
+                ? trajectoryIndexSummary(trajectoryIndex)
+                : (artifact.summary ?? "等待索引");
+              return (
+                <button type="button" key={artifact.path} onClick={() => indexTrajectory(artifact.path)}>
+                  <span className="mono">{artifact.path}</span>
+                  <small>{formatBytes(artifact.sizeBytes)} · {status}</small>
+                </button>
+              );
+            })}
           </div>
           <div className="trajectory-summary">
             {trajectoryIndex ? (
@@ -7635,6 +8023,27 @@ function TrajectoryIndexPanel({
       )}
     </div>
   );
+}
+
+function normalizeArtifactPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function artifactPathMatches(left: string, right: string) {
+  const normalizedLeft = normalizeArtifactPath(left);
+  const normalizedRight = normalizeArtifactPath(right);
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.endsWith(`/${normalizedRight}`) ||
+    normalizedRight.endsWith(`/${normalizedLeft}`)
+  );
+}
+
+function trajectoryIndexSummary(index: TrajectoryIndex | null) {
+  if (!index) return "等待索引";
+  const strategy = index.strategy === "textOffsets" ? "文本索引" : index.strategy === "metadataOnly" ? "metadata-only" : "不支持预览";
+  const frameText = typeof index.frameCount === "number" ? `${index.frameCount} frames` : "未解码帧数";
+  return `已索引 · ${index.format} · ${strategy} · ${frameText}`;
 }
 
 function TrajectoryAnalysisPackagePanel({
@@ -7782,10 +8191,145 @@ function formatNumber(value: number) {
   if (!Number.isFinite(value)) {
     return "n/a";
   }
+  if (value === 0) {
+    return "0";
+  }
   if (Math.abs(value) >= 1000 || Math.abs(value) < 0.01) {
     return value.toExponential(2);
   }
   return value.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function runScriptNameForEngine(engineId?: string | null) {
+  switch (engineId) {
+    case "openmm":
+      return "run-openmm.sh";
+    case "ambertools":
+      return "run-ambertools.sh";
+    case "namd":
+      return "run-namd.sh";
+    case "lammps":
+      return "run-lammps.sh";
+    case "cp2k":
+      return "run-cp2k.sh";
+    case "genesis":
+      return "run-genesis.sh";
+    case "hoomd":
+      return "run-hoomd.sh";
+    case "dl_poly":
+      return "run-dl-poly.sh";
+    case "tinker":
+      return "run-tinker.sh";
+    case "amber_pmemd":
+      return "run-amber-pmemd.sh";
+    case "charmm":
+      return "run-charmm.sh";
+    case "desmond":
+      return "run-desmond.sh";
+    case "acemd":
+      return "run-acemd.sh";
+    default:
+      return "run-gromacs.sh";
+  }
+}
+
+function formatPluginStream(value: string | null | undefined) {
+  const text = value?.trim();
+  if (!text) {
+    return "(empty)";
+  }
+  if (!/^[{[]/.test(text)) {
+    return decodeEscapedUnicode(value ?? "");
+  }
+  try {
+    return JSON.stringify(decodeJsonUnicodeEscapes(JSON.parse(text)), null, 2);
+  } catch {
+    return decodeEscapedUnicode(value ?? "");
+  }
+}
+
+function decodeJsonUnicodeEscapes(value: unknown): unknown {
+  if (typeof value === "string") {
+    return decodeEscapedUnicode(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => decodeJsonUnicodeEscapes(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, decodeJsonUnicodeEscapes(item)])
+    );
+  }
+  return value;
+}
+
+function decodeEscapedUnicode(value: string) {
+  return value.replace(/\\u([0-9a-fA-F]{4})/g, (_, code: string) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function planArtifactTokens(plan: SimulationPlan) {
+  const engine = plan.engineId.toLowerCase();
+  const dashedEngine = engine.replace(/_/g, "-");
+  const compactEngine = engine.replace(/[^a-z0-9]/g, "");
+  return {
+    planId: plan.id.toLowerCase(),
+    compactPlanId: plan.id.replace(/-/g, "").toLowerCase(),
+    engines: Array.from(new Set([engine, dashedEngine, compactEngine]))
+  };
+}
+
+function artifactBelongsToPlan(artifact: RunArtifact, plan: SimulationPlan) {
+  const path = artifact.path.toLowerCase();
+  const { planId, compactPlanId, engines } = planArtifactTokens(plan);
+  if (path.includes(planId) || path.includes(compactPlanId)) {
+    return true;
+  }
+  if (path.startsWith("logs/automd-ssh.")) {
+    return true;
+  }
+  if (plan.engineId === "gromacs" && path.startsWith("analysis/")) {
+    return ["rmsd", "rmsf", "rg", "hbond", "distance", "angle", "dihedral", "energy", "contact"].some((name) =>
+      path.includes(name)
+    );
+  }
+  return engines.some((engine) =>
+    path.startsWith(`generated/${engine}/`) ||
+    path.startsWith(`analysis/${engine}`) ||
+    path.startsWith(`checkpoints/${engine}`) ||
+    path.startsWith(`trajectories/${engine}`)
+  );
+}
+
+function artifactsForPlan(artifacts: RunArtifact[], plan: SimulationPlan | null) {
+  if (!plan) return artifacts;
+  return artifacts.filter((artifact) => artifactBelongsToPlan(artifact, plan));
+}
+
+function artifactIndexForPlan(index: ArtifactIndex | null, plan: SimulationPlan | null): ArtifactIndex | null {
+  if (!index || !plan) return index;
+  return {
+    ...index,
+    artifacts: artifactsForPlan(index.artifacts, plan)
+  };
+}
+
+function analysisForArtifacts(result: AnalysisParseResult | null, artifacts: RunArtifact[]) {
+  if (!result) return result;
+  const allowedPaths = new Set(
+    artifacts
+      .filter((artifact) => artifact.kind === "analysisTable")
+      .map((artifact) => normalizeArtifactPath(artifact.path))
+  );
+  if (!allowedPaths.size) {
+    return result;
+  }
+  const series = result.series.filter((item) => {
+    return Array.from(allowedPaths).some((path) => artifactPathMatches(path, item.path));
+  });
+  return {
+    ...result,
+    series: series.length ? series : result.series
+  };
 }
 
 function ReportPanel({
@@ -7813,6 +8357,24 @@ function ReportPanel({
   refreshAnalysis: () => void;
   exportReport: (format: ReportFormat) => void;
 }) {
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const reportArtifactIndex = useMemo(() => artifactIndexForPlan(artifactIndex, plan), [artifactIndex, plan]);
+  const displayedArtifacts: RunArtifact[] = reportArtifactIndex?.artifacts.length
+    ? reportArtifactIndex.artifacts
+    : artifactsForPlan(
+        artifactRecords.map((artifact) => ({
+          path: artifact.path,
+          kind: artifact.kind,
+          sizeBytes: artifact.sizeBytes,
+          modifiedAt: artifact.modifiedAt,
+          summary: artifact.summary
+        })),
+        plan
+      );
+  const reportAnalysisResult = useMemo(
+    () => analysisForArtifacts(analysisResult, displayedArtifacts),
+    [analysisResult, displayedArtifacts]
+  );
   const report = useMemo(() => {
     if (!plan) {
       return "# AutoMD Report\n\nNo simulation plan generated yet.\n";
@@ -7838,12 +8400,28 @@ ${plan.stages.map((stage) => `- ${stage.enabled ? "[x]" : "[ ]"} ${stage.label}`
 - Status: ${validation?.status ?? "unknown"}
 
 ## Artifacts
-${artifactIndex?.artifacts.map((artifact) => `- ${artifact.kind}: ${artifact.path}`).join("\n") ?? "- No artifacts indexed"}
+${displayedArtifacts.length ? displayedArtifacts.map((artifact) => `- ${artifact.kind}: ${artifact.path}`).join("\n") : "- No artifacts indexed for the current plan"}
 
 ## Analysis
-${analysisResult?.series.map((series) => `- ${series.label}: ${series.points.length} points, last=${series.lastY ?? "n/a"} ${series.yLabel}`).join("\n") ?? "- No analysis series parsed"}
+${reportAnalysisResult?.series.map((series) => `- ${series.label}: ${series.points.length} points, last=${series.lastY ?? "n/a"} ${series.yLabel}`).join("\n") ?? "- No analysis series parsed"}
 `;
-  }, [plan, project, validation, artifactIndex, analysisResult]);
+  }, [plan, project, validation, displayedArtifacts, reportAnalysisResult]);
+  const reportPreview = exportedReport
+    ? exportedReport.format === "pdf"
+      ? `PDF report exported to ${exportedReport.path}.\n\nAutoMD generated a binary PDF file. The text preview remains below so the report is readable in-app.\n\n${report}`
+      : exportedReport.contents
+    : report;
+
+  async function copyReport() {
+    try {
+      await navigator.clipboard?.writeText(report);
+      setCopyStatus("已复制报告草稿");
+      window.setTimeout(() => setCopyStatus(null), 2500);
+    } catch {
+      setCopyStatus("复制失败，请使用导出 MD");
+      window.setTimeout(() => setCopyStatus(null), 3500);
+    }
+  }
 
   return (
     <div className="content-grid">
@@ -7851,8 +8429,8 @@ ${analysisResult?.series.map((series) => `- ${series.label}: ${series.points.len
         <div className="panel-title-row">
           <h3>Markdown 报告草稿</h3>
           <div className="button-row compact">
-            <button type="button" onClick={() => void navigator.clipboard?.writeText(report)}>
-              复制
+            <button type="button" onClick={copyReport}>
+              {copyStatus ?? "复制"}
             </button>
             <button type="button" onClick={() => exportReport("markdown")}>
               导出 MD
@@ -7870,17 +8448,22 @@ ${analysisResult?.series.map((series) => `- ${series.label}: ${series.points.len
             已导出 {exportedReport.format}: <span className="mono">{exportedReport.path}</span>
           </div>
         ) : null}
-        <CodeBlock value={exportedReport?.contents ?? report} />
+        <CodeBlock value={reportPreview} />
       </section>
-      <section className="panel">
+      <section className="panel span-3">
         <div className="panel-title-row">
           <h3>Artifact 索引</h3>
           <button type="button" onClick={refreshArtifacts}>
             刷新
           </button>
         </div>
-        {artifactIndex?.artifacts.length ? (
-          <ArtifactTable artifacts={artifactIndex.artifacts} />
+        {displayedArtifacts.length ? (
+          <>
+            {!reportArtifactIndex?.artifacts.length && artifactRecords.length ? (
+              <div className="hint-text">显示 SQLite 缓存中的 artifact。点击“刷新”可重新扫描项目目录。</div>
+            ) : null}
+            <ArtifactTable artifacts={displayedArtifacts} />
+          </>
         ) : (
           <EmptyState title="尚无索引" text="运行任务完成后会自动索引，也可以在创建项目后手动刷新。" />
         )}
@@ -7896,7 +8479,7 @@ ${analysisResult?.series.map((series) => `- ${series.label}: ${series.points.len
             解析分析结果
           </button>
         </div>
-        <AnalysisChartGrid analysisResult={analysisResult} />
+        <AnalysisChartGrid analysisResult={reportAnalysisResult} />
       </section>
     </div>
   );

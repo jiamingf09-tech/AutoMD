@@ -347,6 +347,7 @@ export const api = {
       found: false,
       command: null,
       path: null,
+      version: null,
       checkedLocations: [],
       message: "Web 预览模式无法访问本机文件系统。"
     })),

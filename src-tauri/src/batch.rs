@@ -106,7 +106,12 @@ pub fn prepare_batch_experiment(
         );
         files.extend(package.files);
         commands.push(replica_command.clone());
-        replica_scripts.push((replica_index, seed, run_directory.clone(), replica_command.command.clone()));
+        replica_scripts.push((
+            replica_index,
+            seed,
+            run_directory.clone(),
+            replica_command.command.clone(),
+        ));
         replicas.push(BatchReplicaPlan {
             replica_index,
             seed,
@@ -122,7 +127,9 @@ pub fn prepare_batch_experiment(
         working_directory: ".".to_string(),
         expected_outputs: replica_scripts
             .iter()
-            .map(|(index, _, run_directory, _)| format!("{run_directory}/batch-replica-{index:02}.log"))
+            .map(|(index, _, run_directory, _)| {
+                format!("{run_directory}/batch-replica-{index:02}.log")
+            })
             .collect(),
     };
     let mut all_commands = vec![batch_command.clone()];
@@ -131,7 +138,10 @@ pub fn prepare_batch_experiment(
 
     for replica in &replicas {
         files.push(EngineRunFile {
-            path: format!("{generated_directory}/replica-{:02}/automd-plan.json", replica.replica_index),
+            path: format!(
+                "{generated_directory}/replica-{:02}/automd-plan.json",
+                replica.replica_index
+            ),
             language: "json".to_string(),
             contents: to_string_pretty(&replica.plan)?,
             written: false,
@@ -199,7 +209,10 @@ fn inject_replica_seed(plan: &mut SimulationPlan, seed: u64) {
     }
 }
 
-fn namespace_replica_package(mut package: EngineRunPackage, replica_index: u32) -> EngineRunPackage {
+fn namespace_replica_package(
+    mut package: EngineRunPackage,
+    replica_index: u32,
+) -> EngineRunPackage {
     let generated_prefix = format!("generated/batch/replica-{replica_index:02}");
     let mut replacements = Vec::<(String, String)>::new();
     let mut directory_replacements = BTreeSet::<(String, String)>::new();
@@ -241,14 +254,19 @@ fn generated_directory_pair(old_path: &str, new_path: &str) -> Option<(String, S
     }
     Some((
         format!("{}/{}", old_parts[0], old_parts[1]),
-        format!("{}/{}/{}/{}", new_parts[0], new_parts[1], new_parts[2], new_parts[3]),
+        format!(
+            "{}/{}/{}/{}",
+            new_parts[0], new_parts[1], new_parts[2], new_parts[3]
+        ),
     ))
 }
 
 fn apply_replacements(value: &str, replacements: &[(String, String)]) -> String {
     replacements
         .iter()
-        .fold(value.to_string(), |current, (old, new)| current.replace(old, new))
+        .fold(value.to_string(), |current, (old, new)| {
+            current.replace(old, new)
+        })
 }
 
 fn find_run_script(package: &EngineRunPackage) -> Option<String> {
@@ -302,7 +320,10 @@ echo "[AutoMD] batch experiment completed"
     )
 }
 
-fn write_files(project_path: &str, files: &mut [EngineRunFile]) -> Result<(), BatchExperimentError> {
+fn write_files(
+    project_path: &str,
+    files: &mut [EngineRunFile],
+) -> Result<(), BatchExperimentError> {
     let root = PathBuf::from(project_path);
     for file in files {
         let destination = safe_join(&root, &file.path);
@@ -359,7 +380,10 @@ mod tests {
         assert!(package
             .replicas
             .iter()
-            .all(|replica| replica.plan.id != source.id && replica.run_directory.contains(&replica.plan.id.simple().to_string())));
+            .all(|replica| replica.plan.id != source.id
+                && replica
+                    .run_directory
+                    .contains(&replica.plan.id.simple().to_string())));
         assert!(package
             .files
             .iter()
@@ -391,8 +415,12 @@ mod tests {
         assert!(package.files.iter().all(|file| file.written));
         assert!(root.join("generated/batch/automd-batch.json").exists());
         assert!(root.join("generated/batch/run-batch.sh").exists());
-        assert!(root.join("generated/batch/replica-01/gromacs/md.mdp").exists());
-        assert!(root.join("generated/batch/replica-02/gromacs/md.mdp").exists());
+        assert!(root
+            .join("generated/batch/replica-01/gromacs/md.mdp")
+            .exists());
+        assert!(root
+            .join("generated/batch/replica-02/gromacs/md.mdp")
+            .exists());
 
         fs::remove_dir_all(root).expect("cleanup temp root");
     }

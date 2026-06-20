@@ -21,6 +21,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::models::{RemoteAuthMethod, RemoteProfile};
 use crate::sysenv;
@@ -170,7 +172,17 @@ pub fn run_remote(
     password: Option<&str>,
     remote_command: &str,
 ) -> Result<SshOutcome, String> {
-    run_remote_inner(profile, password, remote_command, None)
+    run_remote_inner(profile, password, remote_command, None, None)
+}
+
+/// Run a remote command with a wall-clock timeout.
+pub fn run_remote_timeout(
+    profile: &RemoteProfile,
+    password: Option<&str>,
+    remote_command: &str,
+    timeout: Duration,
+) -> Result<SshOutcome, String> {
+    run_remote_inner(profile, password, remote_command, None, Some(timeout))
 }
 
 /// Run a remote command, piping `stdin_text` to it.
@@ -180,7 +192,7 @@ pub fn run_remote_stdin(
     remote_command: &str,
     stdin_text: &str,
 ) -> Result<SshOutcome, String> {
-    run_remote_inner(profile, password, remote_command, Some(stdin_text))
+    run_remote_inner(profile, password, remote_command, Some(stdin_text), None)
 }
 
 fn run_remote_inner(
@@ -188,6 +200,7 @@ fn run_remote_inner(
     password: Option<&str>,
     remote_command: &str,
     stdin_text: Option<&str>,
+    timeout: Option<Duration>,
 ) -> Result<SshOutcome, String> {
     ensure_session(profile, password)?;
 
@@ -205,7 +218,11 @@ fn run_remote_inner(
     let mut command = Command::new(ssh_program());
     command
         .args(&args)
-        .stdin(if stdin_text.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin_text.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -219,6 +236,58 @@ fn run_remote_inner(
                 .map_err(|error| format!("写入 ssh stdin 失败：{error}"))?;
         }
     }
+    if let Some(timeout) = timeout {
+        let mut stdout_reader = child
+            .stdout
+            .take()
+            .ok_or_else(|| "ssh stdout pipe unavailable".to_string())?;
+        let mut stderr_reader = child
+            .stderr
+            .take()
+            .ok_or_else(|| "ssh stderr pipe unavailable".to_string())?;
+        let stdout_handle = thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stdout_reader.read_to_end(&mut buffer);
+            buffer
+        });
+        let stderr_handle = thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr_reader.read_to_end(&mut buffer);
+            buffer
+        });
+        let started = Instant::now();
+        let status = loop {
+            if child
+                .try_wait()
+                .map_err(|error| format!("ssh 执行失败：{error}"))?
+                .is_some()
+            {
+                break child
+                    .wait()
+                    .map_err(|error| format!("ssh 执行失败：{error}"))?;
+            }
+            if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "ssh 命令超过 {} 秒未完成，已终止。",
+                    timeout.as_secs()
+                ));
+            }
+            thread::sleep(Duration::from_millis(200));
+        };
+        let stdout = stdout_handle.join().unwrap_or_default();
+        let stderr = stderr_handle.join().unwrap_or_default();
+        return Ok(SshOutcome {
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            exit_code: status.code(),
+            success: status.success(),
+        });
+    }
+
     let output = child
         .wait_with_output()
         .map_err(|error| format!("ssh 执行失败：{error}"))?;
@@ -265,17 +334,48 @@ fn expand_remote_path_vars(profile: &RemoteProfile, remote_dir: &str) -> String 
 }
 
 pub fn transferred_regular_file_count(output: &str) -> Option<u32> {
+    parse_rsync_stat_count(output, &["Number of regular files transferred"])
+        .or_else(|| parse_rsync_stat_count(output, &["Number of files transferred"]))
+}
+
+pub fn total_regular_file_count(output: &str) -> Option<u32> {
     output.lines().find_map(|line| {
         let (label, value) = line.split_once(':')?;
-        if !label.trim().eq_ignore_ascii_case("Number of regular files transferred") {
+        if !label.trim().eq_ignore_ascii_case("Number of files") {
             return None;
         }
-        value
-            .trim()
-            .replace(',', "")
-            .parse::<u32>()
-            .ok()
+        parse_rsync_reg_count(value).or_else(|| parse_leading_count(value))
     })
+}
+
+fn parse_rsync_stat_count(output: &str, labels: &[&str]) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        if !labels
+            .iter()
+            .any(|expected| label.trim().eq_ignore_ascii_case(expected))
+        {
+            return None;
+        }
+        parse_leading_count(value)
+    })
+}
+
+fn parse_rsync_reg_count(value: &str) -> Option<u32> {
+    let lower = value.to_ascii_lowercase();
+    let marker = "reg:";
+    let start = lower.find(marker)? + marker.len();
+    parse_leading_count(&value[start..])
+}
+
+fn parse_leading_count(value: &str) -> Option<u32> {
+    let digits: String = value
+        .trim()
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == ',')
+        .filter(|ch| *ch != ',')
+        .collect();
+    (!digits.is_empty()).then_some(digits)?.parse::<u32>().ok()
 }
 
 fn upload_filter_args() -> &'static [&'static str] {
@@ -287,7 +387,11 @@ fn upload_filter_args() -> &'static [&'static str] {
         "--exclude=src-tauri/target/",
         "--exclude=dist/",
         "--exclude=target/",
-        "--exclude=runs/",
+        "--include=runs/",
+        "--include=runs/**/",
+        "--include=runs/**/*.sh",
+        "--include=runs/**/README.md",
+        "--exclude=runs/**",
         "--exclude=trajectories/",
         "--exclude=analysis/",
         "--exclude=reports/",
@@ -358,7 +462,8 @@ fn rsync_transfer(
 pub fn classify_connection_error(raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("permission denied") || lower.contains("authentication failed") {
-        "认证失败：用户名、密码或密钥不正确（HPC 通常三次失败会临时封禁该 IP，请稍后再试）。".to_string()
+        "认证失败：用户名、密码或密钥不正确（HPC 通常三次失败会临时封禁该 IP，请稍后再试）。"
+            .to_string()
     } else if lower.contains("connection timed out") || lower.contains("operation timed out") {
         "连接超时：主机/端口不可达，请检查 IP、端口和网络（校园网/VPN）。".to_string()
     } else if lower.contains("connection refused") {
@@ -366,7 +471,8 @@ pub fn classify_connection_error(raw: &str) -> String {
     } else if lower.contains("could not resolve") || lower.contains("name or service not known") {
         "无法解析主机名：请检查主机/IP 是否正确。".to_string()
     } else if lower.contains("host key verification failed") {
-        "主机密钥校验失败：远程主机密钥变了，请清理 ~/.ssh/known_hosts 中对应条目后重试。".to_string()
+        "主机密钥校验失败：远程主机密钥变了，请清理 ~/.ssh/known_hosts 中对应条目后重试。"
+            .to_string()
     } else if raw.trim().is_empty() {
         "连接失败：未知原因（无输出）。".to_string()
     } else {
@@ -433,7 +539,8 @@ fn pty_password_run(
                     collected.extend_from_slice(&buffer[..n]);
                     if !sent {
                         let start = collected.len().saturating_sub(256);
-                        let tail = String::from_utf8_lossy(&collected[start..]).to_ascii_lowercase();
+                        let tail =
+                            String::from_utf8_lossy(&collected[start..]).to_ascii_lowercase();
                         if tail.contains("password") || tail.contains("passcode") {
                             let _ = writer.write_all(password.as_bytes());
                             let _ = writer.write_all(b"\n");
@@ -484,7 +591,10 @@ mod tests {
 
     #[test]
     fn target_uses_username_when_present() {
-        assert_eq!(target(&profile(RemoteAuthMethod::Agent)), "noir@login.example");
+        assert_eq!(
+            target(&profile(RemoteAuthMethod::Agent)),
+            "noir@login.example"
+        );
         let mut anon = profile(RemoteAuthMethod::Agent);
         anon.username = String::new();
         assert_eq!(target(&anon), "login.example");
@@ -494,7 +604,9 @@ mod tests {
     fn dial_opts_set_port_and_identity_for_key_auth() {
         let opts = dial_opts(&profile(RemoteAuthMethod::Key));
         assert!(opts.windows(2).any(|w| w[0] == "-p" && w[1] == "2222"));
-        assert!(opts.windows(2).any(|w| w[0] == "-i" && w[1] == "~/.ssh/id_ed25519"));
+        assert!(opts
+            .windows(2)
+            .any(|w| w[0] == "-i" && w[1] == "~/.ssh/id_ed25519"));
         // Password auth should not attach the identity file.
         let pwd = dial_opts(&profile(RemoteAuthMethod::Password));
         assert!(!pwd.iter().any(|o| o == "-i"));
@@ -512,8 +624,14 @@ mod tests {
 
     #[test]
     fn classify_maps_common_failures() {
-        assert!(classify_connection_error("Permission denied (publickey,password).").contains("认证失败"));
-        assert!(classify_connection_error("ssh: connect to host x port 22: Connection refused").contains("端口"));
+        assert!(
+            classify_connection_error("Permission denied (publickey,password).")
+                .contains("认证失败")
+        );
+        assert!(
+            classify_connection_error("ssh: connect to host x port 22: Connection refused")
+                .contains("端口")
+        );
         assert!(classify_connection_error("Connection timed out").contains("超时"));
     }
 
@@ -526,5 +644,28 @@ Total transferred file size: 10,240 bytes
 ";
 
         assert_eq!(transferred_regular_file_count(output), Some(1234));
+        assert_eq!(total_regular_file_count(output), Some(31));
+    }
+
+    #[test]
+    fn parses_legacy_rsync_file_transfer_count() {
+        let output = "\
+Number of files: 6
+Number of files transferred: 2
+Total file size: 10,240 bytes
+";
+
+        assert_eq!(transferred_regular_file_count(output), Some(2));
+        assert_eq!(total_regular_file_count(output), Some(6));
+    }
+
+    #[test]
+    fn upload_filters_keep_remote_run_entrypoints() {
+        let filters = upload_filter_args();
+
+        assert!(filters.contains(&"--include=runs/**/*.sh"));
+        assert!(filters.contains(&"--include=runs/**/README.md"));
+        assert!(filters.contains(&"--exclude=runs/**"));
+        assert!(!filters.contains(&"--exclude=runs/"));
     }
 }

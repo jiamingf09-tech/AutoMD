@@ -22,12 +22,18 @@ pub enum BuildRunnerError {
     RecipeExport(String),
 }
 
-pub fn run_build_workflow(request: BuildWorkflowRequest) -> Result<BuildWorkflowResult, BuildRunnerError> {
+pub fn run_build_workflow(
+    request: BuildWorkflowRequest,
+) -> Result<BuildWorkflowResult, BuildRunnerError> {
     let started_at = Utc::now();
     let started_instant = Instant::now();
     let engine_id = request.build_options.engine_id.clone();
     let preview = preview_export(&request)?;
-    let command = format!("bash {}/build-{}.sh", shell_quote(&preview.directory), shell_quote(&engine_id));
+    let command = format!(
+        "bash {}/build-{}.sh",
+        shell_quote(&preview.directory),
+        shell_quote(&engine_id)
+    );
     let mut warnings = preview.warnings.clone();
     let mut files_written = Vec::new();
     let mut stdout = String::new();
@@ -38,7 +44,10 @@ pub fn run_build_workflow(request: BuildWorkflowRequest) -> Result<BuildWorkflow
     let mut log_path = None;
 
     if matches!(request.mode, BuildWorkflowMode::DryRun) {
-        warnings.push("Dry run only; no build files were written and no compiler process was started.".to_string());
+        warnings.push(
+            "Dry run only; no build files were written and no compiler process was started."
+                .to_string(),
+        );
     } else {
         let exported = recipes::export_recipe_package(RecipeExportRequest {
             project_path: request.project_path.clone(),
@@ -47,15 +56,27 @@ pub fn run_build_workflow(request: BuildWorkflowRequest) -> Result<BuildWorkflow
             include_build_script: request.include_build_script,
         })
         .map_err(BuildRunnerError::RecipeExport)?;
-        files_written = exported.files.iter().map(|file| file.path.clone()).collect();
+        files_written = exported
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
         warnings.extend(exported.warnings);
 
         if matches!(request.mode, BuildWorkflowMode::WriteFiles) {
-            warnings.push("Build recipe files were written; command execution was skipped.".to_string());
+            warnings.push(
+                "Build recipe files were written; command execution was skipped.".to_string(),
+            );
         } else if request.include_build_script {
             let project_root = PathBuf::from(&request.project_path);
-            let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS).max(1));
-            let execution = execute_build_script(&project_root, &exported.directory, &engine_id, timeout)?;
+            let timeout = Duration::from_secs(
+                request
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
+                    .max(1),
+            );
+            let execution =
+                execute_build_script(&project_root, &exported.directory, &engine_id, timeout)?;
             stdout = execution.stdout;
             stderr = execution.stderr;
             exit_code = execution.exit_code;
@@ -63,10 +84,15 @@ pub fn run_build_workflow(request: BuildWorkflowRequest) -> Result<BuildWorkflow
             log_path = Some(execution.log_path);
             warnings.extend(execution.warnings);
             if status == TaskStatus::Failed {
-                failure_analysis = Some(classify_build_failure(&engine_id, &stdout, &stderr, exit_code));
+                failure_analysis = Some(classify_build_failure(
+                    &engine_id, &stdout, &stderr, exit_code,
+                ));
             }
         } else {
-            warnings.push("No build script was requested, so execute mode only wrote recipe/container files.".to_string());
+            warnings.push(
+                "No build script was requested, so execute mode only wrote recipe/container files."
+                    .to_string(),
+            );
         }
     }
 
@@ -207,17 +233,59 @@ fn classify_build_failure(
 ) -> FailureAnalysis {
     let log = format!("{stdout}\n{stderr}");
     let lower = log.to_ascii_lowercase();
-    let category = if contains_any(&lower, &["cmake: command not found", "command not found: cmake", "ninja: command not found", "make: command not found", "git: command not found", "curl: command not found", "compiler not found", "c++: command not found", "gcc: command not found", "g++: command not found"]) {
+    let category = if contains_any(
+        &lower,
+        &[
+            "cmake: command not found",
+            "command not found: cmake",
+            "ninja: command not found",
+            "make: command not found",
+            "git: command not found",
+            "curl: command not found",
+            "compiler not found",
+            "gfortran: command not found",
+            "pkg-config: command not found",
+            "pkgconfig: command not found",
+            "missing required tinker build tool",
+            "missing required tinker build dependency",
+            "fortran-compiler",
+            "pkg-config fftw3",
+            "c++: command not found",
+            "gcc: command not found",
+            "g++: command not found",
+        ],
+    ) {
         FailureCategory::MissingExecutable
-    } else if contains_any(&lower, &["permission denied", "read-only file system", "no space left on device", "disk quota exceeded"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "permission denied",
+            "read-only file system",
+            "no space left on device",
+            "disk quota exceeded",
+        ],
+    ) {
         FailureCategory::DiskOrPermission
-    } else if contains_any(&lower, &["cuda", "cudart", "nvcc", "hip", "rocm", "opencl", "sycl"]) {
+    } else if contains_any(
+        &lower,
+        &["cuda", "cudart", "nvcc", "hip", "rocm", "opencl", "sycl"],
+    ) {
         FailureCategory::GpuUnavailable
     } else if contains_any(&lower, &["mpi", "mpicc", "mpicxx", "openmpi", "mpirun"]) {
         FailureCategory::MpiFailure
     } else if contains_any(&lower, &["plumed", "patch failed"]) {
         FailureCategory::ParameterMismatch
-    } else if contains_any(&lower, &["could not resolve host", "failed to connect", "connection timed out", "ssl certificate", "http error", "not found"]) {
+    } else if contains_any(
+        &lower,
+        &[
+            "could not resolve host",
+            "failed to connect",
+            "connection timed out",
+            "ssl certificate",
+            "http error",
+            "not found",
+        ],
+    ) {
         FailureCategory::MissingInput
     } else {
         FailureCategory::Unknown
@@ -228,9 +296,15 @@ fn classify_build_failure(
         .map(str::trim)
         .find(|line| !line.is_empty())
     {
-        format!("Build for {engine_id} failed with exit code {:?}: {line}", exit_code)
+        format!(
+            "Build for {engine_id} failed with exit code {:?}: {line}",
+            exit_code
+        )
     } else {
-        format!("Build for {engine_id} failed with exit code {:?}", exit_code)
+        format!(
+            "Build for {engine_id} failed with exit code {:?}",
+            exit_code
+        )
     };
     FailureAnalysis {
         engine_id: engine_id.to_string(),
@@ -245,9 +319,9 @@ fn build_failure_suggestions(engine_id: &str, category: FailureCategory) -> Vec<
     match category {
         FailureCategory::MissingExecutable => vec![FailureSuggestion {
             title: "Install the build toolchain".to_string(),
-            detail: "Install CMake, make/ninja, git, curl, and a C/C++ compiler before rerunning the build recipe.".to_string(),
+            detail: "Install CMake, make/ninja, git, curl, pkg-config, FFTW, and the needed C/C++/Fortran compiler before rerunning the build recipe. AutoMD Tinker recipes can bootstrap these into $HOME/.automd/build-deps/tinker when conda-forge access is available.".to_string(),
             action_label: "Check build tools".to_string(),
-            command_hint: Some("cmake --version && git --version && c++ --version".to_string()),
+            command_hint: Some("cmake --version && git --version && c++ --version && (gfortran --version || echo check conda fortran-compiler) && pkg-config --exists fftw3".to_string()),
         }],
         FailureCategory::DiskOrPermission => vec![FailureSuggestion {
             title: "Use a writable build directory".to_string(),
@@ -329,7 +403,13 @@ fn mark_executable_if_needed(_path: &Path) -> Result<(), BuildRunnerError> {
 fn sanitize_path_component(value: &str) -> String {
     let sanitized: String = value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = sanitized.trim_matches('-');
     if trimmed.is_empty() {
@@ -350,10 +430,9 @@ fn safe_join(root: &Path, relative: &str) -> PathBuf {
 }
 
 fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '$'))
-    {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '$')
+    }) {
         value.to_string()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
@@ -378,12 +457,12 @@ mod tests {
                 project_path: root.display().to_string(),
                 build_options: BuildRecipeOptions {
                     engine_id: engine_id.to_string(),
-                enable_mpi: false,
-                enable_gpu: false,
-                gpu_backend: None,
-                enable_plumed: false,
-                install_prefix: Some(root.join("install").display().to_string()),
-            },
+                    enable_mpi: false,
+                    enable_gpu: false,
+                    gpu_backend: None,
+                    enable_plumed: false,
+                    install_prefix: Some(root.join("install").display().to_string()),
+                },
                 include_container: false,
                 include_build_script: true,
                 mode,
@@ -399,7 +478,9 @@ mod tests {
 
         assert_eq!(result.status, TaskStatus::Completed);
         assert!(result.stdout.is_empty());
-        assert!(root.join("build-recipes/dummy_engine/build-dummy_engine.sh").exists());
+        assert!(root
+            .join("build-recipes/dummy_engine/build-dummy_engine.sh")
+            .exists());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -419,12 +500,7 @@ mod tests {
 
     #[test]
     fn build_failure_classifier_detects_missing_toolchain() {
-        let analysis = classify_build_failure(
-            "gromacs",
-            "",
-            "cmake: command not found",
-            Some(127),
-        );
+        let analysis = classify_build_failure("gromacs", "", "cmake: command not found", Some(127));
 
         assert_eq!(analysis.category, FailureCategory::MissingExecutable);
         assert!(!analysis.suggestions.is_empty());

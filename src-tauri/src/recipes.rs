@@ -1,15 +1,22 @@
 use crate::models::*;
 use serde_json::to_string_pretty;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 
 pub fn remote_execution_package(request: RemoteExecutionRequest) -> RemoteExecutionPackage {
     let plan = request.plan;
     let profile = request.profile;
     let run_directory = engine_run_directory(&plan);
-    let remote_workdir = format!("{}/{}-{}", profile.workdir, sanitize_job_name(&plan.name), plan.id.simple());
+    let engine_slug = sanitize_job_name(&plan.engine_id);
+    let remote_workdir = format!(
+        "{}/{}-{}-{}",
+        profile.workdir,
+        sanitize_job_name(&plan.name),
+        engine_slug,
+        plan.id.simple()
+    );
     let scheduler_script = scheduler_script(&plan, &profile, &run_directory, &remote_workdir);
     let scheduler_filename = match &profile.scheduler {
         ExecutionMode::Slurm => "remote/submit.slurm",
@@ -22,7 +29,7 @@ pub fn remote_execution_package(request: RemoteExecutionRequest) -> RemoteExecut
         .local_project_path
         .clone()
         .unwrap_or_else(|| ".".to_string());
-    let remote_target = format!("{}:{}", profile.host, shell_quote(&remote_workdir));
+    let remote_target = rsync_remote_target(&profile, &remote_workdir);
     let submit_command = submit_command(&profile, &remote_workdir, &scheduler_filename);
     let mut warnings = remote_warnings(&plan, &profile);
     if !request.include_submit {
@@ -48,13 +55,14 @@ pub fn remote_execution_package(request: RemoteExecutionRequest) -> RemoteExecut
                     r#"#!/usr/bin/env bash
 set -euo pipefail
 
-ssh {host} {mkdir}
-rsync -az --delete --partial --stats \
+{ssh} {mkdir}
+rsync -az --delete --partial --stats -e {rsync_ssh} \
   --exclude 'src-tauri/target' \
   --exclude 'node_modules' \
   {local}/ {target}/
 "#,
-                    host = shell_quote(&profile.host),
+                    ssh = ssh_invocation(&profile),
+                    rsync_ssh = shell_quote(&rsync_ssh_transport(&profile)),
                     mkdir = shell_quote(&format!("mkdir -p {}", shell_quote(&remote_workdir))),
                     local = shell_quote(&local_project),
                     target = remote_target,
@@ -68,19 +76,20 @@ rsync -az --delete --partial --stats \
 set -euo pipefail
 
 mkdir -p {local}
-rsync -az --partial --stats \
+rsync -az --partial --stats -e {rsync_ssh} \
   {target}/runs/ {local}/runs/
-rsync -az --partial --stats \
+rsync -az --partial --stats -e {rsync_ssh} \
   {target}/checkpoints/ {local}/checkpoints/
-rsync -az --partial --stats \
+rsync -az --partial --stats -e {rsync_ssh} \
   {target}/trajectories/ {local}/trajectories/
-rsync -az --partial --stats \
+rsync -az --partial --stats -e {rsync_ssh} \
   {target}/analysis/ {local}/analysis/
-rsync -az --partial --stats \
+rsync -az --partial --stats -e {rsync_ssh} \
   {target}/reports/ {local}/reports/
 "#,
                     local = shell_quote(&local_project),
                     target = remote_target,
+                    rsync_ssh = shell_quote(&rsync_ssh_transport(&profile)),
                 ),
             },
         ],
@@ -89,8 +98,9 @@ rsync -az --partial --stats \
                 id: "sync-up".to_string(),
                 label: "同步到远程".to_string(),
                 command: format!(
-                    "ssh {host} {mkdir} && rsync -az --delete --partial --stats {local}/ {target}/",
-                    host = shell_quote(&profile.host),
+                    "{ssh} {mkdir} && rsync -az --delete --partial --stats -e {rsync_ssh} {local}/ {target}/",
+                    ssh = ssh_invocation(&profile),
+                    rsync_ssh = shell_quote(&rsync_ssh_transport(&profile)),
                     mkdir = shell_quote(&format!("mkdir -p {}", shell_quote(&remote_workdir))),
                     local = shell_quote(&local_project),
                     target = remote_target,
@@ -125,7 +135,8 @@ rsync -az --partial --stats \
                 id: "sync-down".to_string(),
                 label: "回收结果".to_string(),
                 command: format!(
-                    "rsync -az --partial --stats {target}/runs/ {local}/runs/ && rsync -az --partial --stats {target}/analysis/ {local}/analysis/",
+                    "rsync -az --partial --stats -e {rsync_ssh} {target}/runs/ {local}/runs/ && rsync -az --partial --stats -e {rsync_ssh} {target}/analysis/ {local}/analysis/",
+                    rsync_ssh = shell_quote(&rsync_ssh_transport(&profile)),
                     target = remote_target,
                     local = shell_quote(&local_project),
                 ),
@@ -166,14 +177,14 @@ set -euo pipefail
 mkdir -p logs
 echo "AutoMD plan: {plan_name}"
 echo "Engine: {engine_id}"
-echo "Started at: $(date -Is)"
+echo "Started at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # AutoMD will replace this placeholder with the selected engine adapter command.
 # For GROMACS this becomes: gmx grompp ... && gmx mdrun ...
 # For OpenMM this becomes: python automd_openmm_runner.py ...
 automd-run --plan automd-plan.json --engine {engine_id}
 
-echo "Finished at: $(date -Is)"
+echo "Finished at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "#,
         job_name = job_name,
         mpi_ranks = plan.resources.mpi_ranks.max(1),
@@ -233,9 +244,9 @@ set -euo pipefail
 cd {remote_workdir_quoted}
 mkdir -p logs runs analysis reports checkpoints trajectories
 {modules}
-echo "AutoMD remote SLURM job started at $(date -Is)"
+echo "AutoMD remote SLURM job started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 {engine_command}
-echo "AutoMD remote SLURM job finished at $(date -Is)"
+echo "AutoMD remote SLURM job finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "#,
         job_name = job_name,
         mpi_ranks = plan.resources.mpi_ranks.max(1),
@@ -279,9 +290,9 @@ set -euo pipefail
 cd {remote_workdir_quoted}
 mkdir -p logs runs analysis reports checkpoints trajectories
 {modules}
-echo "AutoMD remote PBS job started at $(date -Is)"
+echo "AutoMD remote PBS job started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 {engine_command}
-echo "AutoMD remote PBS job finished at $(date -Is)"
+echo "AutoMD remote PBS job finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "#,
         job_name = sanitize_job_name(&plan.name),
         cpu_threads = plan.resources.cpu_threads.max(1),
@@ -326,9 +337,9 @@ set -euo pipefail
 cd {remote_workdir_quoted}
 mkdir -p logs runs analysis reports checkpoints trajectories
 {modules}
-echo "AutoMD remote LSF job started at $(date -Is)"
+echo "AutoMD remote LSF job started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 {engine_command}
-echo "AutoMD remote LSF job finished at $(date -Is)"
+echo "AutoMD remote LSF job finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "#,
         job_name = sanitize_job_name(&plan.name),
         ranks = plan.resources.mpi_ranks.max(1) * plan.resources.cpu_threads.max(1),
@@ -353,9 +364,9 @@ set -euo pipefail
 cd {remote_workdir_quoted}
 mkdir -p logs runs analysis reports checkpoints trajectories
 {modules}
-echo "AutoMD remote SSH job started at $(date -Is)"
+echo "AutoMD remote SSH job started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 {engine_command}
-echo "AutoMD remote SSH job finished at $(date -Is)"
+echo "AutoMD remote SSH job finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 "#,
         remote_workdir_quoted = shell_quote(remote_workdir),
         modules = module_block(profile),
@@ -363,27 +374,31 @@ echo "AutoMD remote SSH job finished at $(date -Is)"
     )
 }
 
-fn submit_command(profile: &RemoteProfile, remote_workdir: &str, scheduler_filename: &str) -> String {
+fn submit_command(
+    profile: &RemoteProfile,
+    remote_workdir: &str,
+    scheduler_filename: &str,
+) -> String {
     let script = shell_quote(scheduler_filename);
     match &profile.scheduler {
         ExecutionMode::Slurm => format!(
-            "ssh {host} {remote_cmd}",
-            host = shell_quote(&profile.host),
+            "{ssh} {remote_cmd}",
+            ssh = ssh_invocation(profile),
             remote_cmd = shell_quote(&format!("cd {} && sbatch --parsable {script}", shell_quote(remote_workdir))),
         ),
         ExecutionMode::Pbs => format!(
-            "ssh {host} {remote_cmd}",
-            host = shell_quote(&profile.host),
+            "{ssh} {remote_cmd}",
+            ssh = ssh_invocation(profile),
             remote_cmd = shell_quote(&format!("cd {} && qsub {script}", shell_quote(remote_workdir))),
         ),
         ExecutionMode::Lsf => format!(
-            "ssh {host} {remote_cmd}",
-            host = shell_quote(&profile.host),
+            "{ssh} {remote_cmd}",
+            ssh = ssh_invocation(profile),
             remote_cmd = shell_quote(&format!("cd {} && bsub < {script}", shell_quote(remote_workdir))),
         ),
         _ => format!(
-            "ssh {host} {remote_cmd}",
-            host = shell_quote(&profile.host),
+            "{ssh} {remote_cmd}",
+            ssh = ssh_invocation(profile),
             remote_cmd = shell_quote(&format!(
                 "cd {} && mkdir -p logs && (nohup bash {script} > logs/automd-ssh.out 2> logs/automd-ssh.err < /dev/null & echo $!)",
                 shell_quote(remote_workdir)
@@ -394,32 +409,115 @@ fn submit_command(profile: &RemoteProfile, remote_workdir: &str, scheduler_filen
 
 fn status_command(profile: &RemoteProfile) -> String {
     match &profile.scheduler {
-        ExecutionMode::Slurm => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("squeue -j <job-id>")),
-        ExecutionMode::Pbs => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("qstat <job-id>")),
-        ExecutionMode::Lsf => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("bjobs <job-id>")),
-        _ => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("ps -p <pid> -o pid,etime,cmd")),
+        ExecutionMode::Slurm => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("squeue -j <job-id>")
+        ),
+        ExecutionMode::Pbs => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("qstat <job-id>")
+        ),
+        ExecutionMode::Lsf => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("bjobs <job-id>")
+        ),
+        _ => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("ps -p <pid> -o pid= -o etime= -o command= 2>/dev/null || ps -p <pid> -o pid= -o etime= -o args= 2>/dev/null || echo 'not-running'")
+        ),
     }
 }
 
 fn cancel_command(profile: &RemoteProfile) -> String {
     match &profile.scheduler {
-        ExecutionMode::Slurm => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("scancel <job-id>")),
-        ExecutionMode::Pbs => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("qdel <job-id>")),
-        ExecutionMode::Lsf => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("bkill <job-id>")),
-        _ => format!("ssh {} {}", shell_quote(&profile.host), shell_quote("kill <pid>")),
+        ExecutionMode::Slurm => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("scancel <job-id>")
+        ),
+        ExecutionMode::Pbs => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("qdel <job-id>")
+        ),
+        ExecutionMode::Lsf => format!(
+            "{} {}",
+            ssh_invocation(profile),
+            shell_quote("bkill <job-id>")
+        ),
+        _ => format!("{} {}", ssh_invocation(profile), shell_quote("kill <pid>")),
     }
 }
 
 fn tail_log_command(profile: &RemoteProfile, remote_workdir: &str) -> String {
     let remote_cmd = format!(
-        "cd {} && tail -n 200 logs/*.out logs/*.err runs/*/*.log analysis/*.log 2>/dev/null || true",
+        "cd {} && find logs runs analysis -type f \\( -name '*.out' -o -name '*.err' -o -name '*.log' \\) -exec tail -n 200 {{}} + 2>/dev/null || true",
         shell_quote(remote_workdir)
     );
-    format!(
-        "ssh {} {}",
-        shell_quote(&profile.host),
-        shell_quote(&remote_cmd)
-    )
+    format!("{} {}", ssh_invocation(profile), shell_quote(&remote_cmd))
+}
+
+fn ssh_target(profile: &RemoteProfile) -> String {
+    let host = profile.host.trim();
+    let username = profile.username.trim();
+    if username.is_empty() {
+        host.to_string()
+    } else {
+        format!("{username}@{host}")
+    }
+}
+
+fn ssh_invocation(profile: &RemoteProfile) -> String {
+    let mut parts = vec![
+        "ssh".to_string(),
+        "-p".to_string(),
+        profile.port.to_string(),
+    ];
+    if profile.auth_method == RemoteAuthMethod::Key {
+        if let Some(identity) = profile
+            .identity_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            parts.push("-i".to_string());
+            parts.push(shell_quote(identity));
+            parts.push("-o".to_string());
+            parts.push("IdentitiesOnly=yes".to_string());
+        }
+    }
+    parts.push(shell_quote(&ssh_target(profile)));
+    parts.join(" ")
+}
+
+fn rsync_ssh_transport(profile: &RemoteProfile) -> String {
+    let mut parts = vec![
+        "ssh".to_string(),
+        "-p".to_string(),
+        profile.port.to_string(),
+    ];
+    if profile.auth_method == RemoteAuthMethod::Key {
+        if let Some(identity) = profile
+            .identity_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            parts.push("-i".to_string());
+            parts.push(identity.to_string());
+            parts.push("-o".to_string());
+            parts.push("IdentitiesOnly=yes".to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+fn rsync_remote_target(profile: &RemoteProfile, remote_workdir: &str) -> String {
+    format!("{}:{}", ssh_target(profile), shell_quote(remote_workdir))
 }
 
 fn scheduler_language(scheduler: &ExecutionMode) -> &'static str {
@@ -441,20 +539,62 @@ fn module_block(profile: &RemoteProfile) -> String {
 
 fn engine_launch_command(plan: &SimulationPlan, run_directory: &str) -> String {
     match plan.engine_id.as_str() {
-        "openmm" => format!("bash {}", shell_quote(&format!("{run_directory}/run-openmm.sh"))),
-        "gromacs" => format!("bash {}", shell_quote(&format!("{run_directory}/run-gromacs.sh"))),
-        "ambertools" => format!("bash {}", shell_quote(&format!("{run_directory}/run-ambertools.sh"))),
-        "namd" => format!("bash {}", shell_quote(&format!("{run_directory}/run-namd.sh"))),
-        "lammps" => format!("bash {}", shell_quote(&format!("{run_directory}/run-lammps.sh"))),
-        "cp2k" => format!("bash {}", shell_quote(&format!("{run_directory}/run-cp2k.sh"))),
-        "genesis" => format!("bash {}", shell_quote(&format!("{run_directory}/run-genesis.sh"))),
-        "hoomd" => format!("bash {}", shell_quote(&format!("{run_directory}/run-hoomd.sh"))),
-        "dl_poly" => format!("bash {}", shell_quote(&format!("{run_directory}/run-dl-poly.sh"))),
-        "tinker" => format!("bash {}", shell_quote(&format!("{run_directory}/run-tinker.sh"))),
-        "amber_pmemd" => format!("bash {}", shell_quote(&format!("{run_directory}/run-amber-pmemd.sh"))),
-        "charmm" => format!("bash {}", shell_quote(&format!("{run_directory}/run-charmm.sh"))),
-        "desmond" => format!("bash {}", shell_quote(&format!("{run_directory}/run-desmond.sh"))),
-        "acemd" => format!("bash {}", shell_quote(&format!("{run_directory}/run-acemd.sh"))),
+        "openmm" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-openmm.sh"))
+        ),
+        "gromacs" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-gromacs.sh"))
+        ),
+        "ambertools" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-ambertools.sh"))
+        ),
+        "namd" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-namd.sh"))
+        ),
+        "lammps" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-lammps.sh"))
+        ),
+        "cp2k" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-cp2k.sh"))
+        ),
+        "genesis" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-genesis.sh"))
+        ),
+        "hoomd" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-hoomd.sh"))
+        ),
+        "dl_poly" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-dl-poly.sh"))
+        ),
+        "tinker" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-tinker.sh"))
+        ),
+        "amber_pmemd" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-amber-pmemd.sh"))
+        ),
+        "charmm" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-charmm.sh"))
+        ),
+        "desmond" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-desmond.sh"))
+        ),
+        "acemd" => format!(
+            "bash {}",
+            shell_quote(&format!("{run_directory}/run-acemd.sh"))
+        ),
         other => format!("automd-run --plan generated/{other}/automd-plan.json --engine {other}"),
     }
 }
@@ -470,12 +610,17 @@ fn engine_run_directory(plan: &SimulationPlan) -> String {
 fn remote_warnings(plan: &SimulationPlan, profile: &RemoteProfile) -> Vec<String> {
     let mut warnings = Vec::new();
     if profile.host.contains(char::is_whitespace) {
-        warnings.push("Remote host contains whitespace; review SSH target before running generated commands.".to_string());
+        warnings.push(
+            "Remote host contains whitespace; review SSH target before running generated commands."
+                .to_string(),
+        );
     }
     if matches!(&profile.scheduler, ExecutionMode::Ssh) && plan.resources.walltime_hours > 24.0 {
         warnings.push("Pure SSH mode does not enforce walltime; long jobs should use SLURM/PBS/LSF when available.".to_string());
     }
-    if plan.resources.gpu_count > 0 && matches!(&profile.scheduler, ExecutionMode::Pbs | ExecutionMode::Lsf) {
+    if plan.resources.gpu_count > 0
+        && matches!(&profile.scheduler, ExecutionMode::Pbs | ExecutionMode::Lsf)
+    {
         warnings.push("GPU resource syntax varies by cluster; review ngpus/BSUB -gpu options with your site policy.".to_string());
     }
     if !matches!(
@@ -549,6 +694,33 @@ ENTRYPOINT ["python"]
             }],
             notes: vec!["Python 科学侧车镜像，适合 OpenMM 与分析任务。".to_string()],
         },
+        "tinker" => ContainerRecipe {
+            engine_id: engine_id.to_string(),
+            title: "Tinker CPU source-build container recipe".to_string(),
+            files: vec![GeneratedFile {
+                path: "containers/tinker.Containerfile".to_string(),
+                language: "dockerfile".to_string(),
+                contents: r#"FROM ubuntu:24.04
+ARG TINKER_VERSION=26.1.2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl build-essential cmake gfortran libfftw3-dev pkg-config \
+ && curl -fL "https://github.com/TinkerTools/tinker/archive/refs/tags/v${TINKER_VERSION}.tar.gz" -o /tmp/tinker.tar.gz \
+ && tar -xzf /tmp/tinker.tar.gz -C /tmp \
+ && cmake -S "/tmp/tinker-${TINKER_VERSION}/cmake" -B /tmp/build-tinker -DCMAKE_INSTALL_PREFIX=/opt/tinker \
+ && cmake --build /tmp/build-tinker --parallel \
+ && cmake --install /tmp/build-tinker \
+ && rm -rf /var/lib/apt/lists/* /tmp/tinker.tar.gz /tmp/tinker-${TINKER_VERSION} /tmp/build-tinker
+ENV PATH="/opt/tinker/bin:${PATH}"
+WORKDIR /work
+"#
+                .to_string(),
+            }],
+            notes: vec![
+                "按 Tinker 官方 CMake 流程构建 CPU 版本；需要现代 Fortran 编译器和 FFTW。"
+                    .to_string(),
+                "Tinker-OpenMM 已被上游标为不再支持，本 recipe 不启用该路径。".to_string(),
+            ],
+        },
         other => ContainerRecipe {
             engine_id: other.to_string(),
             title: format!("{other} generic container recipe"),
@@ -565,9 +737,7 @@ WORKDIR /work
 "#
                 ),
             }],
-            notes: vec![
-                "这是通用开源引擎模板；受限/商业引擎不能由 AutoMD 镜像分发。".to_string(),
-            ],
+            notes: vec!["这是通用开源引擎模板；受限/商业引擎不能由 AutoMD 镜像分发。".to_string()],
         },
     }
 }
@@ -577,6 +747,7 @@ pub fn build_recipe(options: BuildRecipeOptions) -> BuildRecipe {
     match engine_id.as_str() {
         "gromacs" => gromacs_build_recipe(options),
         "cp2k" => cp2k_build_recipe(options),
+        "tinker" => tinker_build_recipe(options),
         other => generic_build_recipe(other, options),
     }
 }
@@ -584,7 +755,10 @@ pub fn build_recipe(options: BuildRecipeOptions) -> BuildRecipe {
 pub fn export_recipe_package(request: RecipeExportRequest) -> Result<RecipeExportResult, String> {
     let project_root = PathBuf::from(&request.project_path);
     if !project_root.exists() {
-        return Err(format!("project path does not exist: {}", request.project_path));
+        return Err(format!(
+            "project path does not exist: {}",
+            request.project_path
+        ));
     }
 
     let engine_id = request.build_options.engine_id.clone();
@@ -661,8 +835,14 @@ pub fn export_recipe_package(request: RecipeExportRequest) -> Result<RecipeExpor
 }
 
 fn gromacs_build_recipe(options: BuildRecipeOptions) -> BuildRecipe {
-    let prefix = options.install_prefix.unwrap_or_else(|| "$HOME/.local/automd/gromacs".to_string());
-    let mpi = if options.enable_mpi { "-DGMX_MPI=ON" } else { "-DGMX_MPI=OFF" };
+    let prefix = options
+        .install_prefix
+        .unwrap_or_else(|| "$HOME/.local/automd/gromacs".to_string());
+    let mpi = if options.enable_mpi {
+        "-DGMX_MPI=ON"
+    } else {
+        "-DGMX_MPI=OFF"
+    };
     let gpu = match (options.enable_gpu, options.gpu_backend) {
         (true, Some(GpuBackend::Cuda)) => "-DGMX_GPU=CUDA",
         (true, Some(GpuBackend::OpenCl)) => "-DGMX_GPU=OpenCL",
@@ -704,12 +884,16 @@ cmake --install "build-gromacs"
             "根据 MPI/GPU/PLUMED 选项生成 CMake 配置。".to_string(),
             "编译并安装到用户目录。".to_string(),
         ],
-        warnings: vec!["GPU/MPI 组合强依赖驱动、编译器和目标平台；AutoMD 只生成脚本并记录日志。".to_string()],
+        warnings: vec![
+            "GPU/MPI 组合强依赖驱动、编译器和目标平台；AutoMD 只生成脚本并记录日志。".to_string(),
+        ],
     }
 }
 
 fn cp2k_build_recipe(options: BuildRecipeOptions) -> BuildRecipe {
-    let prefix = options.install_prefix.unwrap_or_else(|| "$HOME/.local/automd/cp2k".to_string());
+    let prefix = options
+        .install_prefix
+        .unwrap_or_else(|| "$HOME/.local/automd/cp2k".to_string());
     let script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -742,8 +926,208 @@ cp exe/local/cp2k.psmp "${{prefix}}/bin/"
     }
 }
 
+fn tinker_build_recipe(options: BuildRecipeOptions) -> BuildRecipe {
+    let prefix = options
+        .install_prefix
+        .unwrap_or_else(|| "$HOME/.local/automd/tinker".to_string());
+    let script = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+version="${{TINKER_VERSION:-26.1.2}}"
+prefix="{prefix}"
+deps_prefix="${{AUTOMD_TINKER_DEPS_PREFIX:-$HOME/.automd/build-deps/tinker}}"
+micromamba_root="${{AUTOMD_MAMBA_ROOT_PREFIX:-$HOME/.automd/micromamba-root}}"
+tools_root="${{AUTOMD_TOOLS_ROOT:-$HOME/.automd/tools}}"
+archive="tinker-${{version}}.tar.gz"
+source_dir="tinker-${{version}}"
+build_dir="build-tinker-${{version}}"
+
+jsonish_log() {{
+  printf '[AutoMD Tinker] %s\n' "$*"
+}}
+
+detect_micromamba_subdir() {{
+  os="$(uname -s 2>/dev/null || echo unknown)"
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$os:$arch" in
+    Linux*:x86_64|Linux*:amd64) echo linux-64 ;;
+    Linux*:aarch64|Linux*:arm64) echo linux-aarch64 ;;
+    Darwin*:x86_64|Darwin*:amd64) echo osx-64 ;;
+    Darwin*:aarch64|Darwin*:arm64) echo osx-arm64 ;;
+    *) return 1 ;;
+  esac
+}}
+
+download_file() {{
+  url="$1"
+  output="$2"
+  mkdir -p "$(dirname "$output")"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$output" && return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO "$output" "$url" && return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$url" "$output" <<'PY' && return 0
+import pathlib
+import sys
+import urllib.request
+
+url, output = sys.argv[1], sys.argv[2]
+pathlib.Path(output).parent.mkdir(parents=True, exist_ok=True)
+with urllib.request.urlopen(url, timeout=120) as response:
+    pathlib.Path(output).write_bytes(response.read())
+PY
+  fi
+  echo "AutoMD could not download $url; curl, wget, and python3 urllib all failed." >&2
+  return 1
+}}
+
+install_managed_micromamba() {{
+  subdir="$(detect_micromamba_subdir)" || {{
+    echo "AutoMD cannot bootstrap micromamba on this platform/architecture." >&2
+    return 1
+  }}
+  micromamba_dir="$tools_root/micromamba"
+  micromamba_bin="$micromamba_dir/bin/micromamba"
+  if [ -x "$micromamba_bin" ]; then
+    printf '%s\n' "$micromamba_bin"
+    return 0
+  fi
+  archive_path="$micromamba_dir/micromamba.tar.bz2"
+  jsonish_log "installing managed micromamba for $subdir"
+  download_file "https://micro.mamba.pm/api/micromamba/$subdir/latest" "$archive_path"
+  tar -xjf "$archive_path" -C "$micromamba_dir" bin/micromamba
+  chmod +x "$micromamba_bin"
+  printf '%s\n' "$micromamba_bin"
+}}
+
+find_package_manager() {{
+  for candidate in micromamba mamba conda; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  install_managed_micromamba
+}}
+
+ensure_tinker_build_deps() {{
+  export PATH="$deps_prefix/bin:$PATH"
+  export PKG_CONFIG_PATH="$deps_prefix/lib/pkgconfig:$deps_prefix/share/pkgconfig:${{PKG_CONFIG_PATH:-}}"
+  export CMAKE_PREFIX_PATH="$deps_prefix:${{CMAKE_PREFIX_PATH:-}}"
+  export CPPFLAGS="-I$deps_prefix/include ${{CPPFLAGS:-}}"
+  export LDFLAGS="-L$deps_prefix/lib ${{LDFLAGS:-}}"
+  export DYLD_FALLBACK_LIBRARY_PATH="$deps_prefix/lib:${{DYLD_FALLBACK_LIBRARY_PATH:-}}"
+
+  if command -v cmake >/dev/null 2>&1 &&
+     command -v pkg-config >/dev/null 2>&1 &&
+     pkg-config --exists fftw3 2>/dev/null &&
+     find_fortran_compiler >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "${{AUTOMD_TINKER_SKIP_DEPS:-0}}" = "1" ]; then
+    return 0
+  fi
+
+  manager="$(find_package_manager)" || {{
+    echo "AutoMD could not find or bootstrap micromamba/mamba/conda to install Tinker build dependencies." >&2
+    return 1
+  }}
+  export MAMBA_ROOT_PREFIX="$micromamba_root"
+  mkdir -p "$MAMBA_ROOT_PREFIX" "$deps_prefix"
+  jsonish_log "installing Tinker build dependencies into $deps_prefix"
+  if [ -d "$deps_prefix/conda-meta" ]; then
+    "$manager" install -y -p "$deps_prefix" -c conda-forge \
+      cmake make ninja pkg-config fftw fortran-compiler
+  else
+    "$manager" create -y -p "$deps_prefix" -c conda-forge \
+      cmake make ninja pkg-config fftw fortran-compiler
+  fi
+  export PATH="$deps_prefix/bin:$PATH"
+}}
+
+find_fortran_compiler() {{
+  if command -v gfortran >/dev/null 2>&1; then
+    command -v gfortran
+    return 0
+  fi
+  for candidate in "$deps_prefix"/bin/*gfortran "$deps_prefix"/bin/*-gfortran; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}}
+
+ensure_tinker_build_deps
+
+missing_tools=()
+for tool in curl tar cmake pkg-config; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing_tools+=("$tool")
+  fi
+done
+if ! fortran_compiler="$(find_fortran_compiler)"; then
+  missing_tools+=("gfortran/fortran-compiler")
+fi
+if [ "${{#missing_tools[@]}}" -gt 0 ]; then
+  echo "Missing required Tinker build tool(s): ${{missing_tools[*]}}" >&2
+  echo "AutoMD attempted to install them into $deps_prefix. Check network access and the conda-forge solver output above." >&2
+  exit 127
+fi
+if ! pkg-config --exists fftw3 2>/dev/null; then
+  echo "Missing required Tinker build dependency: FFTW (pkg-config fftw3)." >&2
+  echo "AutoMD attempted to install fftw into $deps_prefix. Check PKG_CONFIG_PATH=$PKG_CONFIG_PATH." >&2
+  exit 127
+fi
+export FC="$fortran_compiler"
+jsonish_log "using Fortran compiler: $FC"
+
+curl -fL "https://github.com/TinkerTools/tinker/archive/refs/tags/v${{version}}.tar.gz" -o "${{archive}}"
+rm -rf "${{source_dir}}" "${{build_dir}}"
+tar -xzf "${{archive}}"
+cmake_generator_args=()
+if command -v ninja >/dev/null 2>&1; then
+  cmake_generator_args=(-G Ninja)
+fi
+cmake -S "${{source_dir}}/cmake" -B "${{build_dir}}" "${{cmake_generator_args[@]}}" \
+  -DCMAKE_INSTALL_PREFIX="${{prefix}}" \
+  -DCMAKE_Fortran_COMPILER="${{FC}}" \
+  -DCMAKE_PREFIX_PATH="${{deps_prefix}}" \
+  -DTINKER_OPENMM=OFF
+cmake --build "${{build_dir}}" --parallel
+cmake --install "${{build_dir}}"
+"#
+    );
+
+    BuildRecipe {
+        engine_id: "tinker".to_string(),
+        title: "Tinker 26 CPU source build recipe".to_string(),
+        script,
+        steps: vec![
+            "自动准备或复用 AutoMD 管理的 Tinker 构建依赖环境。".to_string(),
+            "安装/检查 curl、tar、CMake、pkg-config、FFTW 和现代 Fortran 编译器。".to_string(),
+            "下载固定版本的 Tinker 官方源码归档。".to_string(),
+            "按上游 cmake/0README 配置 CPU 构建。".to_string(),
+            "编译并安装到用户目录。".to_string(),
+        ],
+        warnings: vec![
+            "Tinker 构建依赖默认安装到 $HOME/.automd/build-deps/tinker；可用 AUTOMD_TINKER_DEPS_PREFIX 覆盖。".to_string(),
+            "若目标机器禁止联网，可预先准备依赖环境并设置 AUTOMD_TINKER_SKIP_DEPS=1。".to_string(),
+            "请阅读上游 LICENSE.pdf；Tinker-HP/Tinker9 可能采用不同构建和授权规则。".to_string(),
+        ],
+    }
+}
+
 fn generic_build_recipe(engine_id: &str, options: BuildRecipeOptions) -> BuildRecipe {
-    let prefix = options.install_prefix.unwrap_or_else(|| format!("$HOME/.local/automd/{engine_id}"));
+    let prefix = options
+        .install_prefix
+        .unwrap_or_else(|| format!("$HOME/.local/automd/{engine_id}"));
     BuildRecipe {
         engine_id: engine_id.to_string(),
         title: format!("{engine_id} generic build checklist"),
@@ -769,7 +1153,13 @@ echo "Use this placeholder to compile {engine_id} after confirming its upstream 
 fn sanitize_job_name(value: &str) -> String {
     let sanitized: String = value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = sanitized.trim_matches('-');
     if trimmed.is_empty() {
@@ -780,10 +1170,9 @@ fn sanitize_job_name(value: &str) -> String {
 }
 
 fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '$'))
-    {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-' | '$')
+    }) {
         value.to_string()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
@@ -841,6 +1230,8 @@ fn safe_join(root: &Path, relative: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::planner;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn slurm_script_mentions_engine_and_resources() {
@@ -883,11 +1274,17 @@ mod tests {
         });
 
         assert_eq!(package.scheduler, ExecutionMode::Slurm);
-        assert!(package.files.iter().any(|file| file.path == "remote/submit.slurm"));
         assert!(package
-            .commands
+            .files
             .iter()
-            .any(|command| command.id == "submit" && command.command.contains("sbatch --parsable")));
+            .any(|file| file.path == "remote/submit.slurm"));
+        assert!(
+            package
+                .commands
+                .iter()
+                .any(|command| command.id == "submit"
+                    && command.command.contains("sbatch --parsable"))
+        );
         assert!(package
             .commands
             .iter()
@@ -896,7 +1293,12 @@ mod tests {
             .files
             .iter()
             .map(|file| file.contents.as_str())
-            .chain(package.commands.iter().map(|command| command.command.as_str()))
+            .chain(
+                package
+                    .commands
+                    .iter()
+                    .map(|command| command.command.as_str()),
+            )
             .collect::<Vec<_>>()
             .join("\n");
         assert!(generated_text.contains("--partial --stats"));
@@ -941,6 +1343,127 @@ mod tests {
     }
 
     #[test]
+    fn remote_ssh_package_uses_selected_engine_run_script() {
+        let plan = planner::default_simulation_plan(PlanRequest {
+            project_id: None,
+            name: "ssh openmm demo".to_string(),
+            engine_id: "openmm".to_string(),
+            domain: ProjectDomain::Biomolecular,
+        });
+        let run_id = plan.id.simple().to_string();
+        let package = remote_execution_package(RemoteExecutionRequest {
+            plan,
+            profile: RemoteProfile {
+                id: "ssh-openmm-test".to_string(),
+                name: "SSH OpenMM test".to_string(),
+                host: "workstation.example".to_string(),
+                username: String::new(),
+                port: 22,
+                auth_method: RemoteAuthMethod::Agent,
+                identity_file: None,
+                scheduler: ExecutionMode::Ssh,
+                workdir: "/scratch/$USER/automd".to_string(),
+                module_load: vec![],
+                default_queue: None,
+            },
+            local_project_path: Some("/tmp/AutoMD project".to_string()),
+            include_submit: true,
+        });
+
+        let ssh_script = &package
+            .files
+            .iter()
+            .find(|file| file.path == "remote/run-ssh.sh")
+            .expect("ssh script")
+            .contents;
+        assert_eq!(package.engine_id, "openmm");
+        assert_eq!(package.run_directory, format!("runs/openmm-{run_id}"));
+        assert!(ssh_script.contains(&format!("bash runs/openmm-{run_id}/run-openmm.sh")));
+        assert!(!ssh_script.contains("run-gromacs.sh"));
+    }
+
+    #[test]
+    fn remote_workdir_is_isolated_by_engine_for_same_plan_id() {
+        let gromacs_plan = planner::default_simulation_plan(PlanRequest {
+            project_id: None,
+            name: "shared plan".to_string(),
+            engine_id: "gromacs".to_string(),
+            domain: ProjectDomain::Biomolecular,
+        });
+        let mut openmm_plan = gromacs_plan.clone();
+        openmm_plan.engine_id = "openmm".to_string();
+        openmm_plan.id = gromacs_plan.id;
+
+        let profile = RemoteProfile {
+            id: "ssh-engine-isolation-test".to_string(),
+            name: "SSH engine isolation test".to_string(),
+            host: "workstation.example".to_string(),
+            username: String::new(),
+            port: 22,
+            auth_method: RemoteAuthMethod::Agent,
+            identity_file: None,
+            scheduler: ExecutionMode::Ssh,
+            workdir: "/scratch/$USER/automd".to_string(),
+            module_load: vec![],
+            default_queue: None,
+        };
+        let gromacs = remote_execution_package(RemoteExecutionRequest {
+            plan: gromacs_plan,
+            profile: profile.clone(),
+            local_project_path: Some("/tmp/AutoMD project".to_string()),
+            include_submit: true,
+        });
+        let openmm = remote_execution_package(RemoteExecutionRequest {
+            plan: openmm_plan,
+            profile,
+            local_project_path: Some("/tmp/AutoMD project".to_string()),
+            include_submit: true,
+        });
+
+        assert_ne!(gromacs.remote_workdir, openmm.remote_workdir);
+        assert!(gromacs.remote_workdir.contains("shared-plan-gromacs-"));
+        assert!(openmm.remote_workdir.contains("shared-plan-openmm-"));
+    }
+
+    #[test]
+    fn remote_commands_include_profile_user_and_port() {
+        let plan = planner::default_simulation_plan(PlanRequest {
+            project_id: None,
+            name: "ssh demo".to_string(),
+            engine_id: "gromacs".to_string(),
+            domain: ProjectDomain::Biomolecular,
+        });
+        let package = remote_execution_package(RemoteExecutionRequest {
+            plan,
+            profile: RemoteProfile {
+                id: "ssh-test".to_string(),
+                name: "SSH test".to_string(),
+                host: "180.127.11.169".to_string(),
+                username: "vipuser".to_string(),
+                port: 18016,
+                auth_method: RemoteAuthMethod::Password,
+                identity_file: None,
+                scheduler: ExecutionMode::Ssh,
+                workdir: "/home/vipuser/automd".to_string(),
+                module_load: vec![],
+                default_queue: None,
+            },
+            local_project_path: Some("/tmp/AutoMD project".to_string()),
+            include_submit: true,
+        });
+
+        let command_text = package
+            .commands
+            .iter()
+            .map(|command| command.command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(command_text.contains("ssh -p 18016 'vipuser@180.127.11.169'"));
+        assert!(command_text.contains("-e 'ssh -p 18016'"));
+        assert!(command_text.contains("vipuser@180.127.11.169:/home/vipuser/automd/"));
+    }
+
+    #[test]
     fn remote_scheduler_scripts_cover_pbs_and_lsf() {
         let mut plan = planner::default_simulation_plan(PlanRequest {
             project_id: None,
@@ -968,10 +1491,18 @@ mod tests {
             local_project_path: None,
             include_submit: true,
         });
-        let pbs_script = &pbs.files.iter().find(|file| file.path == "remote/submit.pbs").expect("pbs script").contents;
+        let pbs_script = &pbs
+            .files
+            .iter()
+            .find(|file| file.path == "remote/submit.pbs")
+            .expect("pbs script")
+            .contents;
         assert!(pbs_script.contains("#PBS -l select=1"));
         assert!(pbs_script.contains(":ngpus=1"));
-        assert!(pbs.commands.iter().any(|command| command.command.contains("qsub")));
+        assert!(pbs
+            .commands
+            .iter()
+            .any(|command| command.command.contains("qsub")));
 
         let lsf = remote_execution_package(RemoteExecutionRequest {
             plan,
@@ -991,14 +1522,23 @@ mod tests {
             local_project_path: None,
             include_submit: true,
         });
-        let lsf_script = &lsf.files.iter().find(|file| file.path == "remote/submit.lsf").expect("lsf script").contents;
+        let lsf_script = &lsf
+            .files
+            .iter()
+            .find(|file| file.path == "remote/submit.lsf")
+            .expect("lsf script")
+            .contents;
         assert!(lsf_script.contains("#BSUB -gpu"));
-        assert!(lsf.commands.iter().any(|command| command.command.contains("bsub <")));
+        assert!(lsf
+            .commands
+            .iter()
+            .any(|command| command.command.contains("bsub <")));
     }
 
     #[test]
     fn export_recipe_package_writes_build_manifest_and_scripts() {
-        let root = std::env::temp_dir().join(format!("automd-build-recipes-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("automd-build-recipes-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("project root");
 
         let exported = export_recipe_package(RecipeExportRequest {
@@ -1018,10 +1558,99 @@ mod tests {
 
         assert_eq!(exported.directory, "build-recipes/gromacs");
         assert!(root.join("build-recipes/gromacs/build-gromacs.sh").exists());
-        assert!(root.join("build-recipes/gromacs/automd-build-recipe.json").exists());
-        assert!(root.join("build-recipes/gromacs/containers/gromacs.Containerfile").exists());
-        assert!(exported.files.iter().any(|file| file.path.ends_with("README.md")));
+        assert!(root
+            .join("build-recipes/gromacs/automd-build-recipe.json")
+            .exists());
+        assert!(root
+            .join("build-recipes/gromacs/containers/gromacs.Containerfile")
+            .exists());
+        assert!(exported
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("README.md")));
 
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn generated_shell_uses_portable_dates_and_log_discovery() {
+        let plan = planner::default_simulation_plan(PlanRequest {
+            project_id: None,
+            name: "portable shell".to_string(),
+            engine_id: "openmm".to_string(),
+            domain: ProjectDomain::Biomolecular,
+        });
+        let script = slurm_script(&plan);
+        assert!(script.contains("date -u '+%Y-%m-%dT%H:%M:%SZ'"));
+        assert!(!script.contains("date -Is"));
+
+        let profile = RemoteProfile {
+            id: "portable-shell".to_string(),
+            name: "portable shell".to_string(),
+            host: "mac.example".to_string(),
+            username: "tester".to_string(),
+            port: 22,
+            auth_method: RemoteAuthMethod::Agent,
+            identity_file: None,
+            scheduler: ExecutionMode::Ssh,
+            workdir: "/Users/tester/automd".to_string(),
+            module_load: vec![],
+            default_queue: None,
+        };
+        let tail = tail_log_command(&profile, "/Users/tester/automd/run");
+        assert!(tail.contains("find logs runs analysis"));
+        assert!(!tail.contains("logs/*.out"));
+    }
+
+    #[test]
+    fn tinker_recipe_is_a_real_cpu_source_build() {
+        let recipe = build_recipe(BuildRecipeOptions {
+            engine_id: "tinker".to_string(),
+            enable_mpi: false,
+            enable_gpu: false,
+            gpu_backend: None,
+            enable_plumed: false,
+            install_prefix: None,
+        });
+        assert!(recipe.script.contains("TINKER_VERSION:-26.1.2"));
+        assert!(recipe.script.contains("TinkerTools/tinker"));
+        assert!(recipe.script.contains("ensure_tinker_build_deps"));
+        assert!(recipe.script.contains("$HOME/.automd/build-deps/tinker"));
+        assert!(recipe
+            .script
+            .contains("cmake make ninja pkg-config fftw fortran-compiler"));
+        assert!(recipe.script.contains("PKG_CONFIG_PATH"));
+        assert!(recipe.script.contains("cmake -S"));
+        assert!(recipe.script.contains("-DCMAKE_Fortran_COMPILER"));
+        assert!(recipe.script.contains("-DTINKER_OPENMM=OFF"));
+        assert!(!recipe.script.contains("Use this placeholder"));
+    }
+
+    #[test]
+    fn tinker_recipe_script_has_valid_bash_syntax() {
+        let recipe = build_recipe(BuildRecipeOptions {
+            engine_id: "tinker".to_string(),
+            enable_mpi: false,
+            enable_gpu: false,
+            gpu_backend: None,
+            enable_plumed: false,
+            install_prefix: None,
+        });
+        let mut child = Command::new("bash")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn bash -n");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(recipe.script.as_bytes())
+            .expect("write script");
+        let status = child.wait().expect("wait bash -n");
+        assert!(status.success());
+        if let Ok(path) = std::env::var("AUTOMD_DUMP_TINKER_RECIPE") {
+            std::fs::write(path, recipe.script).expect("write dumped tinker recipe");
+        }
     }
 }

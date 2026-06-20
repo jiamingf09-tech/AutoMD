@@ -39,7 +39,10 @@ pub fn run_remote_workflow_step(
     let mut files_written = Vec::new();
     let project_root = PathBuf::from(&request.project_path);
 
-    if matches!(request.mode, RemoteWorkflowMode::WriteFiles | RemoteWorkflowMode::Execute) {
+    if matches!(
+        request.mode,
+        RemoteWorkflowMode::WriteFiles | RemoteWorkflowMode::Execute
+    ) {
         files_written = write_package_files(&project_root, &request.package)?;
     }
 
@@ -62,14 +65,25 @@ pub fn run_remote_workflow_step(
 
     match request.mode {
         RemoteWorkflowMode::DryRun => {
-            warnings.push("Dry run only; no files were written and no SSH/rsync command was executed.".to_string());
+            warnings.push(
+                "Dry run only; no files were written and no SSH/rsync command was executed."
+                    .to_string(),
+            );
         }
         RemoteWorkflowMode::WriteFiles => {
-            warnings.push("Remote package files were written; command execution was skipped.".to_string());
+            warnings.push(
+                "Remote package files were written; command execution was skipped.".to_string(),
+            );
         }
         RemoteWorkflowMode::Execute => {
-            let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS).max(1));
-            let execution = execute_shell_command(&command_text, &project_root, &command.id, timeout)?;
+            let timeout = Duration::from_secs(
+                request
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
+                    .max(1),
+            );
+            let execution =
+                execute_shell_command(&command_text, &project_root, &command.id, timeout)?;
             result.exit_code = execution.exit_code;
             result.stdout = execution.stdout;
             result.stderr = execution.stderr;
@@ -98,7 +112,10 @@ fn materialize_command(command: &str, job_id: Option<&str>) -> String {
     }
 }
 
-fn write_package_files(root: &Path, package: &RemoteExecutionPackage) -> Result<Vec<String>, RemoteRunnerError> {
+fn write_package_files(
+    root: &Path,
+    package: &RemoteExecutionPackage,
+) -> Result<Vec<String>, RemoteRunnerError> {
     let mut written = Vec::new();
     for file in &package.files {
         let destination = safe_join(root, &file.path);
@@ -152,7 +169,13 @@ fn execute_shell_command(
     let stamp = Utc::now().timestamp_millis();
     let safe_step = step_id
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     let stdout_path = runner_dir.join(format!("{stamp}-{safe_step}.stdout"));
     let stderr_path = runner_dir.join(format!("{stamp}-{safe_step}.stderr"));
@@ -350,7 +373,10 @@ mod tests {
 
         assert_eq!(result.status, TaskStatus::Completed);
         assert!(result.stdout.contains("123456"));
-        assert_eq!(result.snapshot.expect("snapshot").job_id.as_deref(), Some("123456"));
+        assert_eq!(
+            result.snapshot.expect("snapshot").job_id.as_deref(),
+            Some("123456")
+        );
 
         fs::remove_dir_all(root).expect("cleanup");
     }
