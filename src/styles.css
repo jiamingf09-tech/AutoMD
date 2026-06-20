@@ -700,6 +700,18 @@ ul {
   gap: 12px;
 }
 
+/* Let the title/path block shrink and wrap so a long structure name or file
+   path never forces the viewer (and the Mol* canvas) wider than its panel. */
+.viewer-header > div {
+  min-width: 0;
+}
+
+.viewer-header p,
+.viewer-header small {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .panel-title-row {
   margin-bottom: 14px;
 }
@@ -1402,6 +1414,8 @@ ul {
   color: var(--text-2);
   padding: 10px 12px;
   line-height: 1.5;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .guide-table-head {
@@ -1412,6 +1426,7 @@ ul {
 
 .molecule-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -1648,7 +1663,7 @@ ul {
 
 .plugin-detail-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.15fr);
+  grid-template-columns: minmax(280px, 0.95fr) minmax(360px, 1.15fr);
   gap: 14px;
 }
 
@@ -2956,6 +2971,7 @@ details.plugin-import-box > button {
 
 .trajectory-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -2970,8 +2986,15 @@ details.plugin-import-box > button {
 
 .trajectory-list button {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   padding: 10px;
+  white-space: normal;
+}
+
+.trajectory-list button .mono {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .trajectory-list button:hover,
