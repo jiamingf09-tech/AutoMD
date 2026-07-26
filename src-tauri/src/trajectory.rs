@@ -1,14 +1,18 @@
 use crate::models::*;
 use chrono::Utc;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
-const MAX_TEXT_INDEX_BYTES: u64 = 256 * 1024 * 1024;
+/// Soft threshold: below this we still stream-index, but warn less.
+const LARGE_TEXT_INDEX_BYTES: u64 = 256 * 1024 * 1024;
+/// Hard cap on stored frame descriptors to keep index JSON/memory bounded.
+const MAX_INDEXED_FRAMES: usize = 2_000_000;
 const DEFAULT_MAX_PREVIEW_FRAMES: usize = 120;
 const DEFAULT_CHUNK_FRAMES: usize = 5;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+const STREAM_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum TrajectoryError {
@@ -42,23 +46,19 @@ pub fn index_trajectory(
     let mut warnings = Vec::new();
     let (strategy, frames) = match format {
         TrajectoryFormat::Pdb | TrajectoryFormat::Xyz | TrajectoryFormat::LammpsDump => {
-            if size_bytes > MAX_TEXT_INDEX_BYTES {
+            if size_bytes > LARGE_TEXT_INDEX_BYTES {
                 warnings.push(format!(
-                    "Text trajectory is larger than {} MB; indexed as metadata only until a streaming indexer is used.",
-                    MAX_TEXT_INDEX_BYTES / 1024 / 1024
+                    "Large text trajectory ({} MB); building frame offsets with streaming indexer.",
+                    size_bytes / 1024 / 1024
                 ));
-                (TrajectoryIndexStrategy::MetadataOnly, Vec::new())
-            } else {
-                let contents = fs::read_to_string(&trajectory_path)
-                    .map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
-                let frames = parse_text_frames(&contents, &format, &mut warnings);
-                if frames.is_empty() {
-                    warnings.push(
-                        "No frame boundaries were detected in the trajectory text.".to_string(),
-                    );
-                }
-                (TrajectoryIndexStrategy::TextOffsets, frames)
             }
+            let frames = stream_index_text_trajectory(&trajectory_path, &format, &mut warnings)?;
+            if frames.is_empty() {
+                warnings.push(
+                    "No frame boundaries were detected in the trajectory text.".to_string(),
+                );
+            }
+            (TrajectoryIndexStrategy::TextOffsets, frames)
         }
         TrajectoryFormat::Xtc
         | TrajectoryFormat::Trr
@@ -242,20 +242,10 @@ fn load_or_build_frame_index(
         }
     }
 
-    // Build offsets once. Prefer writing them back so subsequent chunk reads stay O(frames requested).
+    // Stream-build offsets once (no full-file String). Cache to disk for later seeks.
     let size_bytes = fs::metadata(trajectory_path)?.len();
-    if size_bytes > MAX_TEXT_INDEX_BYTES {
-        warnings.push(format!(
-            "Trajectory exceeds {} MB; refusing full in-memory index. Write an index first with a streaming indexer.",
-            MAX_TEXT_INDEX_BYTES / 1024 / 1024
-        ));
-        return Ok(Vec::new());
-    }
-    let contents =
-        fs::read_to_string(trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
-    let frames = parse_text_frames(&contents, format, warnings);
+    let frames = stream_index_text_trajectory(trajectory_path, format, warnings)?;
     if !frames.is_empty() {
-        // Best-effort cache for later seeks.
         let index = TrajectoryIndex {
             project_path: project_root.display().to_string(),
             trajectory_path: relative_path_string(relative),
@@ -274,6 +264,297 @@ fn load_or_build_frame_index(
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(path, serde_json::to_string_pretty(&index).unwrap_or_default());
+    }
+    Ok(frames)
+}
+
+/// Line-oriented streaming indexer: O(file size) I/O, O(frame count) memory, never holds the whole file as a String.
+fn stream_index_text_trajectory(
+    path: &Path,
+    format: &TrajectoryFormat,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::with_capacity(STREAM_BUFFER_BYTES, file);
+    match format {
+        TrajectoryFormat::Pdb => stream_index_pdb(&mut reader, warnings),
+        TrajectoryFormat::Xyz => stream_index_xyz(&mut reader, warnings),
+        TrajectoryFormat::LammpsDump => stream_index_lammps(&mut reader, warnings),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn push_frame_capped(
+    frames: &mut Vec<TrajectoryFrameDescriptor>,
+    descriptor: TrajectoryFrameDescriptor,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if frames.len() >= MAX_INDEXED_FRAMES {
+        if frames.len() == MAX_INDEXED_FRAMES {
+            warnings.push(format!(
+                "Stopped indexing after {MAX_INDEXED_FRAMES} frames to bound memory; re-export a strided trajectory for full coverage."
+            ));
+        }
+        return false;
+    }
+    frames.push(descriptor);
+    true
+}
+
+fn stream_index_pdb(
+    reader: &mut BufReader<fs::File>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let mut frames = Vec::new();
+    let mut offset = 0u64;
+    let mut line_buf = Vec::with_capacity(256);
+    let mut model_start: Option<u64> = None;
+    let mut atom_count = 0u32;
+    let mut label = String::new();
+    let mut total_atoms = 0u32;
+    let mut saw_model = false;
+    let mut last_line_end = 0u64;
+
+    loop {
+        line_buf.clear();
+        let bytes = reader.read_until(b'\n', &mut line_buf)?;
+        if bytes == 0 {
+            break;
+        }
+        let line_start = offset;
+        let line_end = offset + bytes as u64;
+        offset = line_end;
+        last_line_end = line_end;
+        let line = std::str::from_utf8(&line_buf)
+            .map_err(|_| TrajectoryError::NonUtf8Trajectory)?
+            .trim_end_matches(['\r', '\n']);
+
+        if line.starts_with("MODEL") {
+            if let Some(previous_start) = model_start {
+                let index = frames.len();
+                let desc = frame_descriptor(
+                    index,
+                    previous_start,
+                    line_start,
+                    Some(atom_count),
+                    None,
+                    &label,
+                );
+                if !push_frame_capped(&mut frames, desc, warnings) {
+                    return Ok(frames);
+                }
+            }
+            saw_model = true;
+            model_start = Some(line_start);
+            atom_count = 0;
+            label = line.trim().to_string();
+        } else if line.starts_with("ATOM") || line.starts_with("HETATM") {
+            if model_start.is_some() {
+                atom_count = atom_count.saturating_add(1);
+            }
+            total_atoms = total_atoms.saturating_add(1);
+        } else if line.starts_with("ENDMDL") {
+            if let Some(previous_start) = model_start.take() {
+                let index = frames.len();
+                let desc = frame_descriptor(
+                    index,
+                    previous_start,
+                    line_end,
+                    Some(atom_count),
+                    None,
+                    &label,
+                );
+                if !push_frame_capped(&mut frames, desc, warnings) {
+                    return Ok(frames);
+                }
+                atom_count = 0;
+                label.clear();
+            }
+        }
+    }
+
+    if let Some(previous_start) = model_start {
+        let index = frames.len();
+        let desc = frame_descriptor(
+            index,
+            previous_start,
+            last_line_end,
+            Some(atom_count),
+            None,
+            &label,
+        );
+        let _ = push_frame_capped(&mut frames, desc, warnings);
+    } else if !saw_model && total_atoms > 0 {
+        let desc =
+            frame_descriptor(0, 0, last_line_end, Some(total_atoms), None, "single PDB model");
+        let _ = push_frame_capped(&mut frames, desc, warnings);
+    }
+    Ok(frames)
+}
+
+fn stream_index_xyz(
+    reader: &mut BufReader<fs::File>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let mut frames = Vec::new();
+    let mut offset = 0u64;
+    let mut line_buf = Vec::with_capacity(256);
+    let mut line_no = 0usize;
+
+    loop {
+        line_buf.clear();
+        let bytes = reader.read_until(b'\n', &mut line_buf)?;
+        if bytes == 0 {
+            break;
+        }
+        line_no += 1;
+        let line_start = offset;
+        offset += bytes as u64;
+        let line = std::str::from_utf8(&line_buf)
+            .map_err(|_| TrajectoryError::NonUtf8Trajectory)?
+            .trim_end_matches(['\r', '\n']);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(atom_count) = trimmed.parse::<usize>() else {
+            warnings.push(format!(
+                "Skipped XYZ line {line_no} because atom count was not numeric."
+            ));
+            continue;
+        };
+
+        // Comment line
+        line_buf.clear();
+        let comment_bytes = reader.read_until(b'\n', &mut line_buf)?;
+        if comment_bytes == 0 {
+            warnings.push(format!("XYZ frame {} is incomplete.", frames.len()));
+            break;
+        }
+        offset += comment_bytes as u64;
+        let comment = std::str::from_utf8(&line_buf)
+            .map_err(|_| TrajectoryError::NonUtf8Trajectory)?
+            .trim_end_matches(['\r', '\n'])
+            .trim()
+            .to_string();
+        line_no += 1;
+
+        let mut end = offset;
+        let mut incomplete = false;
+        for _ in 0..atom_count {
+            line_buf.clear();
+            let atom_bytes = reader.read_until(b'\n', &mut line_buf)?;
+            if atom_bytes == 0 {
+                incomplete = true;
+                break;
+            }
+            end = offset + atom_bytes as u64;
+            offset = end;
+            line_no += 1;
+        }
+        if incomplete {
+            warnings.push(format!("XYZ frame {} is incomplete.", frames.len()));
+            break;
+        }
+
+        let index = frames.len();
+        let label = if comment.is_empty() {
+            "XYZ frame"
+        } else {
+            comment.as_str()
+        };
+        let desc = frame_descriptor(
+            index,
+            line_start,
+            end,
+            Some(atom_count as u32),
+            parse_time_ps(&comment),
+            label,
+        );
+        if !push_frame_capped(&mut frames, desc, warnings) {
+            break;
+        }
+    }
+    Ok(frames)
+}
+
+fn stream_index_lammps(
+    reader: &mut BufReader<fs::File>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let mut frames = Vec::new();
+    let mut offset = 0u64;
+    let mut line_buf = Vec::with_capacity(256);
+    let mut current_start: Option<u64> = None;
+    let mut current_atoms: Option<u32> = None;
+    let mut current_label = "LAMMPS frame".to_string();
+    let mut expect_timestep_value = false;
+    let mut expect_atom_count = false;
+    let mut last_end = 0u64;
+
+    loop {
+        line_buf.clear();
+        let bytes = reader.read_until(b'\n', &mut line_buf)?;
+        if bytes == 0 {
+            break;
+        }
+        let line_start = offset;
+        let line_end = offset + bytes as u64;
+        offset = line_end;
+        last_end = line_end;
+        let line = std::str::from_utf8(&line_buf)
+            .map_err(|_| TrajectoryError::NonUtf8Trajectory)?
+            .trim_end_matches(['\r', '\n']);
+
+        if expect_timestep_value {
+            expect_timestep_value = false;
+            let step = line.trim().parse::<f64>().ok();
+            current_label = step
+                .map(|s| format!("LAMMPS timestep {s}"))
+                .unwrap_or_else(|| "LAMMPS frame".to_string());
+            continue;
+        }
+        if expect_atom_count {
+            expect_atom_count = false;
+            current_atoms = line.trim().parse::<u32>().ok();
+            continue;
+        }
+
+        if line.starts_with("ITEM: TIMESTEP") {
+            if let Some(previous_start) = current_start {
+                let index = frames.len();
+                let desc = frame_descriptor(
+                    index,
+                    previous_start,
+                    line_start,
+                    current_atoms,
+                    None,
+                    &current_label,
+                );
+                if !push_frame_capped(&mut frames, desc, warnings) {
+                    return Ok(frames);
+                }
+            }
+            current_start = Some(line_start);
+            current_atoms = None;
+            current_label = "LAMMPS frame".to_string();
+            expect_timestep_value = true;
+        } else if line.starts_with("ITEM: NUMBER OF ATOMS") {
+            expect_atom_count = true;
+        }
+    }
+
+    if let Some(previous_start) = current_start {
+        let index = frames.len();
+        let desc = frame_descriptor(
+            index,
+            previous_start,
+            last_end,
+            current_atoms,
+            None,
+            &current_label,
+        );
+        let _ = push_frame_capped(&mut frames, desc, warnings);
     }
     Ok(frames)
 }
@@ -748,6 +1029,42 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("metadata-only")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn streaming_index_matches_string_parser_for_pdb_and_lammps() {
+        let root = temp_project();
+        let pdb = b"MODEL        1\nATOM      1  N   ALA A   1       0.0   0.0   0.0\nENDMDL\nMODEL        2\nATOM      1  N   ALA A   1       1.0   0.0   0.0\nATOM      2  CA  ALA A   1       1.1   0.0   0.0\nENDMDL\n";
+        write_file(&root, "trajectories/stream.pdb", pdb);
+        let mut warnings = Vec::new();
+        let streamed = stream_index_text_trajectory(
+            &root.join("trajectories/stream.pdb"),
+            &TrajectoryFormat::Pdb,
+            &mut warnings,
+        )
+        .expect("stream pdb");
+        let from_string = parse_pdb_frames(std::str::from_utf8(pdb).unwrap());
+        assert_eq!(streamed.len(), from_string.len());
+        assert_eq!(streamed[0].byte_start, from_string[0].byte_start);
+        assert_eq!(streamed[0].byte_end, from_string[0].byte_end);
+        assert_eq!(streamed[1].atom_count, Some(2));
+
+        let dump = b"ITEM: TIMESTEP\n0\nITEM: NUMBER OF ATOMS\n2\nITEM: ATOMS id x y z\n1 0 0 0\n2 1 0 0\nITEM: TIMESTEP\n100\nITEM: NUMBER OF ATOMS\n2\nITEM: ATOMS id x y z\n1 0 1 0\n2 1 1 0\n";
+        write_file(&root, "trajectories/stream.dump", dump);
+        let mut warnings = Vec::new();
+        let streamed = stream_index_text_trajectory(
+            &root.join("trajectories/stream.dump"),
+            &TrajectoryFormat::LammpsDump,
+            &mut warnings,
+        )
+        .expect("stream dump");
+        assert_eq!(streamed.len(), 2);
+        assert!(streamed[0].label.contains("timestep 0"));
+        assert!(streamed[1].label.contains("timestep 100"));
+        assert_eq!(streamed[0].time_ps, None); // step is not physical time
+        assert_eq!(streamed[0].atom_count, Some(2));
 
         let _ = fs::remove_dir_all(root);
     }

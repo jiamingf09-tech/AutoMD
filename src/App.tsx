@@ -1,6 +1,17 @@
 import appIconUrl from './assets/icon.png';
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./lib/api";
+import {
+  applyPerformanceToPlan,
+  clampNumber,
+  effectiveCpuThreads,
+  effectiveGpuCount,
+  loadPerformancePreferences,
+  savePerformancePreferences,
+  suggestedCpuThreads,
+  type PerformancePreferences
+} from "./lib/performance";
+import { useLocalTaskPoll } from "./lib/useLocalTaskPoll";
 import type {
   AnalysisKind,
   AnalysisCacheRecord,
@@ -107,14 +118,6 @@ const NOTIFICATION_ICON: Record<NotificationSeverity, string> = {
 
 type ThemeMode = "light" | "dark";
 
-interface PerformancePreferences {
-  cpuThreads: number;
-  gpuDeviceId: string;
-  gpuCount: number;
-  memoryLimitGb: number;
-  diskId: string;
-}
-
 interface PersistedUiState {
   version: 1;
   activeTab?: TabId;
@@ -141,64 +144,6 @@ interface BackgroundTask {
   detail: string;
   startedAt: string;
   updatedAt: string;
-}
-
-const PERFORMANCE_PREF_KEY = "automd-performance-preferences";
-
-function loadPerformancePreferences(): PerformancePreferences {
-  if (typeof window === "undefined") {
-    return { cpuThreads: 0, gpuDeviceId: "auto", gpuCount: 1, memoryLimitGb: 0, diskId: "auto" };
-  }
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(PERFORMANCE_PREF_KEY) ?? "{}") as Partial<PerformancePreferences>;
-    return {
-      cpuThreads: Number(parsed.cpuThreads) || 0,
-      gpuDeviceId: parsed.gpuDeviceId || "auto",
-      gpuCount: Number.isFinite(Number(parsed.gpuCount)) ? Math.max(0, Number(parsed.gpuCount)) : 1,
-      memoryLimitGb: Number(parsed.memoryLimitGb) || 0,
-      diskId: parsed.diskId || "auto"
-    };
-  } catch {
-    return { cpuThreads: 0, gpuDeviceId: "auto", gpuCount: 1, memoryLimitGb: 0, diskId: "auto" };
-  }
-}
-
-function savePerformancePreferences(preferences: PerformancePreferences) {
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(PERFORMANCE_PREF_KEY, JSON.stringify(preferences));
-  }
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function suggestedCpuThreads(diagnostics: RuntimeDiagnostics | null) {
-  const logical = diagnostics?.hardware.cpu.logicalCores || 1;
-  return clampNumber(Math.min(8, Math.max(1, logical - 1)), 1, logical);
-}
-
-function effectiveCpuThreads(preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null) {
-  const logical = diagnostics?.hardware.cpu.logicalCores || Math.max(1, preferences.cpuThreads || 1);
-  return clampNumber(preferences.cpuThreads || suggestedCpuThreads(diagnostics), 1, logical);
-}
-
-function effectiveGpuCount(preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null) {
-  if (preferences.gpuDeviceId === "cpu") return 0;
-  const availableGpus = diagnostics?.hardware.gpus.filter((gpu) => gpu.backend).length ?? 0;
-  if (availableGpus <= 0) return 0;
-  return clampNumber(preferences.gpuCount || 1, 0, availableGpus);
-}
-
-function applyPerformanceToPlan(plan: SimulationPlan, preferences: PerformancePreferences, diagnostics: RuntimeDiagnostics | null): SimulationPlan {
-  return {
-    ...plan,
-    resources: {
-      ...plan.resources,
-      cpuThreads: effectiveCpuThreads(preferences, diagnostics),
-      gpuCount: effectiveGpuCount(preferences, diagnostics)
-    }
-  };
 }
 
 /** Viewport width below which the layout starts to feel cramped. */
@@ -1012,46 +957,15 @@ function App() {
     void api.mapEngineParameters({ plan, engineId: plan.engineId }).then(setParameterMappingReport).catch(reportError);
   }, [plan]);
 
-  useEffect(() => {
-    if (!localSnapshot || ["completed", "failed", "cancelled"].includes(localSnapshot.status)) {
-      if (localSnapshot) {
-        void refreshTaskRecords();
-      }
-      if (localSnapshot?.artifacts.length) {
-        const index = {
-          projectPath: currentProject?.path ?? "",
-          runDirectory: localSnapshot.runDirectory,
-          artifacts: localSnapshot.artifacts,
-          generatedAt: new Date().toISOString()
-        };
-        setArtifactIndex(index);
-        void refreshAnalysis(index);
-      }
-      return;
-    }
-    const interval = window.setInterval(() => {
-      void api.getLocalTask(localSnapshot.id).then((snapshot) => {
-        setLocalSnapshot((prev) => {
-          // Avoid thrashing React/Mol* when only log tail advances slightly.
-          if (
-            prev &&
-            prev.id === snapshot.id &&
-            prev.status === snapshot.status &&
-            prev.progressPercent === snapshot.progressPercent &&
-            prev.currentStep === snapshot.currentStep &&
-            prev.logTail.length === snapshot.logTail.length
-          ) {
-            return prev;
-          }
-          return snapshot;
-        });
-        if (["completed", "failed", "cancelled"].includes(snapshot.status)) {
-          void refreshTaskRecords();
-        }
-      }).catch(reportError);
-    }, 1500);
-    return () => window.clearInterval(interval);
-  }, [localSnapshot?.id, localSnapshot?.status]);
+  useLocalTaskPoll({
+    localSnapshot,
+    projectPath: currentProject?.path,
+    setLocalSnapshot,
+    setArtifactIndex,
+    refreshTaskRecords,
+    refreshAnalysis,
+    reportError
+  });
 
   const selectedEngine = useMemo(
     () => engines.find((engine) => engine.id === selectedEngineId) ?? engines[0],

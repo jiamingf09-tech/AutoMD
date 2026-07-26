@@ -142,6 +142,17 @@ The GUI should default to `Mock` while an adapter is under development. Users mu
 
 Completed local tasks trigger checkpoint discovery, artifact indexing, and report export. Failed and cancelled tasks still attempt artifact indexing and checkpoint discovery so logs, partial outputs, and restart options remain available for diagnostics.
 
+## Trajectory indexing performance
+
+Text trajectories (PDB multi-model, XYZ, LAMMPS dump) are indexed with a **streaming line scanner**:
+
+- Frame boundaries are recorded as byte offsets without loading the whole file as a UTF-8 `String`.
+- Chunk previews `seek` to each frame range and read only those bytes.
+- Index manifests under `trajectories/.automd-index/` cache the full offset table for reuse.
+- Frame count is capped at 2,000,000 descriptors to bound memory; larger series should be strided upstream.
+
+Binary trajectories (XTC/TRR/DCD/NetCDF/GSD) remain metadata-only in the Rust reader.
+
 ## Analysis Visualization
 
 The GUI can parse and plot numeric analysis outputs before a full Python/MDAnalysis sidecar is available:
