@@ -83,9 +83,11 @@ jobs:
               src-tauri/target/release/bundle/msi/*.msi
           - name: macos-arm64
             os: macos-14
-            bundles: dmg
+            # Prefer .app over .dmg in CI: bundle_dmg.sh is flaky on headless runners
+            # (ad-hoc signing works; create-dmg/bless often fails without a GUI session).
+            bundles: app
             artifact_name: AutoMD-installer-macos-arm64
-            artifact_path: src-tauri/target/release/bundle/dmg/*.dmg
+            artifact_path: src-tauri/target/release/bundle/macos/AutoMD_*.app.zip
 
     steps:
       - name: Checkout
@@ -120,9 +122,19 @@ jobs:
       - name: Build desktop installers
         run: npm run tauri -- build --bundles ${{ matrix.bundles }} --ci
 
+      - name: Package macOS app zip for artifact upload
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app_bundle="src-tauri/target/release/bundle/macos/AutoMD.app"
+          test -d "$app_bundle"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app_bundle" \
+            "src-tauri/target/release/bundle/macos/AutoMD_0.1.0_aarch64.app.zip"
+
       - name: List generated bundles
         shell: bash
-        run: find src-tauri/target/release/bundle -maxdepth 3 -type f -print
+        run: find src-tauri/target/release/bundle -maxdepth 3 \( -type f -o -type d -name '*.app' \) -print
 
       - name: Inspect macOS app signature
         if: runner.os == 'macOS'
@@ -130,7 +142,7 @@ jobs:
         run: |
           app_bundle="src-tauri/target/release/bundle/macos/AutoMD.app"
           if [ ! -d "$app_bundle" ]; then
-            echo "No standalone .app bundle found next to the DMG; installer artifact upload remains authoritative."
+            echo "No standalone .app bundle found; installer artifact upload remains authoritative."
             exit 0
           fi
           codesign --display --verbose=2 "$app_bundle" || true
