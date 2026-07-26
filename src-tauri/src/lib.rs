@@ -2060,18 +2060,20 @@ fn find_python_module_executable(
 }
 
 fn normalize_python_module_executable(candidate: PathBuf) -> PathBuf {
-    if cfg!(target_os = "windows") {
-        return candidate;
-    }
     let name = candidate
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if name == "python3" || name.starts_with("python3.") {
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let is_python3 =
+        name == "python3" || name == "python3.exe" || name.starts_with("python3.");
+    if is_python3 {
         if let Some(parent) = candidate.parent() {
-            let python = parent.join("python");
-            if python.is_file() {
-                return python;
+            for file_name in ["python", "python.exe"] {
+                let python = parent.join(file_name);
+                if python.is_file() {
+                    return python;
+                }
             }
         }
     }

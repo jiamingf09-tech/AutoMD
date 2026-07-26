@@ -1166,19 +1166,25 @@ fn normalize_engine_installation(
 
 fn normalize_engine_installation_location(engine_id: &str, location: &str) -> String {
     let trimmed = location.trim();
-    if !matches!(engine_id, "openmm" | "hoomd") || cfg!(target_os = "windows") {
+    if !matches!(engine_id, "openmm" | "hoomd") {
         return trimmed.to_string();
     }
     let path = PathBuf::from(trimmed);
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if name == "python3" || name.starts_with("python3.") {
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let is_python3 = name == "python3"
+        || name == "python3.exe"
+        || name.starts_with("python3.");
+    if is_python3 {
         if let Some(parent) = path.parent() {
-            let python = parent.join("python");
-            if python.is_file() {
-                return python.display().to_string();
+            for candidate in ["python", "python.exe"] {
+                let python = parent.join(candidate);
+                if python.is_file() {
+                    return python.display().to_string();
+                }
             }
         }
     }
