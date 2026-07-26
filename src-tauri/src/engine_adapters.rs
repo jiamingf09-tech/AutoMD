@@ -245,6 +245,13 @@ fn prepare_ambertools_run_package(
     }
 
     let commands = ambertools_commands(&plan, &run_directory);
+    if plan.solvent.ionic_strength_molar > 0.0 {
+        warnings.push(format!(
+            "离子强度 {} M：在溶剂化/中和后按 n_water×C/55.5 估算 1:1 盐离子对数并二次 tleap 添加。",
+            format_number(plan.solvent.ionic_strength_molar)
+        ));
+    }
+
     let mut files = vec![
         EngineRunFile {
             path: "generated/ambertools/automd-plan.json".to_string(),
@@ -256,6 +263,12 @@ fn prepare_ambertools_run_package(
             path: "generated/ambertools/tleap.in".to_string(),
             language: "amber".to_string(),
             contents: ambertools_tleap(&plan),
+            written: false,
+        },
+        EngineRunFile {
+            path: "generated/ambertools/add_salt.py".to_string(),
+            language: "python".to_string(),
+            contents: ambertools_add_salt_py(&plan),
             written: false,
         },
         EngineRunFile {
@@ -1054,6 +1067,20 @@ fn ambertools_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<Engine
                 "generated/ambertools/system.inpcrd".to_string(),
             ],
         });
+        if plan.solvent.ionic_strength_molar > 0.0 {
+            commands.push(EngineCommand {
+                stage_id: "ambertools-salt".to_string(),
+                label: "按浓度估算并添加盐离子".to_string(),
+                command: "python3 generated/ambertools/add_salt.py && tleap -f generated/ambertools/tleap_salt.in".to_string(),
+                working_directory: ".".to_string(),
+                expected_outputs: vec![
+                    "generated/ambertools/tleap_salt.in".to_string(),
+                    "generated/ambertools/system.prmtop".to_string(),
+                    "generated/ambertools/system.inpcrd".to_string(),
+                    "generated/ambertools/salt_report.json".to_string(),
+                ],
+            });
+        }
     }
 
     let mut coord = "generated/ambertools/system.inpcrd".to_string();
@@ -1195,11 +1222,9 @@ fn ambertools_tleap(plan: &SimulationPlan) -> String {
     } else {
         ""
     };
-    // Approximate extra salt ions from molarity after neutralization (LEaP cannot
-    // take M directly; users should review ion counts for production work).
     let salt_note = if plan.solvent.ionic_strength_molar > 0.0 {
         format!(
-            "# Target ionic strength ~{} M; review ion counts after addions for production MD.\n",
+            "# Target ionic strength {} M will be applied after solvate via add_salt.py (n ≈ C * n_water / 55.5).\n",
             format_number(plan.solvent.ionic_strength_molar)
         )
     } else {
@@ -1224,6 +1249,99 @@ quit
             "opc" => "OPCBOX",
             _ => "TIP3PBOX",
         },
+    )
+}
+
+/// Count solvent waters in the solvated PDB and emit a second tleap script that adds
+/// 1:1 monovalent salt pairs using n = round(C_M * n_water / 55.5).
+fn ambertools_add_salt_py(plan: &SimulationPlan) -> String {
+    let conc = plan.solvent.ionic_strength_molar;
+    let force_field = amber_force_field(&plan.force_field.protein);
+    let water = amber_water_model(&plan.force_field.water_model);
+    format!(
+        r#"#!/usr/bin/env python3
+"""Estimate monovalent salt ions from water count and write tleap_salt.in.
+
+For aqueous 1:1 electrolytes (NaCl), pure water is ~55.5 M, so
+    n_pairs ≈ round(C_M * n_water / 55.5)
+after neutralization. This matches common MD workshop practice when LEaP has no
+direct molarity keyword.
+"""
+from __future__ import annotations
+
+import json
+import math
+import re
+from pathlib import Path
+
+CONC_M = {conc}
+FORCE_FIELD = {force_field_json}
+WATER_LEAP = {water_json}
+SOLVATED_PDB = Path("generated/ambertools/system_solvated.pdb")
+PRMTOP = Path("generated/ambertools/system.prmtop")
+INPCRD = Path("generated/ambertools/system.inpcrd")
+TLEAP_SALT = Path("generated/ambertools/tleap_salt.in")
+REPORT = Path("generated/ambertools/salt_report.json")
+
+WATER_RES = re.compile(
+    r"^(ATOM  |HETATM).{{11}}(?:WAT|HOH|TIP3|TIP4|SPC|T3P|T4P|OPC)\b",
+    re.IGNORECASE,
+)
+
+
+def count_waters(pdb_path: Path) -> int:
+    if not pdb_path.is_file():
+        raise SystemExit(f"solvated PDB not found: {{pdb_path}}")
+    residues = set()
+    for line in pdb_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not WATER_RES.match(line):
+            continue
+        # residue id: chain + resseq + insertion (PDB columns 22-27)
+        key = line[21:27]
+        residues.add(key)
+    return len(residues)
+
+
+def main() -> int:
+    n_water = count_waters(SOLVATED_PDB)
+    # Pure water molarity ≈ 55.5 mol/L; monovalent 1:1 salt pairs.
+    n_pairs = int(round(CONC_M * n_water / 55.5)) if CONC_M > 0 else 0
+    n_pairs = max(0, n_pairs)
+    report = {{
+        "ionicStrengthMolar": CONC_M,
+        "waterMolecules": n_water,
+        "saltPairs": n_pairs,
+        "method": "n_pairs = round(C_M * n_water / 55.5)",
+        "cations": "Na+",
+        "anions": "Cl-",
+    }}
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(
+        f"[AutoMD] salt estimate: C={{CONC_M}} M, n_water={{n_water}}, n_pairs={{n_pairs}}",
+        flush=True,
+    )
+    ion_block = ""
+    if n_pairs > 0:
+        ion_block = f"addions system Na+ {{n_pairs}}\naddions system Cl- {{n_pairs}}\n"
+    TLEAP_SALT.write_text(
+        f"""source {{FORCE_FIELD}}
+source leaprc.water.{{WATER_LEAP}}
+system = loadamberparm {{PRMTOP.as_posix()}} {{INPCRD.as_posix()}}
+{{ion_block}}saveamberparm system {{PRMTOP.as_posix()}} {{INPCRD.as_posix()}}
+savepdb system generated/ambertools/system_solvated.pdb
+quit
+""",
+        encoding="utf-8",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#,
+        force_field_json = serde_json::to_string(force_field).unwrap_or_else(|_| "\"leaprc.protein.ff19SB\"".into()),
+        water_json = serde_json::to_string(water).unwrap_or_else(|_| "\"tip3p\"".into()),
     )
 }
 
@@ -4474,6 +4592,34 @@ mod tests {
             !tleap.contains("TIP3PBOX 1\n") && !tleap.contains("TIP3PBOX 1.0\n"),
             "must not pass padding_nm raw as Angstrom"
         );
+    }
+
+
+    #[test]
+    fn ambertools_add_salt_script_estimates_pairs_from_water() {
+        let mut plan = test_plan();
+        plan.engine_id = "ambertools".to_string();
+        plan.solvent.ionic_strength_molar = 0.15;
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("ambertools package");
+        let salt_py = package
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("add_salt.py"))
+            .expect("add_salt.py")
+            .contents
+            .as_str();
+        assert!(salt_py.contains("55.5"));
+        assert!(salt_py.contains("n_pairs"));
+        assert!(package.commands.iter().any(|c| c.stage_id == "ambertools-salt"));
+        assert!(package
+            .commands
+            .iter()
+            .any(|c| c.command.contains("add_salt.py") && c.command.contains("tleap_salt.in")));
     }
 
     #[test]

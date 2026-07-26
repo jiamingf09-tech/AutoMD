@@ -1762,9 +1762,13 @@ pub struct TrajectoryIndex {
     pub strategy: TrajectoryIndexStrategy,
     pub size_bytes: u64,
     pub frame_count: Option<usize>,
-    /// Full frame byte-offset table for seek-based chunk reads (text trajectories).
+    /// Full frame byte-offset table for seek-based chunk reads (small indexes).
+    /// Large indexes store offsets in `frames_bin_path` instead to avoid huge JSON.
     #[serde(default)]
     pub frames: Vec<TrajectoryFrameDescriptor>,
+    /// Compact binary offset table path (relative to project), used when frame count is large.
+    #[serde(default)]
+    pub frames_bin_path: Option<String>,
     pub sampled_frames: Vec<TrajectoryFrameDescriptor>,
     pub index_path: Option<String>,
     pub warnings: Vec<String>,

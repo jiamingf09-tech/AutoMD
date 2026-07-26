@@ -82,6 +82,7 @@ The current AmberTools adapter generates a CPU-oriented AMBER input package with
 ### AmberTools scientific notes (current)
 
 - LEaP solvent padding converts **nm → Å** (`padding_nm * 10`).
+- After solvate + neutralize, `add_salt.py` counts waters in `system_solvated.pdb` and estimates 1:1 salt pairs as `n = round(C_M * n_water / 55.5)`, then a second `tleap_salt.in` adds `Na+`/`Cl-`.
 - MD `mdin` files set `ioutfm=1, ntxo=2` for NetCDF trajectories/restarts matching cpptraj `.nc` inputs.
 - Heat/equil step counts derive from plan `durationPs` and production `timestepFs`.
 - Disabled plan stages are omitted; restart coordinates chain across enabled stages.
@@ -148,7 +149,8 @@ Text trajectories (PDB multi-model, XYZ, LAMMPS dump) are indexed with a **strea
 
 - Frame boundaries are recorded as byte offsets without loading the whole file as a UTF-8 `String`.
 - Chunk previews `seek` to each frame range and read only those bytes.
-- Index manifests under `trajectories/.automd-index/` cache the full offset table for reuse.
+- Index manifests under `trajectories/.automd-index/` cache the offset table for reuse.
+- When frame count ≥ 2000, full offsets are written as a compact **binary table** (`*.frames.bin`, magic `AMDF`) and the JSON index keeps only metadata + sampled frames.
 - Frame count is capped at 2,000,000 descriptors to bound memory; larger series should be strided upstream.
 
 Binary trajectories (XTC/TRR/DCD/NetCDF/GSD) remain metadata-only in the Rust reader.

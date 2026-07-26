@@ -1,18 +1,23 @@
 use crate::models::*;
 use chrono::Utc;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 /// Soft threshold: below this we still stream-index, but warn less.
 const LARGE_TEXT_INDEX_BYTES: u64 = 256 * 1024 * 1024;
-/// Hard cap on stored frame descriptors to keep index JSON/memory bounded.
+/// Hard cap on stored frame descriptors to keep index memory bounded.
 const MAX_INDEXED_FRAMES: usize = 2_000_000;
+/// Above this frame count, persist offsets as a binary table instead of JSON.
+const BINARY_INDEX_FRAME_THRESHOLD: usize = 2_000;
 const DEFAULT_MAX_PREVIEW_FRAMES: usize = 120;
 const DEFAULT_CHUNK_FRAMES: usize = 5;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 const STREAM_BUFFER_BYTES: usize = 1024 * 1024;
+const FRAMES_BIN_MAGIC: &[u8; 4] = b"AMDF";
+const FRAMES_BIN_VERSION: u32 = 1;
+const FRAMES_BIN_RECORD_SIZE: usize = 32;
 
 #[derive(Debug, Error)]
 pub enum TrajectoryError {
@@ -90,6 +95,19 @@ pub fn index_trajectory(
         Some(frames.len())
     };
 
+    let use_binary = frames.len() >= BINARY_INDEX_FRAME_THRESHOLD;
+    let mut frames_bin_path = None;
+    let frames_for_json = if use_binary {
+        warnings.push(format!(
+            "Frame count {} exceeds {}; writing binary offset table (.frames.bin) instead of embedding full frames in JSON.",
+            frames.len(),
+            BINARY_INDEX_FRAME_THRESHOLD
+        ));
+        Vec::new()
+    } else {
+        frames.clone()
+    };
+
     let mut index = TrajectoryIndex {
         project_path: project_root.display().to_string(),
         trajectory_path: relative_path_string(&relative),
@@ -97,7 +115,8 @@ pub fn index_trajectory(
         strategy,
         size_bytes,
         frame_count,
-        frames: frames.clone(),
+        frames: frames_for_json,
+        frames_bin_path: None,
         sampled_frames,
         index_path: None,
         warnings,
@@ -110,8 +129,23 @@ pub fn index_trajectory(
         if let Some(parent) = index_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        if use_binary && !frames.is_empty() {
+            let bin_relative = frames_bin_manifest_path(&relative);
+            let bin_path = project_root.join(&bin_relative);
+            if let Some(parent) = bin_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_frames_bin(&bin_path, &frames)?;
+            frames_bin_path = Some(relative_path_string(&bin_relative));
+            index.frames_bin_path = frames_bin_path.clone();
+        }
         index.index_path = Some(relative_path_string(&index_relative));
         fs::write(&index_path, serde_json::to_string_pretty(&index)?)?;
+    } else if use_binary {
+        // Still attach path hint even when not writing, for callers that inspect the index.
+        index.frames_bin_path = Some(relative_path_string(&frames_bin_manifest_path(&relative)));
+        // Keep frames in memory for this response when not persisted.
+        index.frames = frames;
     }
 
     Ok(index)
@@ -222,11 +256,23 @@ fn load_or_build_frame_index(
     if index_path.is_file() {
         if let Ok(raw) = fs::read_to_string(&index_path) {
             if let Ok(index) = serde_json::from_str::<TrajectoryIndex>(&raw) {
-                if !index.frames.is_empty()
-                    && index.trajectory_path == relative_path_string(relative)
+                if index.trajectory_path == relative_path_string(relative)
                     && index.strategy == TrajectoryIndexStrategy::TextOffsets
                 {
-                    return Ok(index.frames);
+                    if let Some(bin_rel) = index.frames_bin_path.as_deref() {
+                        let bin_path = project_root.join(bin_rel);
+                        if bin_path.is_file() {
+                            if let Ok(frames) = read_frames_bin(&bin_path) {
+                                return Ok(frames);
+                            }
+                            warnings.push(format!(
+                                "Failed to read binary frame index {bin_rel}; rebuilding."
+                            ));
+                        }
+                    }
+                    if !index.frames.is_empty() {
+                        return Ok(index.frames);
+                    }
                 }
                 // Older indexes only stored sampled_frames; still usable if complete enough.
                 if !index.sampled_frames.is_empty()
@@ -241,11 +287,40 @@ fn load_or_build_frame_index(
             }
         }
     }
+    // Direct binary path without JSON (defensive).
+    let bin_path = project_root.join(frames_bin_manifest_path(relative));
+    if bin_path.is_file() {
+        if let Ok(frames) = read_frames_bin(&bin_path) {
+            return Ok(frames);
+        }
+    }
 
     // Stream-build offsets once (no full-file String). Cache to disk for later seeks.
     let size_bytes = fs::metadata(trajectory_path)?.len();
     let frames = stream_index_text_trajectory(trajectory_path, format, warnings)?;
     if !frames.is_empty() {
+        let use_binary = frames.len() >= BINARY_INDEX_FRAME_THRESHOLD;
+        let frames_bin_path = if use_binary {
+            let bin_relative = frames_bin_manifest_path(relative);
+            let bin_abs = project_root.join(&bin_relative);
+            if let Some(parent) = bin_abs.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if write_frames_bin(&bin_abs, &frames).is_ok() {
+                Some(relative_path_string(&bin_relative))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if use_binary {
+            warnings.push(format!(
+                "Persisted {} frame offsets to binary table (threshold {}).",
+                frames.len(),
+                BINARY_INDEX_FRAME_THRESHOLD
+            ));
+        }
         let index = TrajectoryIndex {
             project_path: project_root.display().to_string(),
             trajectory_path: relative_path_string(relative),
@@ -253,7 +328,12 @@ fn load_or_build_frame_index(
             strategy: TrajectoryIndexStrategy::TextOffsets,
             size_bytes,
             frame_count: Some(frames.len()),
-            frames: frames.clone(),
+            frames: if use_binary {
+                Vec::new()
+            } else {
+                frames.clone()
+            },
+            frames_bin_path,
             sampled_frames: sample_frames(&frames, 1, DEFAULT_MAX_PREVIEW_FRAMES),
             index_path: Some(relative_path_string(&index_manifest_path(relative))),
             warnings: warnings.clone(),
@@ -264,6 +344,91 @@ fn load_or_build_frame_index(
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::write(path, serde_json::to_string_pretty(&index).unwrap_or_default());
+    }
+    Ok(frames)
+}
+
+fn frames_bin_manifest_path(trajectory_relative: &Path) -> PathBuf {
+    let mut sanitized = relative_path_string(trajectory_relative)
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        sanitized = "trajectory".to_string();
+    }
+    PathBuf::from("trajectories")
+        .join(".automd-index")
+        .join(format!("{sanitized}.frames.bin"))
+}
+
+fn write_frames_bin(path: &Path, frames: &[TrajectoryFrameDescriptor]) -> Result<(), TrajectoryError> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(FRAMES_BIN_MAGIC)?;
+    file.write_all(&FRAMES_BIN_VERSION.to_le_bytes())?;
+    file.write_all(&(frames.len() as u64).to_le_bytes())?;
+    for frame in frames {
+        file.write_all(&frame.byte_start.to_le_bytes())?;
+        file.write_all(&frame.byte_end.to_le_bytes())?;
+        let atom = frame.atom_count.unwrap_or(u32::MAX);
+        file.write_all(&atom.to_le_bytes())?;
+        let flags: u32 = if frame.time_ps.is_some() { 1 } else { 0 };
+        file.write_all(&flags.to_le_bytes())?;
+        let time = frame.time_ps.unwrap_or(f64::NAN);
+        file.write_all(&time.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn read_frames_bin(path: &Path) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let data = fs::read(path)?;
+    if data.len() < 16 || &data[0..4] != FRAMES_BIN_MAGIC {
+        return Err(TrajectoryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid frames.bin magic",
+        )));
+    }
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    if version != FRAMES_BIN_VERSION {
+        return Err(TrajectoryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported frames.bin version {version}"),
+        )));
+    }
+    let count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+    let expected = 16 + count * FRAMES_BIN_RECORD_SIZE;
+    if data.len() < expected {
+        return Err(TrajectoryError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "frames.bin truncated",
+        )));
+    }
+    let mut frames = Vec::with_capacity(count);
+    let mut offset = 16;
+    for index in 0..count {
+        let byte_start = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        let byte_end = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+        let atom_raw = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
+        let flags = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
+        let time_raw = f64::from_le_bytes(data[offset + 24..offset + 32].try_into().unwrap());
+        offset += FRAMES_BIN_RECORD_SIZE;
+        let atom_count = if atom_raw == u32::MAX {
+            None
+        } else {
+            Some(atom_raw)
+        };
+        let time_ps = if flags & 1 != 0 && !time_raw.is_nan() {
+            Some(time_raw)
+        } else {
+            None
+        };
+        frames.push(TrajectoryFrameDescriptor {
+            frame_index: index,
+            byte_start,
+            byte_end,
+            atom_count,
+            time_ps,
+            label: format!("Frame {index}"),
+        });
     }
     Ok(frames)
 }
@@ -1068,4 +1233,33 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn binary_frames_bin_roundtrip_for_large_frame_count() {
+        let root = temp_project();
+        // Build a multi-model PDB with enough frames to force binary index path
+        // (threshold is 2000; use write_frames_bin directly for unit size).
+        let mut frames = Vec::new();
+        for i in 0..10u64 {
+            frames.push(TrajectoryFrameDescriptor {
+                frame_index: i as usize,
+                byte_start: i * 100,
+                byte_end: i * 100 + 50,
+                atom_count: Some(3),
+                time_ps: Some(i as f64 * 0.1),
+                label: format!("Frame {i}"),
+            });
+        }
+        let bin = root.join("trajectories/.automd-index/sample.frames.bin");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        write_frames_bin(&bin, &frames).expect("write bin");
+        let loaded = read_frames_bin(&bin).expect("read bin");
+        assert_eq!(loaded.len(), 10);
+        assert_eq!(loaded[3].byte_start, 300);
+        assert_eq!(loaded[3].byte_end, 350);
+        assert_eq!(loaded[3].atom_count, Some(3));
+        assert!((loaded[3].time_ps.unwrap() - 0.3).abs() < 1e-9);
+        let _ = fs::remove_dir_all(root);
+    }
+
 }

@@ -17,6 +17,20 @@ const lib = read("src-tauri/src/lib.rs");
 const index = read("dist/index.html");
 const ci = read(".github/workflows/ci.yml");
 
+// UI was split out of App.tsx into components/; scan the whole frontend surface.
+function collectFrontendSources(dir, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectFrontendSources(full, out);
+    } else if (/\.(tsx?|jsx?)$/.test(entry.name)) {
+      out.push(fs.readFileSync(full, "utf8"));
+    }
+  }
+  return out;
+}
+const frontendSource = [app, ...collectFrontendSources(path.join(root, "src"))].join("\n");
+
 const requiredTabs = ["项目", "流程", "运行", "远程", "报告", "引擎", "插件"];
 for (const label of requiredTabs) {
   check(app.includes(`label: "${label}"`), `missing tab label: ${label}`);
@@ -78,12 +92,12 @@ const requiredUiText = [
   "拒绝生成或发送分子动力学运行指令",
 ];
 for (const text of requiredUiText) {
-  check(app.includes(text), `missing workflow UI text: ${text}`);
+  check(frontendSource.includes(text), `missing workflow UI text: ${text}`);
 }
-check(!app.includes("远程 profile 模板"), "old remote profile-template panel should not be present");
-check(app.includes("function defaultRemoteWorkdir"), "missing username-aware remote workdir defaulting");
-check(app.includes("/home/${user}/automd"), "non-root remote users should default to their home workdir");
-check(app.includes("isAutoManagedRemoteWorkdir"), "remote username changes should preserve manually edited workdirs");
+check(!frontendSource.includes("远程 profile 模板"), "old remote profile-template panel should not be present");
+check(frontendSource.includes("function defaultRemoteWorkdir") || frontendSource.includes("export function defaultRemoteWorkdir"), "missing username-aware remote workdir defaulting");
+check(frontendSource.includes("/home/${user}/automd"), "non-root remote users should default to their home workdir");
+check(frontendSource.includes("isAutoManagedRemoteWorkdir"), "remote username changes should preserve manually edited workdirs");
 
 check(
   mockData.includes("mkdir -p logs && (nohup bash") && mockData.includes("< /dev/null & echo $!)"),

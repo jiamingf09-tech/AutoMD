@@ -1182,8 +1182,10 @@ export interface TrajectoryIndex {
   strategy: TrajectoryIndexStrategy;
   sizeBytes: number;
   frameCount?: number | null;
-  /** Full frame byte-offset table for seek-based chunk reads. */
+  /** Full frame byte-offset table for seek-based chunk reads (small indexes). */
   frames?: TrajectoryFrameDescriptor[];
+  /** Compact binary offset table path when frame count is large. */
+  framesBinPath?: string | null;
   sampledFrames: TrajectoryFrameDescriptor[];
   indexPath?: string | null;
   warnings: string[];
