@@ -1627,6 +1627,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn tinker_recipe_script_has_valid_bash_syntax() {
         let recipe = build_recipe(BuildRecipeOptions {
             engine_id: "tinker".to_string(),
@@ -1636,18 +1637,12 @@ mod tests {
             enable_plumed: false,
             install_prefix: None,
         });
-        // Windows CI images often lack bash; skip syntax check rather than fail the suite.
-        let mut child = match Command::new("bash")
+        // Requires a real POSIX bash; Windows CI runners may ship a broken/partial bash.
+        let mut child = Command::new("bash")
             .arg("-n")
             .stdin(Stdio::piped())
             .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => {
-                eprintln!("skipping bash -n check: {error}");
-                return;
-            }
-        };
+            .expect("spawn bash -n");
         child
             .stdin
             .as_mut()
