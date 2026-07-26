@@ -934,6 +934,8 @@ impl ProjectDatabase {
         self.connection.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA synchronous = NORMAL;
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -1038,6 +1040,14 @@ impl ProjectDatabase {
                 stdout_tail TEXT,
                 stderr_tail TEXT
             );
+            CREATE INDEX IF NOT EXISTS idx_tasks_project_updated
+                ON tasks(project_id, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_status
+                ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_artifact_records_project
+                ON artifact_records(project_path, indexed_at);
+            CREATE INDEX IF NOT EXISTS idx_analysis_cache_project
+                ON analysis_cache(project_path, generated_at);
             ",
         )?;
         self.migrate_engine_installation_targets()?;

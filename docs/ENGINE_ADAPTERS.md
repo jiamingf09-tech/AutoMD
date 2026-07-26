@@ -43,6 +43,13 @@ The current GROMACS adapter generates a local run package with:
 
 Ligand and membrane systems currently produce explicit warnings because they require external topology preparation before the generated GROMACS sequence is scientifically valid.
 
+### GROMACS scientific notes (current)
+
+- Equilibration MDP emits `define = -DPOSRES` when restraints are requested; production uses conditional `-cpi` only if `md.cpt` already exists.
+- MDP templates include `DispCorr = EnerPres`; production `ref_p` follows the NPT stage pressure.
+- Disabled plan stages are omitted from the run script; coordinates chain from the last enabled stage.
+- Analysis defaults to Backbone groups for RMSD/Rg.
+
 ## Implemented OpenMM Package
 
 The current OpenMM adapter generates a first Python runner package with:
@@ -54,7 +61,12 @@ The current OpenMM adapter generates a first Python runner package with:
 - Failure classification for missing Python modules, missing input structures, ForceField template gaps, GPU platform issues, numerical instability, and output permission/storage errors.
 - Resume discovery for `.chk` files with a generated `python generated/openmm/run_openmm.py ... --resume <checkpoint>` command.
 
-This is intentionally conservative: non-standard residues, cofactors, ligands, and membrane systems still need validated upstream preparation or compatible OpenMM XML templates before a real run is scientifically meaningful.
+### OpenMM scientific notes (current)
+
+- Runner adds hydrogens, then solventizes with `Modeller.addSolvent` when the input has no periodic box (using plan padding/ionic/neutralize).
+- NPT stage enables `MonteCarloBarostat`; NVT and NPT equilibration stages are honored before production.
+- Platform selection tries CUDA → OpenCL → CPU.
+- Ligands/cofactors still need compatible XML templates or upstream parameterization.
 
 ## Implemented AmberTools Package
 
@@ -67,6 +79,13 @@ The current AmberTools adapter generates a CPU-oriented AMBER input package with
 - Log parsing for `NSTEP`, AmberTools completion, `SANDER BOMB`, LEaP exits, warnings, and fatal-error lines.
 - Failure classification for missing AmberTools commands, missing source/ligand files, missing AMBER parameters, topology gaps, numerical instability, and output permission/storage errors.
 
+### AmberTools scientific notes (current)
+
+- LEaP solvent padding converts **nm → Å** (`padding_nm * 10`).
+- MD `mdin` files set `ioutfm=1, ntxo=2` for NetCDF trajectories/restarts matching cpptraj `.nc` inputs.
+- Heat/equil step counts derive from plan `durationPs` and production `timestepFs`.
+- Disabled plan stages are omitted; restart coordinates chain across enabled stages.
+
 Ligands and cofactors produce explicit warnings because AutoMD does not yet run `antechamber`/`parmchk2` automatically. Users can provide `mol2`/`frcmod` files and edit the generated `tleap.in` until that preparation workflow lands.
 
 ## Implemented NAMD External Package
@@ -74,6 +93,7 @@ Ligands and cofactors produce explicit warnings because AutoMD does not yet run 
 The current NAMD adapter is an external-only entrypoint and generates:
 
 - `generated/namd/automd.conf`, an editable NAMD configuration template using user-provided `inputs/system.psf`, coordinates, and CHARMM-style parameter files.
+- When the NPT stage is enabled, the conf includes a `langevinPiston` block; users must still supply cell basis vectors for PME.
 - `runs/namd-<plan-id>/run-namd.sh`, which detects `namd3` or `namd2`, honors `NAMD_BIN`, and writes `namd.log`.
 - Structured warnings that AutoMD does not download, bundle, mirror, or license NAMD binaries.
 - Log parsing for `ENERGY`, `TIMING`, restart/checkpoint messages, completion, and `FATAL ERROR` lines.

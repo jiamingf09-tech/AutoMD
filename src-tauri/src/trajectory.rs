@@ -1,6 +1,7 @@
 use crate::models::*;
 use chrono::Utc;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -96,6 +97,7 @@ pub fn index_trajectory(
         strategy,
         size_bytes,
         frame_count,
+        frames: frames.clone(),
         sampled_frames,
         index_path: None,
         warnings,
@@ -144,14 +146,20 @@ pub fn read_trajectory_chunk(
         });
     }
 
-    let contents =
-        fs::read_to_string(&trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
-    let frames = parse_text_frames(&contents, &format, &mut warnings);
+    // Prefer on-disk index frame offsets so we never re-read the whole trajectory for each chunk.
+    let frames = load_or_build_frame_index(
+        &project_root,
+        &relative,
+        &trajectory_path,
+        &format,
+        &mut warnings,
+    )?;
     let selected = select_frames(&frames, &request);
     let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_CHUNK_BYTES);
     let mut used_bytes = 0u64;
     let mut truncated = false;
     let mut payloads = Vec::new();
+    let mut file = fs::File::open(&trajectory_path)?;
 
     for descriptor in selected {
         let frame_size = descriptor.byte_end.saturating_sub(descriptor.byte_start);
@@ -159,24 +167,25 @@ pub fn read_trajectory_chunk(
             truncated = true;
             break;
         }
-        let Some(slice) =
-            contents.get(descriptor.byte_start as usize..descriptor.byte_end as usize)
-        else {
-            warnings.push(format!(
-                "Frame {} byte range was not valid UTF-8.",
-                descriptor.frame_index
-            ));
-            continue;
-        };
-        used_bytes = used_bytes.saturating_add(frame_size);
-        payloads.push(TrajectoryFramePayload {
-            frame_index: descriptor.frame_index,
-            label: descriptor.label.clone(),
-            format: format.clone(),
-            contents: slice.to_string(),
-            atom_count: descriptor.atom_count,
-            time_ps: descriptor.time_ps,
-        });
+        match read_frame_bytes(&mut file, descriptor.byte_start, descriptor.byte_end) {
+            Ok(contents) => {
+                used_bytes = used_bytes.saturating_add(frame_size);
+                payloads.push(TrajectoryFramePayload {
+                    frame_index: descriptor.frame_index,
+                    label: descriptor.label.clone(),
+                    format: format.clone(),
+                    contents,
+                    atom_count: descriptor.atom_count,
+                    time_ps: descriptor.time_ps,
+                });
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "Frame {} seek/read failed: {error}",
+                    descriptor.frame_index
+                ));
+            }
+        }
     }
 
     Ok(TrajectoryChunk {
@@ -187,6 +196,86 @@ pub fn read_trajectory_chunk(
         warnings,
         generated_at: Utc::now(),
     })
+}
+
+fn read_frame_bytes(
+    file: &mut fs::File,
+    byte_start: u64,
+    byte_end: u64,
+) -> Result<String, TrajectoryError> {
+    let len = byte_end.saturating_sub(byte_start) as usize;
+    file.seek(SeekFrom::Start(byte_start))?;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)?;
+    String::from_utf8(buf).map_err(|_| TrajectoryError::NonUtf8Trajectory)
+}
+
+/// Load full frame offsets from an existing index manifest, or build them once.
+fn load_or_build_frame_index(
+    project_root: &Path,
+    relative: &Path,
+    trajectory_path: &Path,
+    format: &TrajectoryFormat,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<TrajectoryFrameDescriptor>, TrajectoryError> {
+    let index_path = project_root.join(index_manifest_path(relative));
+    if index_path.is_file() {
+        if let Ok(raw) = fs::read_to_string(&index_path) {
+            if let Ok(index) = serde_json::from_str::<TrajectoryIndex>(&raw) {
+                if !index.frames.is_empty()
+                    && index.trajectory_path == relative_path_string(relative)
+                    && index.strategy == TrajectoryIndexStrategy::TextOffsets
+                {
+                    return Ok(index.frames);
+                }
+                // Older indexes only stored sampled_frames; still usable if complete enough.
+                if !index.sampled_frames.is_empty()
+                    && index.frame_count == Some(index.sampled_frames.len())
+                {
+                    warnings.push(
+                        "Using sampled frame offsets from legacy index; re-index for full seek table."
+                            .to_string(),
+                    );
+                    return Ok(index.sampled_frames);
+                }
+            }
+        }
+    }
+
+    // Build offsets once. Prefer writing them back so subsequent chunk reads stay O(frames requested).
+    let size_bytes = fs::metadata(trajectory_path)?.len();
+    if size_bytes > MAX_TEXT_INDEX_BYTES {
+        warnings.push(format!(
+            "Trajectory exceeds {} MB; refusing full in-memory index. Write an index first with a streaming indexer.",
+            MAX_TEXT_INDEX_BYTES / 1024 / 1024
+        ));
+        return Ok(Vec::new());
+    }
+    let contents =
+        fs::read_to_string(trajectory_path).map_err(|_| TrajectoryError::NonUtf8Trajectory)?;
+    let frames = parse_text_frames(&contents, format, warnings);
+    if !frames.is_empty() {
+        // Best-effort cache for later seeks.
+        let index = TrajectoryIndex {
+            project_path: project_root.display().to_string(),
+            trajectory_path: relative_path_string(relative),
+            format: format.clone(),
+            strategy: TrajectoryIndexStrategy::TextOffsets,
+            size_bytes,
+            frame_count: Some(frames.len()),
+            frames: frames.clone(),
+            sampled_frames: sample_frames(&frames, 1, DEFAULT_MAX_PREVIEW_FRAMES),
+            index_path: Some(relative_path_string(&index_manifest_path(relative))),
+            warnings: warnings.clone(),
+            generated_at: Utc::now(),
+        };
+        let path = project_root.join(index_manifest_path(relative));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, serde_json::to_string_pretty(&index).unwrap_or_default());
+    }
+    Ok(frames)
 }
 
 fn project_root(project_path: &str) -> Result<PathBuf, TrajectoryError> {
@@ -418,11 +507,14 @@ fn parse_lammps_frames(contents: &str) -> Vec<TrajectoryFrameDescriptor> {
                 ));
             }
             current_start = Some(*start);
-            current_time = lines
+            // ITEM: TIMESTEP value is a step index, not physical time. Store None in
+            // time_ps so the UI does not treat step numbers as picoseconds.
+            let step = lines
                 .get(idx + 1)
                 .and_then(|(_, _, value)| value.trim().parse::<f64>().ok());
-            current_label = current_time
-                .map(|time| format!("LAMMPS timestep {time}"))
+            current_time = None;
+            current_label = step
+                .map(|s| format!("LAMMPS timestep {s}"))
                 .unwrap_or_else(|| "LAMMPS frame".to_string());
             current_atoms = None;
         } else if line.starts_with("ITEM: NUMBER OF ATOMS") {
@@ -588,6 +680,23 @@ mod tests {
         .expect("chunk");
         assert_eq!(chunk.frames.len(), 1);
         assert!(chunk.frames[0].contents.contains("MODEL        2"));
+        assert!(
+            !index.frames.is_empty(),
+            "index should retain full frame offset table for seek reads"
+        );
+
+        // Second chunk read must reuse the on-disk index (seek path).
+        let chunk2 = read_trajectory_chunk(TrajectoryChunkRequest {
+            project_path: root.display().to_string(),
+            trajectory_path: "trajectories/movie.pdb".to_string(),
+            frame_indices: Some(vec![0]),
+            start_frame: None,
+            frame_count: None,
+            max_bytes: None,
+        })
+        .expect("chunk2");
+        assert_eq!(chunk2.frames.len(), 1);
+        assert!(chunk2.frames[0].contents.contains("MODEL        1"));
 
         let _ = fs::remove_dir_all(root);
     }

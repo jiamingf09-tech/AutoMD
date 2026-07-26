@@ -24,7 +24,8 @@ pub fn default_simulation_plan(request: PlanRequest) -> SimulationPlan {
                 "materials-system".to_string()
             },
             molecule_count: None,
-            has_ligand: biomolecular,
+            // Only mark ligand systems after import inference or explicit user choice.
+            has_ligand: false,
             has_membrane: false,
             notes: vec!["导入结构后将自动更新体系摘要。".to_string()],
         },
@@ -88,12 +89,143 @@ pub fn validate_plan(plan: &SimulationPlan) -> ValidationReport {
         });
     }
 
+    if plan.solvent.padding_nm > 0.0 && plan.solvent.padding_nm < 0.9 {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "solvent.paddingNm".to_string(),
+            message: "padding 建议 ≥ 1.0 nm，以匹配常见 1.0 nm 非键截断并减少 PBC 伪影。"
+                .to_string(),
+        });
+    }
+
     if plan.resources.walltime_hours <= 0.0 {
         items.push(ValidationItem {
             severity: ValidationSeverity::Error,
             field: "resources.walltimeHours".to_string(),
             message: "运行时长必须大于 0。".to_string(),
         });
+    }
+
+    // Stage dependency checks for biomolecular MD pipelines.
+    let enabled = |id: &str| {
+        plan.stages
+            .iter()
+            .find(|stage| stage.id == id)
+            .map(|stage| stage.enabled)
+            .unwrap_or(false)
+    };
+    if enabled("analysis") && !enabled("production") {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "stages.analysis".to_string(),
+            message: "已启用分析但未启用生产模拟；引擎脚本将跳过依赖轨迹的分析步骤。"
+                .to_string(),
+        });
+    }
+    if enabled("production") && !enabled("em") && !enabled("nvt") && !enabled("npt") {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "stages.production".to_string(),
+            message: "生产模拟在未启用最小化/平衡阶段时将直接从溶剂化结构启动，科学性较弱。"
+                .to_string(),
+        });
+    }
+    if enabled("npt") && !enabled("nvt") && !enabled("em") {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Info,
+            field: "stages.npt".to_string(),
+            message: "NPT 在未启用 NVT/EM 时将从上一可用结构衔接；请确认温度/速度初始化合理。"
+                .to_string(),
+        });
+    }
+
+    if plan.system.source_path.is_none() {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "system.sourcePath".to_string(),
+            message: "未设置输入结构路径；生成脚本将使用占位路径 inputs/system.pdb。".to_string(),
+        });
+    }
+
+    if plan.system.has_ligand {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "system.hasLigand".to_string(),
+            message: "配体体系需要额外拓扑/参数（mol2/frcmod 或 CGenFF 等）；AutoMD 不会静默完成参数化。"
+                .to_string(),
+        });
+    }
+
+    if plan.engine_id == "openmm" {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Info,
+            field: "engineId".to_string(),
+            message: "OpenMM runner 在缺少周期盒时会尝试自动溶剂化；若失败请先提供已溶剂化结构或使用 GROMACS/Amber 准备。"
+                .to_string(),
+        });
+    }
+
+    if matches!(
+        plan.engine_id.as_str(),
+        "lammps" | "cp2k" | "genesis" | "hoomd" | "dl_poly" | "tinker" | "charmm" | "desmond"
+            | "acemd"
+    ) {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "engineId".to_string(),
+            message: format!(
+                "引擎 {} 当前为预览/模板适配器，生成文件不可直接当作完整科学工作流。",
+                plan.engine_id
+            ),
+        });
+    }
+
+    if plan.engine_id == "namd" {
+        items.push(ValidationItem {
+            severity: ValidationSeverity::Warning,
+            field: "engineId".to_string(),
+            message: "NAMD 为外部许可引擎：需用户提供 PSF/参数与周期盒，并自行满足许可证。"
+                .to_string(),
+        });
+    }
+
+    // Timestep / duration sanity for production.
+    if let Some(prod) = plan.stages.iter().find(|stage| stage.id == "production" && stage.enabled)
+    {
+        if let Some(dt) = prod
+            .parameters
+            .get("timestepFs")
+            .and_then(|value| value.parse::<f32>().ok())
+        {
+            if dt > 2.5 {
+                items.push(ValidationItem {
+                    severity: ValidationSeverity::Warning,
+                    field: "stages.production.timestepFs".to_string(),
+                    message: "时间步 > 2.5 fs 通常需要氢质量重分配 (HMR) 或更强约束；请确认协议。"
+                        .to_string(),
+                });
+            }
+            if dt <= 0.0 {
+                items.push(ValidationItem {
+                    severity: ValidationSeverity::Error,
+                    field: "stages.production.timestepFs".to_string(),
+                    message: "时间步必须大于 0。".to_string(),
+                });
+            }
+        }
+        if let Some(duration) = prod
+            .parameters
+            .get("durationNs")
+            .and_then(|value| value.parse::<f32>().ok())
+        {
+            if duration <= 0.0 {
+                items.push(ValidationItem {
+                    severity: ValidationSeverity::Error,
+                    field: "stages.production.durationNs".to_string(),
+                    message: "生产模拟时长必须大于 0。".to_string(),
+                });
+            }
+        }
     }
 
     let status = if items

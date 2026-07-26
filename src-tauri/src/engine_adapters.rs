@@ -177,7 +177,7 @@ fn prepare_openmm_run_package(
         );
     }
 
-    let commands = openmm_commands(&run_directory);
+    let commands = openmm_commands(&plan, &run_directory);
     let mut files = vec![
         EngineRunFile {
             path: "generated/openmm/automd-plan.json".to_string(),
@@ -244,7 +244,7 @@ fn prepare_ambertools_run_package(
         warnings.push("膜体系需要专门 lipid force field 和构建流程；当前 AmberTools 模板只覆盖普通显式溶剂体系。".to_string());
     }
 
-    let commands = ambertools_commands(&run_directory);
+    let commands = ambertools_commands(&plan, &run_directory);
     let mut files = vec![
         EngineRunFile {
             path: "generated/ambertools/automd-plan.json".to_string(),
@@ -795,6 +795,15 @@ fn safe_join(root: &Path, relative: &str) -> PathBuf {
     destination
 }
 
+/// Whether a normalized plan stage is enabled (missing stage defaults to enabled).
+fn plan_stage_enabled(plan: &SimulationPlan, stage_id: &str) -> bool {
+    plan.stages
+        .iter()
+        .find(|stage| stage.id == stage_id)
+        .map(|stage| stage.enabled)
+        .unwrap_or(true)
+}
+
 fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCommand> {
     let input_structure = plan
         .system
@@ -803,6 +812,7 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
         .unwrap_or("inputs/system.pdb");
     let force_field = gromacs_force_field(&plan.force_field.protein);
     let water = gromacs_water_model(&plan.force_field.water_model);
+    let solvent_box = gromacs_solvent_box(&plan.force_field.water_model);
     let box_shape = gromacs_box_shape(&plan.solvent.box_shape);
     let padding = format_number(plan.solvent.padding_nm);
     let salt = format_number(plan.solvent.ionic_strength_molar);
@@ -813,17 +823,31 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
         "cpu"
     };
 
-    vec![
-        EngineCommand {
+    let do_prepare = plan_stage_enabled(plan, "prepare");
+    let do_em = plan_stage_enabled(plan, "em");
+    let do_nvt = plan_stage_enabled(plan, "nvt");
+    let do_npt = plan_stage_enabled(plan, "npt");
+    let do_prod = plan_stage_enabled(plan, "production");
+    let do_analysis = plan_stage_enabled(plan, "analysis");
+    // Topology/solvation is required whenever any MD stage runs.
+    let need_system = do_prepare || do_em || do_nvt || do_npt || do_prod || do_analysis;
+
+    let mut commands = Vec::new();
+
+    if need_system {
+        commands.push(EngineCommand {
             stage_id: "prepare-pdb2gmx".to_string(),
             label: "生成 GROMACS 拓扑".to_string(),
             command: format!(
                 "AUTOMD_GROMACS_FF=\"$(automd_pick_gromacs_force_field {force_field})\" && gmx pdb2gmx -ignh -f {input_structure} -o generated/gromacs/processed.gro -p generated/gromacs/topol.top -ff \"$AUTOMD_GROMACS_FF\" -water {water}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec!["generated/gromacs/processed.gro".to_string(), "generated/gromacs/topol.top".to_string()],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                "generated/gromacs/processed.gro".to_string(),
+                "generated/gromacs/topol.top".to_string(),
+            ],
+        });
+        commands.push(EngineCommand {
             stage_id: "prepare-box".to_string(),
             label: "构建周期性盒子".to_string(),
             command: format!(
@@ -831,79 +855,151 @@ fn gromacs_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCom
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec!["generated/gromacs/boxed.gro".to_string()],
-        },
-        EngineCommand {
+        });
+        commands.push(EngineCommand {
             stage_id: "prepare-solvate".to_string(),
             label: "加水".to_string(),
-            command: "gmx solvate -cp generated/gromacs/boxed.gro -cs spc216.gro -o generated/gromacs/solvated.gro -p generated/gromacs/topol.top".to_string(),
+            command: format!(
+                "gmx solvate -cp generated/gromacs/boxed.gro -cs {solvent_box} -o generated/gromacs/solvated.gro -p generated/gromacs/topol.top"
+            ),
             working_directory: ".".to_string(),
             expected_outputs: vec!["generated/gromacs/solvated.gro".to_string()],
-        },
-        EngineCommand {
+        });
+        commands.push(EngineCommand {
             stage_id: "prepare-ions-tpr".to_string(),
             label: "生成离子 tpr".to_string(),
             command: "gmx grompp -f generated/gromacs/ions.mdp -c generated/gromacs/solvated.gro -p generated/gromacs/topol.top -o generated/gromacs/ions.tpr -maxwarn 1".to_string(),
             working_directory: ".".to_string(),
             expected_outputs: vec!["generated/gromacs/ions.tpr".to_string()],
-        },
-        EngineCommand {
+        });
+        let mut genion = format!(
+            "printf 'SOL\\n' | gmx genion -s generated/gromacs/ions.tpr -o generated/gromacs/ions.gro -p generated/gromacs/topol.top -pname NA -nname CL"
+        );
+        if plan.solvent.neutralize {
+            genion.push_str(" -neutral");
+        }
+        if plan.solvent.ionic_strength_molar > 0.0 {
+            genion.push_str(&format!(" -conc {salt}"));
+        }
+        commands.push(EngineCommand {
             stage_id: "prepare-genion".to_string(),
             label: "中和并加离子".to_string(),
-            command: format!(
-                "printf 'SOL\\n' | gmx genion -s generated/gromacs/ions.tpr -o generated/gromacs/ions.gro -p generated/gromacs/topol.top -pname NA -nname CL -neutral -conc {salt}"
-            ),
+            command: genion,
             working_directory: ".".to_string(),
             expected_outputs: vec!["generated/gromacs/ions.gro".to_string()],
-        },
-        EngineCommand {
+        });
+    }
+
+    // Track latest coordinate / checkpoint for stage chaining when intermediates are skipped.
+    let mut coord = "generated/gromacs/ions.gro".to_string();
+    let mut checkpoint: Option<String> = None;
+    let mut restraint_ref = coord.clone();
+
+    if do_em {
+        commands.push(EngineCommand {
             stage_id: "em".to_string(),
             label: "能量最小化".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/em.mdp -c generated/gromacs/ions.gro -p generated/gromacs/topol.top -o {run_directory}/em.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun cpu -deffnm {run_directory}/em -ntomp {threads}"
+                "gmx grompp -f generated/gromacs/em.mdp -c {coord} -p generated/gromacs/topol.top -o {run_directory}/em.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun cpu -deffnm {run_directory}/em -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/em.gro"), format!("{run_directory}/em.log"), format!("{run_directory}/em.edr")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/em.gro"),
+                format!("{run_directory}/em.log"),
+                format!("{run_directory}/em.edr"),
+            ],
+        });
+        coord = format!("{run_directory}/em.gro");
+        restraint_ref = coord.clone();
+        checkpoint = None;
+    }
+
+    if do_nvt {
+        commands.push(EngineCommand {
             stage_id: "nvt".to_string(),
             label: "NVT 平衡".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/nvt.mdp -c {run_directory}/em.gro -r {run_directory}/em.gro -p generated/gromacs/topol.top -o {run_directory}/nvt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/nvt -ntomp {threads}"
+                "gmx grompp -f generated/gromacs/nvt.mdp -c {coord} -r {restraint_ref} -p generated/gromacs/topol.top -o {run_directory}/nvt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/nvt -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/nvt.gro"), format!("{run_directory}/nvt.cpt"), format!("{run_directory}/nvt.log")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/nvt.gro"),
+                format!("{run_directory}/nvt.cpt"),
+                format!("{run_directory}/nvt.log"),
+            ],
+        });
+        coord = format!("{run_directory}/nvt.gro");
+        restraint_ref = coord.clone();
+        checkpoint = Some(format!("{run_directory}/nvt.cpt"));
+    }
+
+    if do_npt {
+        let t_flag = checkpoint
+            .as_ref()
+            .map(|path| format!(" -t {path}"))
+            .unwrap_or_default();
+        commands.push(EngineCommand {
             stage_id: "npt".to_string(),
             label: "NPT 平衡".to_string(),
             command: format!(
-                "gmx grompp -f generated/gromacs/npt.mdp -c {run_directory}/nvt.gro -r {run_directory}/nvt.gro -t {run_directory}/nvt.cpt -p generated/gromacs/topol.top -o {run_directory}/npt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/npt -ntomp {threads}"
+                "gmx grompp -f generated/gromacs/npt.mdp -c {coord} -r {restraint_ref}{t_flag} -p generated/gromacs/topol.top -o {run_directory}/npt.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/npt -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/npt.gro"), format!("{run_directory}/npt.cpt"), format!("{run_directory}/npt.log")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/npt.gro"),
+                format!("{run_directory}/npt.cpt"),
+                format!("{run_directory}/npt.log"),
+            ],
+        });
+        coord = format!("{run_directory}/npt.gro");
+        checkpoint = Some(format!("{run_directory}/npt.cpt"));
+    }
+
+    if do_prod {
+        let t_flag = checkpoint
+            .as_ref()
+            .map(|path| format!(" -t {path}"))
+            .unwrap_or_default();
+        commands.push(EngineCommand {
             stage_id: "production".to_string(),
             label: "生产模拟".to_string(),
+            // Only pass -cpi when a production checkpoint already exists.
             command: format!(
-                "gmx grompp -f generated/gromacs/md.mdp -c {run_directory}/npt.gro -t {run_directory}/npt.cpt -p generated/gromacs/topol.top -o {run_directory}/md.tpr && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/md -cpi {run_directory}/md.cpt -ntomp {threads}"
+                "gmx grompp -f generated/gromacs/md.mdp -c {coord}{t_flag} -p generated/gromacs/topol.top -o {run_directory}/md.tpr && if [ -f {run_directory}/md.cpt ]; then AUTOMD_MD_CPI=\"-cpi {run_directory}/md.cpt -append\"; else AUTOMD_MD_CPI=\"\"; fi && OMP_NUM_THREADS={threads} automd_gromacs_mdrun {mdrun_mode} -deffnm {run_directory}/md $AUTOMD_MD_CPI -ntomp {threads}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/md.xtc"), format!("{run_directory}/md.cpt"), format!("{run_directory}/md.edr"), format!("{run_directory}/md.log")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/md.xtc"),
+                format!("{run_directory}/md.cpt"),
+                format!("{run_directory}/md.edr"),
+                format!("{run_directory}/md.log"),
+            ],
+        });
+    }
+
+    if do_analysis && do_prod {
+        commands.push(EngineCommand {
             stage_id: "analysis".to_string(),
             label: "基础分析".to_string(),
             command: format!(
-                "printf 'System\\nSystem\\n' | gmx rms -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rmsd.xvg && printf 'System\\n' | gmx gyrate -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rg.xvg"
+                "printf 'Backbone\\nBackbone\\n' | gmx rms -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rmsd.xvg && printf 'Backbone\\n' | gmx gyrate -s {run_directory}/md.tpr -f {run_directory}/md.xtc -o analysis/rg.xvg"
             ),
             working_directory: ".".to_string(),
             expected_outputs: vec!["analysis/rmsd.xvg".to_string(), "analysis/rg.xvg".to_string()],
-        },
-    ]
+        });
+    }
+
+    commands
 }
 
-fn openmm_commands(run_directory: &str) -> Vec<EngineCommand> {
+fn openmm_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCommand> {
+    // Runner itself honors stage.enabled for nvt/npt; skip launch only if every MD stage is off.
+    let any_md = ["em", "nvt", "npt", "production", "prepare", "analysis"]
+        .iter()
+        .any(|id| plan_stage_enabled(plan, id));
+    if !any_md {
+        return Vec::new();
+    }
     vec![
         EngineCommand {
             stage_id: "openmm-env".to_string(),
@@ -930,16 +1026,25 @@ fn openmm_commands(run_directory: &str) -> Vec<EngineCommand> {
     ]
 }
 
-fn ambertools_commands(run_directory: &str) -> Vec<EngineCommand> {
-    vec![
-        EngineCommand {
+fn ambertools_commands(plan: &SimulationPlan, run_directory: &str) -> Vec<EngineCommand> {
+    let do_prepare = plan_stage_enabled(plan, "prepare");
+    let do_em = plan_stage_enabled(plan, "em");
+    let do_nvt = plan_stage_enabled(plan, "nvt");
+    let do_npt = plan_stage_enabled(plan, "npt");
+    let do_prod = plan_stage_enabled(plan, "production");
+    let do_analysis = plan_stage_enabled(plan, "analysis");
+    let need_topo = do_prepare || do_em || do_nvt || do_npt || do_prod || do_analysis;
+
+    let mut commands = Vec::new();
+    if need_topo {
+        commands.push(EngineCommand {
             stage_id: "ambertools-env".to_string(),
             label: "检测 AmberTools 命令行工具".to_string(),
             command: "tleap -h >/dev/null 2>&1 && sander -h >/dev/null 2>&1 && cpptraj -h >/dev/null 2>&1".to_string(),
             working_directory: ".".to_string(),
             expected_outputs: Vec::new(),
-        },
-        EngineCommand {
+        });
+        commands.push(EngineCommand {
             stage_id: "ambertools-tleap".to_string(),
             label: "生成 AMBER topology/restart".to_string(),
             command: "tleap -f generated/ambertools/tleap.in".to_string(),
@@ -948,51 +1053,91 @@ fn ambertools_commands(run_directory: &str) -> Vec<EngineCommand> {
                 "generated/ambertools/system.prmtop".to_string(),
                 "generated/ambertools/system.inpcrd".to_string(),
             ],
-        },
-        EngineCommand {
+        });
+    }
+
+    let mut coord = "generated/ambertools/system.inpcrd".to_string();
+    let mut ref_coord = coord.clone();
+
+    if do_em {
+        commands.push(EngineCommand {
             stage_id: "ambertools-min".to_string(),
             label: "sander 能量最小化".to_string(),
             command: format!(
-                "sander -O -i generated/ambertools/min.mdin -o {run_directory}/min.out -p generated/ambertools/system.prmtop -c generated/ambertools/system.inpcrd -r {run_directory}/min.rst7 -x {run_directory}/min.nc"
+                "sander -O -i generated/ambertools/min.mdin -o {run_directory}/min.out -p generated/ambertools/system.prmtop -c {coord} -r {run_directory}/min.rst7 -x {run_directory}/min.nc"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/min.out"), format!("{run_directory}/min.rst7")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/min.out"),
+                format!("{run_directory}/min.rst7"),
+            ],
+        });
+        coord = format!("{run_directory}/min.rst7");
+        ref_coord = coord.clone();
+    }
+
+    if do_nvt {
+        commands.push(EngineCommand {
             stage_id: "ambertools-heat".to_string(),
             label: "sander NVT 加热".to_string(),
             command: format!(
-                "sander -O -i generated/ambertools/heat.mdin -o {run_directory}/heat.out -p generated/ambertools/system.prmtop -c {run_directory}/min.rst7 -r {run_directory}/heat.rst7 -x {run_directory}/heat.nc -ref {run_directory}/min.rst7"
+                "sander -O -i generated/ambertools/heat.mdin -o {run_directory}/heat.out -p generated/ambertools/system.prmtop -c {coord} -r {run_directory}/heat.rst7 -x {run_directory}/heat.nc -ref {ref_coord}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/heat.out"), format!("{run_directory}/heat.rst7")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/heat.out"),
+                format!("{run_directory}/heat.rst7"),
+            ],
+        });
+        coord = format!("{run_directory}/heat.rst7");
+        ref_coord = coord.clone();
+    }
+
+    if do_npt {
+        commands.push(EngineCommand {
             stage_id: "ambertools-equil".to_string(),
             label: "sander NPT 平衡".to_string(),
             command: format!(
-                "sander -O -i generated/ambertools/equil.mdin -o {run_directory}/equil.out -p generated/ambertools/system.prmtop -c {run_directory}/heat.rst7 -r {run_directory}/equil.rst7 -x {run_directory}/equil.nc -ref {run_directory}/heat.rst7"
+                "sander -O -i generated/ambertools/equil.mdin -o {run_directory}/equil.out -p generated/ambertools/system.prmtop -c {coord} -r {run_directory}/equil.rst7 -x {run_directory}/equil.nc -ref {ref_coord}"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec![format!("{run_directory}/equil.out"), format!("{run_directory}/equil.rst7")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                format!("{run_directory}/equil.out"),
+                format!("{run_directory}/equil.rst7"),
+            ],
+        });
+        coord = format!("{run_directory}/equil.rst7");
+    }
+
+    if do_prod {
+        commands.push(EngineCommand {
             stage_id: "ambertools-prod".to_string(),
             label: "sander 生产模拟".to_string(),
             command: format!(
-                "sander -O -i generated/ambertools/prod.mdin -o {run_directory}/prod.out -p generated/ambertools/system.prmtop -c {run_directory}/equil.rst7 -r {run_directory}/prod.rst7 -x trajectories/ambertools-prod.nc"
+                "sander -O -i generated/ambertools/prod.mdin -o {run_directory}/prod.out -p generated/ambertools/system.prmtop -c {coord} -r {run_directory}/prod.rst7 -x trajectories/ambertools-prod.nc"
             ),
             working_directory: ".".to_string(),
-            expected_outputs: vec!["trajectories/ambertools-prod.nc".to_string(), format!("{run_directory}/prod.rst7")],
-        },
-        EngineCommand {
+            expected_outputs: vec![
+                "trajectories/ambertools-prod.nc".to_string(),
+                format!("{run_directory}/prod.rst7"),
+            ],
+        });
+    }
+
+    if do_analysis && do_prod {
+        commands.push(EngineCommand {
             stage_id: "ambertools-analysis".to_string(),
             label: "cpptraj 基础 RMSD/Rg 分析".to_string(),
             command: "cpptraj -i generated/ambertools/cpptraj.in".to_string(),
             working_directory: ".".to_string(),
-            expected_outputs: vec!["analysis/amber_rmsd.xvg".to_string(), "analysis/amber_rg.xvg".to_string()],
-        },
-    ]
+            expected_outputs: vec![
+                "analysis/amber_rmsd.xvg".to_string(),
+                "analysis/amber_rg.xvg".to_string(),
+            ],
+        });
+    }
+
+    commands
 }
 
 fn namd_commands(run_directory: &str, cpu_threads: u16) -> Vec<EngineCommand> {
@@ -1029,7 +1174,8 @@ fn ambertools_tleap(plan: &SimulationPlan) -> String {
         .as_deref()
         .unwrap_or("inputs/system.pdb");
     let water = amber_water_model(&plan.force_field.water_model);
-    let padding = format_number(plan.solvent.padding_nm);
+    // LEaP solvate* distance is in Angstroms; AutoMD stores padding in nm.
+    let padding_angstrom = format_number(plan.solvent.padding_nm * 10.0);
     let force_field = amber_force_field(&plan.force_field.protein);
     let solvate_command = if matches!(
         plan.solvent.box_shape.as_str(),
@@ -1044,19 +1190,34 @@ fn ambertools_tleap(plan: &SimulationPlan) -> String {
     } else {
         ""
     };
+    let neutralize_block = if plan.solvent.neutralize {
+        "addions system Na+ 0\naddions system Cl- 0\n"
+    } else {
+        ""
+    };
+    // Approximate extra salt ions from molarity after neutralization (LEaP cannot
+    // take M directly; users should review ion counts for production work).
+    let salt_note = if plan.solvent.ionic_strength_molar > 0.0 {
+        format!(
+            "# Target ionic strength ~{} M; review ion counts after addions for production MD.\n",
+            format_number(plan.solvent.ionic_strength_molar)
+        )
+    } else {
+        String::new()
+    };
 
     format!(
         r#"source {force_field}
 source leaprc.water.{water}
 {ligand_block}
 system = loadpdb {input_structure}
-{solvate_command} system {water_box} {padding}
-addions system Na+ 0
-addions system Cl- 0
-saveamberparm system generated/ambertools/system.prmtop generated/ambertools/system.inpcrd
+# padding_nm={padding_nm} -> {padding_angstrom} Angstrom for LEaP
+{solvate_command} system {water_box} {padding_angstrom}
+{salt_note}{neutralize_block}saveamberparm system generated/ambertools/system.prmtop generated/ambertools/system.inpcrd
 savepdb system generated/ambertools/system_solvated.pdb
 quit
 "#,
+        padding_nm = format_number(plan.solvent.padding_nm),
         water_box = match water {
             "tip4pew" => "TIP4PEWBOX",
             "spce" => "SPCBOX",
@@ -1071,7 +1232,7 @@ fn ambertools_min_mdin() -> String {
 &cntrl
   imin=1, maxcyc=5000, ncyc=2500,
   cut=10.0, ntb=1,
-  ntpr=100,
+  ntpr=100, ioutfm=1, ntxo=2,
 /
 "#
     .to_string()
@@ -1079,65 +1240,85 @@ fn ambertools_min_mdin() -> String {
 
 fn ambertools_heat_mdin(plan: &SimulationPlan) -> String {
     let temperature = stage_parameter(plan, "nvt", "temperatureK").unwrap_or("300");
-    r#"Heat AutoMD system
+    let duration_ps = stage_parameter(plan, "nvt", "durationPs")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(100.0);
+    let timestep_fs = stage_parameter(plan, "production", "timestepFs")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(2.0);
+    let nstlim = nsteps_from_ps_f64(duration_ps, timestep_fs);
+    format!(
+        r#"Heat AutoMD system
 &cntrl
   imin=0, irest=0, ntx=1,
-  nstlim=50000, dt=0.002,
+  nstlim={nstlim}, dt={dt},
   ntc=2, ntf=2,
   cut=10.0, ntb=1,
   ntt=3, gamma_ln=2.0,
-  tempi=0.0, temp0=__TEMP__,
-  ntpr=500, ntwx=500, ntwr=5000,
+  tempi=0.0, temp0={temperature},
+  ntpr=500, ntwx=500, ntwr=5000, ioutfm=1, ntxo=2,
   ntr=1, restraint_wt=10.0, restraintmask='!:WAT,Na+,Cl-',
 /
-"#
-    .replace("__TEMP__", temperature)
+"#,
+        dt = format_number_f64(timestep_fs / 1000.0),
+    )
 }
 
 fn ambertools_equil_mdin(plan: &SimulationPlan) -> String {
     let temperature = stage_parameter(plan, "npt", "temperatureK")
         .or_else(|| stage_parameter(plan, "nvt", "temperatureK"))
         .unwrap_or("300");
-    r#"Equilibrate AutoMD system
+    let pressure = stage_parameter(plan, "npt", "pressureBar").unwrap_or("1.0");
+    let duration_ps = stage_parameter(plan, "npt", "durationPs")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1000.0);
+    let timestep_fs = stage_parameter(plan, "production", "timestepFs")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(2.0);
+    let nstlim = nsteps_from_ps_f64(duration_ps, timestep_fs);
+    format!(
+        r#"Equilibrate AutoMD system
 &cntrl
   imin=0, irest=1, ntx=5,
-  nstlim=250000, dt=0.002,
+  nstlim={nstlim}, dt={dt},
   ntc=2, ntf=2,
-  cut=10.0, ntb=2, ntp=1, pres0=1.0, taup=2.0,
-  ntt=3, gamma_ln=2.0, temp0=__TEMP__,
-  ntpr=1000, ntwx=1000, ntwr=5000,
+  cut=10.0, ntb=2, ntp=1, pres0={pressure}, taup=2.0,
+  ntt=3, gamma_ln=2.0, temp0={temperature},
+  ntpr=1000, ntwx=1000, ntwr=5000, ioutfm=1, ntxo=2,
   ntr=1, restraint_wt=2.0, restraintmask='!:WAT,Na+,Cl-',
 /
-"#
-    .replace("__TEMP__", temperature)
+"#,
+        dt = format_number_f64(timestep_fs / 1000.0),
+    )
 }
 
 fn ambertools_prod_mdin(plan: &SimulationPlan) -> String {
     let temperature = stage_parameter(plan, "npt", "temperatureK")
         .or_else(|| stage_parameter(plan, "nvt", "temperatureK"))
         .unwrap_or("300");
+    let pressure = stage_parameter(plan, "npt", "pressureBar").unwrap_or("1.0");
     let seed = stage_parameter(plan, "production", "randomSeed")
         .or_else(|| stage_parameter(plan, "nvt", "velocitySeed"))
         .unwrap_or("-1");
     let duration_ns = stage_parameter(plan, "production", "durationNs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(100.0);
     let timestep_fs = stage_parameter(plan, "production", "timestepFs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(2.0);
-    let nstlim = nsteps_from_ps(duration_ns * 1000.0, timestep_fs);
+    let nstlim = nsteps_from_ps_f64(duration_ns * 1000.0, timestep_fs);
     format!(
         r#"Production AutoMD system
 &cntrl
   imin=0, irest=1, ntx=5,
   nstlim={nstlim}, dt={dt},
   ntc=2, ntf=2,
-  cut=10.0, ntb=2, ntp=1, pres0=1.0, taup=2.0,
+  cut=10.0, ntb=2, ntp=1, pres0={pressure}, taup=2.0,
   ntt=3, gamma_ln=2.0, temp0={temperature}, ig={seed},
-  ntpr=1000, ntwx=1000, ntwr=5000,
+  ntpr=1000, ntwx=1000, ntwr=5000, ioutfm=1, ntxo=2,
 /
 "#,
-        dt = format_number(timestep_fs / 1000.0),
+        dt = format_number_f64(timestep_fs / 1000.0),
         seed = seed,
     )
 }
@@ -1155,23 +1336,52 @@ run
 
 fn namd_conf(plan: &SimulationPlan, run_directory: &str) -> String {
     let temperature = stage_parameter(plan, "nvt", "temperatureK").unwrap_or("300");
+    let pressure = stage_parameter(plan, "npt", "pressureBar").unwrap_or("1.01325");
     let timestep_fs = stage_parameter(plan, "production", "timestepFs").unwrap_or("2");
     let duration_ns = stage_parameter(plan, "production", "durationNs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(1.0);
-    let steps = nsteps_from_ps(
+    let steps = nsteps_from_ps_f64(
         duration_ns * 1000.0,
-        timestep_fs.parse::<f32>().unwrap_or(2.0),
+        timestep_fs.parse::<f64>().unwrap_or(2.0),
     );
+    let npt_enabled = plan
+        .stages
+        .iter()
+        .any(|stage| stage.id == "npt" && stage.enabled);
+    let pressure_block = if npt_enabled {
+        format!(
+            r#"
+# NPT pressure control (Langevin piston)
+useGroupPressure      yes
+useFlexibleCell       no
+useConstantArea       no
+langevinPiston        on
+langevinPistonTarget  {pressure}
+langevinPistonPeriod  100.0
+langevinPistonDecay   50.0
+langevinPistonTemp    {temperature}
+"#
+        )
+    } else {
+        "\n# NPT stage disabled; running without langevinPiston (NVT-like).\n".to_string()
+    };
     format!(
         r#"# AutoMD generated NAMD configuration.
-# User must provide compatible PSF/PDB files and satisfy NAMD license terms.
+# User must provide compatible PSF/PDB files, cell basis vectors, and satisfy NAMD license terms.
 
 structure          inputs/system.psf
 coordinates        {coordinates}
 parameters         inputs/par_all36m_prot.prm
 paraTypeCharmm     on
 set outputname     {run_directory}/prod
+
+# Provide a periodic cell when using PME, e.g.:
+# cellBasisVector1  a 0 0
+# cellBasisVector2  0 b 0
+# cellBasisVector3  0 0 c
+# cellOrigin        0 0 0
+# wrapAll           on
 
 temperature        {temperature}
 timestep           {timestep_fs}
@@ -1190,7 +1400,7 @@ langevin           on
 langevinDamping    1.0
 langevinTemp       {temperature}
 langevinHydrogen   off
-
+{pressure_block}
 outputName         $outputname
 restartname        $outputname.restart
 DCDfile            $outputname.dcd
@@ -1575,6 +1785,9 @@ fn openmm_runner_py(plan: &SimulationPlan, run_directory: &str) -> String {
         .unwrap_or_else(|_| "\"inputs/system.pdb\"".to_string());
     let force_fields = serde_json::to_string(&openmm_force_field_files(plan))
         .unwrap_or_else(|_| "[\"amber14-all.xml\",\"amber14/tip3pfb.xml\"]".to_string());
+    let padding_nm = plan.solvent.padding_nm;
+    let ionic = plan.solvent.ionic_strength_molar;
+    let neutralize = plan.solvent.neutralize;
 
     r#"#!/usr/bin/env python3
 from __future__ import annotations
@@ -1586,6 +1799,9 @@ from pathlib import Path
 
 DEFAULT_INPUT = __AUTOMD_INPUT__
 DEFAULT_FORCE_FIELDS = __AUTOMD_FORCE_FIELDS__
+DEFAULT_PADDING_NM = __AUTOMD_PADDING_NM__
+DEFAULT_IONIC = __AUTOMD_IONIC__
+DEFAULT_NEUTRALIZE = __AUTOMD_NEUTRALIZE__
 
 
 def stage_parameter(plan: dict, stage_id: str, key: str, fallback: str) -> str:
@@ -1600,11 +1816,35 @@ def stage_bool(plan: dict, stage_id: str, key: str, fallback: bool) -> bool:
     return value in {"1", "true", "yes", "y", "on"}
 
 
+def stage_enabled(plan: dict, stage_id: str, fallback: bool = True) -> bool:
+    for stage in plan.get("stages", []):
+        if stage.get("id") == stage_id:
+            return bool(stage.get("enabled", fallback))
+    return fallback
+
+
 def resolve_project_root(plan_path: Path) -> Path:
     for parent in plan_path.parents:
         if parent.name == "generated":
             return parent.parent
     return Path.cwd()
+
+
+def pick_platform():
+    from openmm import Platform
+    for name in ("CUDA", "OpenCL", "CPU", "Reference"):
+        try:
+            platform = Platform.getPlatformByName(name)
+            print(f"OpenMM platform: {name}", flush=True)
+            return platform
+        except Exception:
+            continue
+    return None
+
+
+def topology_has_periodic_box(topology) -> bool:
+    vectors = topology.getPeriodicBoxVectors()
+    return vectors is not None
 
 
 def main() -> int:
@@ -1626,8 +1866,8 @@ def main() -> int:
             Simulation,
             StateDataReporter,
         )
-        from openmm import LangevinMiddleIntegrator
-        from openmm.unit import kelvin, nanometer, picosecond, picoseconds
+        from openmm import LangevinMiddleIntegrator, MonteCarloBarostat
+        from openmm.unit import bar, kelvin, molar, nanometer, picosecond, picoseconds
     except ModuleNotFoundError as exc:
         print(f"Fatal error: OpenMM Python module not found: {exc}", file=sys.stderr, flush=True)
         return 8
@@ -1644,6 +1884,7 @@ def main() -> int:
         directory.mkdir(parents=True, exist_ok=True)
 
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    solvent = plan.get("solvent", {})
     source = Path(plan.get("system", {}).get("sourcePath") or DEFAULT_INPUT)
     if not source.is_absolute():
         source = project_root / source
@@ -1652,8 +1893,11 @@ def main() -> int:
         return 2
 
     temperature = float(stage_parameter(plan, "nvt", "temperatureK", "300"))
+    pressure_bar = float(stage_parameter(plan, "npt", "pressureBar", "1.0"))
     timestep_fs = float(stage_parameter(plan, "production", "timestepFs", "2"))
     duration_ns = float(stage_parameter(plan, "production", "durationNs", "0.1"))
+    nvt_ps = float(stage_parameter(plan, "nvt", "durationPs", "100"))
+    npt_ps = float(stage_parameter(plan, "npt", "durationPs", "1000"))
     checkpoint_ps = float(stage_parameter(plan, "production", "checkpointEveryPs", "100"))
     random_seed = int(stage_parameter(
         plan,
@@ -1661,31 +1905,77 @@ def main() -> int:
         "randomSeed",
         stage_parameter(plan, "nvt", "velocitySeed", "0"),
     ))
+    padding_nm = float(solvent.get("paddingNm", DEFAULT_PADDING_NM))
+    ionic = float(solvent.get("ionicStrengthMolar", DEFAULT_IONIC))
+    neutralize = bool(solvent.get("neutralize", DEFAULT_NEUTRALIZE))
+
+    nvt_steps = max(1, int(round(nvt_ps * 1000 / max(timestep_fs, 0.001))))
+    npt_steps = max(1, int(round(npt_ps * 1000 / max(timestep_fs, 0.001))))
     total_steps = max(1, int(round(duration_ns * 1_000_000 / max(timestep_fs, 0.001))))
     report_interval = max(1, min(total_steps, int(round(checkpoint_ps * 1000 / max(timestep_fs, 0.001)))))
+    do_nvt = stage_enabled(plan, "nvt", True)
+    do_npt = stage_enabled(plan, "npt", True)
 
     print(f"AutoMD OpenMM workflow started: {plan.get('name', 'unnamed')}", flush=True)
     print(f"OpenMM force fields: {', '.join(DEFAULT_FORCE_FIELDS)}", flush=True)
     pdb = PDBFile(str(source))
     forcefield = ForceField(*DEFAULT_FORCE_FIELDS)
-    topology = pdb.topology
-    positions = pdb.positions
+    modeller = Modeller(pdb.topology, pdb.positions)
     if stage_bool(plan, "prepare", "addHydrogens", True):
-        print("Stage 0/4: adding hydrogens with OpenMM Modeller", flush=True)
-        modeller = Modeller(topology, positions)
+        print("Stage 0: adding hydrogens with OpenMM Modeller", flush=True)
         modeller.addHydrogens(forcefield)
-        topology = modeller.topology
-        positions = modeller.positions
+
+    if not topology_has_periodic_box(modeller.topology):
+        print(
+            f"Stage 0b: no periodic box on input; adding solvent (padding={padding_nm} nm, ionic={ionic} M)",
+            flush=True,
+        )
+        try:
+            modeller.addSolvent(
+                forcefield,
+                padding=padding_nm * nanometer,
+                ionicStrength=(ionic * molar if ionic > 0 else 0 * molar),
+                neutralize=neutralize,
+            )
+        except Exception as exc:
+            print(
+                f"Fatal error: input has no unit cell and automatic solvation failed: {exc}. "
+                "Provide a pre-solvated structure with CRYST1/box vectors, or install compatible force-field water templates.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 3
+    elif solvent.get("model", "explicit") == "explicit":
+        print("Stage 0b: using periodic box from input structure", flush=True)
+
+    topology = modeller.topology
+    positions = modeller.positions
+    if not topology_has_periodic_box(topology):
+        print(
+            "Fatal error: OpenMM PME requires a periodic box. Solvation did not produce box vectors.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 3
+
     system = forcefield.createSystem(
         topology,
         nonbondedMethod=PME,
         nonbondedCutoff=1 * nanometer,
         constraints=HBonds,
     )
+    if do_npt:
+        system.addForce(MonteCarloBarostat(pressure_bar * bar, temperature * kelvin))
+        print(f"Added MonteCarloBarostat at {pressure_bar} bar, {temperature} K", flush=True)
+
     integrator = LangevinMiddleIntegrator(temperature * kelvin, 1 / picosecond, timestep_fs * 0.001 * picoseconds)
-    if random_seed > 0:
-        integrator.setRandomNumberSeed(random_seed)
-    simulation = Simulation(topology, system, integrator)
+    if random_seed != 0:
+        integrator.setRandomNumberSeed(abs(random_seed))
+    platform = pick_platform()
+    if platform is not None:
+        simulation = Simulation(topology, system, integrator, platform)
+    else:
+        simulation = Simulation(topology, system, integrator)
 
     if args.resume:
         checkpoint_path = Path(args.resume)
@@ -1696,10 +1986,18 @@ def main() -> int:
         print(f"Loaded checkpoint: {checkpoint_path}", flush=True)
     else:
         simulation.context.setPositions(positions)
-        if random_seed > 0:
-            simulation.context.setVelocitiesToTemperature(temperature * kelvin, random_seed)
-        print("Stage 1/4: energy minimization", flush=True)
+        if random_seed != 0:
+            simulation.context.setVelocitiesToTemperature(temperature * kelvin, abs(random_seed))
+        else:
+            simulation.context.setVelocitiesToTemperature(temperature * kelvin)
+        print("Stage 1: energy minimization", flush=True)
         simulation.minimizeEnergy()
+        if do_nvt:
+            print(f"Stage 2: NVT equilibration ({nvt_steps} steps)", flush=True)
+            simulation.step(nvt_steps)
+        if do_npt:
+            print(f"Stage 3: NPT equilibration ({npt_steps} steps)", flush=True)
+            simulation.step(npt_steps)
 
     state_path = analysis_dir / "openmm_state.csv"
     fixed_outputs = [
@@ -1726,24 +2024,25 @@ def main() -> int:
             separator=",",
         ))
         simulation.reporters.append(DCDReporter(str(trajectories_dir / "openmm.dcd"), report_interval))
+        # Single checkpoint path under checkpoints/; mirror to run dir at end.
         simulation.reporters.append(CheckpointReporter(str(checkpoints_dir / "openmm.chk"), report_interval))
 
         completed = 0
-        print("Stage 2/4: production", flush=True)
+        print("Stage 4: production", flush=True)
         while completed < total_steps:
             steps = min(report_interval, total_steps - completed)
             simulation.step(steps)
             completed += steps
-            simulation.saveCheckpoint(str(out_dir / "openmm.chk"))
             print(f"step {completed} of {total_steps}", flush=True)
     finally:
         state_handle.close()
 
+    simulation.saveCheckpoint(str(out_dir / "openmm.chk"))
     state = simulation.context.getState(getPositions=True)
     with (trajectories_dir / "openmm-final.pdb").open("w", encoding="utf-8") as handle:
         PDBFile.writeFile(simulation.topology, state.getPositions(), handle)
-    print("Stage 3/4: trajectory and checkpoint written", flush=True)
-    print("Stage 4/4: OpenMM workflow completed", flush=True)
+    print("Stage 5: trajectory and checkpoint written", flush=True)
+    print("OpenMM workflow completed", flush=True)
     return 0
 
 
@@ -1753,6 +2052,12 @@ if __name__ == "__main__":
     .replace("__AUTOMD_INPUT__", &input_structure_json)
     .replace("__AUTOMD_FORCE_FIELDS__", &force_fields)
     .replace("__AUTOMD_RUN_DIRECTORY__", run_directory)
+    .replace("__AUTOMD_PADDING_NM__", &format_number(padding_nm))
+    .replace("__AUTOMD_IONIC__", &format_number(ionic))
+    .replace(
+        "__AUTOMD_NEUTRALIZE__",
+        if neutralize { "True" } else { "False" },
+    )
 }
 
 fn openmm_run_script(plan: &SimulationPlan, commands: &[EngineCommand]) -> String {
@@ -2027,7 +2332,7 @@ fn gromacs_equilibration_mdp(
     pressure_coupling: bool,
 ) -> String {
     let duration_ps = stage_parameter(plan, stage_id, "durationPs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(if stage_id == "nvt" { 100.0 } else { 1000.0 });
     let temperature = stage_parameter(plan, stage_id, "temperatureK").unwrap_or("300");
     let pressure = stage_parameter(plan, stage_id, "pressureBar").unwrap_or("1.0");
@@ -2035,9 +2340,17 @@ fn gromacs_equilibration_mdp(
         .or_else(|| stage_parameter(plan, "production", "randomSeed"))
         .unwrap_or("-1");
     let timestep_fs = stage_parameter(plan, "production", "timestepFs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(2.0);
-    let nsteps = nsteps_from_ps(duration_ps, timestep_fs);
+    let nsteps = nsteps_from_ps_f64(duration_ps, timestep_fs);
+    let restraints = stage_parameter(plan, stage_id, "restraints")
+        .or_else(|| stage_parameter(plan, "nvt", "restraints"))
+        .unwrap_or("none");
+    let define_line = if restraints != "none" && !restraints.is_empty() && restraints != "false" {
+        "define          = -DPOSRES\n"
+    } else {
+        ""
+    };
     let pcoupl = if pressure_coupling {
         format!(
             r#"pcoupl          = C-rescale
@@ -2052,7 +2365,7 @@ compressibility = 4.5e-5"#
 
     format!(
         r#"; AutoMD generated GROMACS MDP: {stage_id}
-integrator      = md
+{define_line}integrator      = md
 dt              = {dt}
 nsteps          = {nsteps}
 nstxout-compressed = 500
@@ -2065,6 +2378,7 @@ cutoff-scheme   = Verlet
 nstlist         = 20
 rcoulomb        = 1.0
 rvdw            = 1.0
+DispCorr        = EnerPres
 coulombtype     = PME
 tcoupl          = V-rescale
 tc-grps         = System
@@ -2076,7 +2390,7 @@ gen_temp        = {temperature}
 gen_seed        = {velocity_seed}
 pbc             = xyz
 "#,
-        dt = format_number(timestep_fs / 1000.0),
+        dt = format_number_f64(timestep_fs / 1000.0),
         continuation = if pressure_coupling { "yes" } else { "no" },
         gen_vel = if pressure_coupling { "no" } else { "yes" },
         velocity_seed = velocity_seed,
@@ -2085,19 +2399,20 @@ pbc             = xyz
 
 fn gromacs_production_mdp(plan: &SimulationPlan) -> String {
     let duration_ns = stage_parameter(plan, "production", "durationNs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(100.0);
     let timestep_fs = stage_parameter(plan, "production", "timestepFs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(2.0);
     let checkpoint_ps = stage_parameter(plan, "production", "checkpointEveryPs")
-        .and_then(|value| value.parse::<f32>().ok())
+        .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(100.0);
     let temperature = stage_parameter(plan, "npt", "temperatureK")
         .or_else(|| stage_parameter(plan, "nvt", "temperatureK"))
         .unwrap_or("300");
-    let nsteps = nsteps_from_ps(duration_ns * 1000.0, timestep_fs);
-    let checkpoint_steps = nsteps_from_ps(checkpoint_ps, timestep_fs);
+    let pressure = stage_parameter(plan, "npt", "pressureBar").unwrap_or("1.0");
+    let nsteps = nsteps_from_ps_f64(duration_ns * 1000.0, timestep_fs);
+    let checkpoint_steps = nsteps_from_ps_f64(checkpoint_ps, timestep_fs);
 
     format!(
         r#"; AutoMD generated GROMACS MDP: production
@@ -2115,6 +2430,7 @@ cutoff-scheme   = Verlet
 nstlist         = 20
 rcoulomb        = 1.0
 rvdw            = 1.0
+DispCorr        = EnerPres
 coulombtype     = PME
 tcoupl          = V-rescale
 tc-grps         = System
@@ -2123,11 +2439,11 @@ ref_t           = {temperature}
 pcoupl          = C-rescale
 pcoupltype      = isotropic
 tau_p           = 5.0
-ref_p           = 1.0
+ref_p           = {pressure}
 compressibility = 4.5e-5
 pbc             = xyz
 "#,
-        dt = format_number(timestep_fs / 1000.0),
+        dt = format_number_f64(timestep_fs / 1000.0),
     )
 }
 
@@ -2279,7 +2595,7 @@ EOF_AUTOMD_GROMACS_TOP_DIRS
 automd_pick_gromacs_force_field() {
   local preferred="$1"
   local ff
-  for ff in "$preferred" amber99sb-ildn charmm27 oplsaa amber99sb amber03; do
+  for ff in "$preferred" amber14sb amber99sb-ildn charmm36-mar2019 charmm27 oplsaa amber99sb amber03; do
     if automd_gromacs_force_field_exists "$ff"; then
       if [ "$ff" != "$preferred" ]; then
         echo "[AutoMD] Preferred GROMACS force field '$preferred' is not installed; using '$ff'." >&2
@@ -3752,13 +4068,21 @@ fn stage_parameter<'a>(plan: &'a SimulationPlan, stage_id: &str, key: &str) -> O
 }
 
 fn nsteps_from_ps(duration_ps: f32, timestep_fs: f32) -> u64 {
+    nsteps_from_ps_f64(f64::from(duration_ps), f64::from(timestep_fs))
+}
+
+fn nsteps_from_ps_f64(duration_ps: f64, timestep_fs: f64) -> u64 {
     ((duration_ps * 1000.0) / timestep_fs.max(0.001))
         .round()
         .max(1.0) as u64
 }
 
 fn format_number(value: f32) -> String {
-    let rounded = format!("{value:.4}");
+    format_number_f64(f64::from(value))
+}
+
+fn format_number_f64(value: f64) -> String {
+    let rounded = format!("{value:.6}");
     rounded
         .trim_end_matches('0')
         .trim_end_matches('.')
@@ -3786,19 +4110,47 @@ fn openmm_force_field_files(plan: &SimulationPlan) -> Vec<String> {
 }
 
 fn gromacs_force_field(value: &str) -> &'static str {
-    match value {
-        "AMBER ff19SB" => "amber99sb-ildn",
-        "OPLS-AA/M" => "oplsaa",
-        _ => "charmm36-mar2019",
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("ff19") || lower.contains("19sb") {
+        // Prefer amber14sb when installed; shell picker falls back if missing.
+        "amber14sb"
+    } else if lower.contains("ff14") || lower.contains("14sb") {
+        "amber14sb"
+    } else if lower.contains("ff99") || lower.contains("ildn") {
+        "amber99sb-ildn"
+    } else if lower.contains("opls") {
+        "oplsaa"
+    } else if lower.contains("amber") {
+        "amber14sb"
+    } else {
+        "charmm36-mar2019"
     }
 }
 
 fn gromacs_water_model(value: &str) -> &'static str {
-    match value {
-        "SPC/E" => "spce",
-        "TIP4P-Ew" => "tip4p",
-        "OPC" => "tip3p",
-        _ => "tip3p",
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("spc/e") || lower.contains("spce") {
+        "spce"
+    } else if lower.contains("tip4p") {
+        "tip4p"
+    } else if lower.contains("opc") {
+        // OPC is not always packaged; warn via mapping and prefer tip3p only if picker must fall back.
+        // When available, GROMACS uses "opc"; keep literal for modern installs.
+        "opc"
+    } else {
+        "tip3p"
+    }
+}
+
+fn gromacs_solvent_box(value: &str) -> &'static str {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("tip4p") {
+        "tip4p.gro"
+    } else if lower.contains("spc") {
+        "spc216.gro"
+    } else {
+        // tip3p / opc / default: classic 3-site solvent configuration
+        "spc216.gro"
     }
 }
 
@@ -3930,10 +4282,11 @@ mod tests {
             .contents
             .as_str();
 
-        assert!(runner.contains("Modeller,"));
+        assert!(runner.contains("Modeller,") || runner.contains("Modeller("));
         assert!(runner.contains("modeller.addHydrogens(forcefield)"));
-        assert!(runner.contains("forcefield.createSystem(\n        topology,"));
+        assert!(runner.contains("forcefield.createSystem("));
         assert!(runner.contains("simulation.context.setPositions(positions)"));
+        assert!(runner.contains("MonteCarloBarostat"));
     }
 
     #[test]
@@ -4050,21 +4403,25 @@ mod tests {
         assert!(mdp.contains("tc-grps         = System"));
         assert!(mdp.contains("tau_t           = 0.1"));
         assert!(mdp.contains("ref_t           = 300"));
+        assert!(mdp.contains("DispCorr        = EnerPres"));
+        assert!(mdp.contains("ref_p           = 1.0"));
         assert!(!mdp.contains("Protein Non-Protein"));
         assert!(!mdp.contains("-DPOSRES"));
     }
 
     #[test]
-    fn equilibration_mdp_uses_system_temperature_group() {
+    fn equilibration_mdp_enables_posres_when_restraints_requested() {
         let plan = test_plan();
-        for stage in ["nvt", "npt"] {
-            let mdp = gromacs_mdp(&plan, stage);
-            assert!(mdp.contains("tc-grps         = System"));
-            assert!(mdp.contains("tau_t           = 0.1"));
-            assert!(mdp.contains("ref_t           = 300"));
-            assert!(!mdp.contains("Protein Non-Protein"));
-            assert!(!mdp.contains("-DPOSRES"));
-        }
+        let nvt = gromacs_mdp(&plan, "nvt");
+        assert!(nvt.contains("tc-grps         = System"));
+        assert!(nvt.contains("tau_t           = 0.1"));
+        assert!(nvt.contains("ref_t           = 300"));
+        assert!(nvt.contains("DispCorr        = EnerPres"));
+        // Default plan sets nvt.restraints=heavy-atoms
+        assert!(nvt.contains("define          = -DPOSRES"));
+        let npt = gromacs_mdp(&plan, "npt");
+        // NPT inherits restraints from nvt when present
+        assert!(npt.contains("define          = -DPOSRES"));
     }
 
     #[test]
@@ -4083,12 +4440,153 @@ mod tests {
         assert!(run_script.contains(
             "OMP_NUM_THREADS=8 automd_gromacs_mdrun cpu -deffnm runs/gromacs-test/em -ntomp 8"
         ));
-        assert!(run_script.contains(
-            "OMP_NUM_THREADS=8 automd_gromacs_mdrun auto -deffnm runs/gromacs-test/md -cpi runs/gromacs-test/md.cpt -ntomp 8"
-        ));
-        assert!(run_script.contains("printf 'System\\nSystem\\n' | gmx rms"));
-        assert!(run_script.contains("printf 'System\\n' | gmx gyrate"));
+        // First production must not require a missing md.cpt; only pass -cpi when file exists.
+        assert!(run_script.contains("if [ -f runs/gromacs-test/md.cpt ]"));
+        assert!(run_script.contains("AUTOMD_MD_CPI"));
+        assert!(run_script.contains("printf 'Backbone\\nBackbone\\n' | gmx rms"));
+        assert!(run_script.contains("printf 'Backbone\\n' | gmx gyrate"));
         assert!(run_script.contains("-ff \"$AUTOMD_GROMACS_FF\""));
+    }
+
+    #[test]
+    fn ambertools_tleap_converts_padding_nm_to_angstrom() {
+        let mut plan = test_plan();
+        plan.engine_id = "ambertools".to_string();
+        plan.solvent.padding_nm = 1.0;
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("ambertools package");
+        let tleap = package
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("tleap.in"))
+            .expect("tleap")
+            .contents
+            .as_str();
+        assert!(
+            tleap.contains("TIP3PBOX 10") || tleap.contains("TIP3PBOX 10.0"),
+            "expected 1.0 nm -> 10 Å padding, got:\n{tleap}"
+        );
+        assert!(
+            !tleap.contains("TIP3PBOX 1\n") && !tleap.contains("TIP3PBOX 1.0\n"),
+            "must not pass padding_nm raw as Angstrom"
+        );
+    }
+
+    #[test]
+    fn ambertools_mdin_requests_netcdf_trajectory() {
+        let mut plan = test_plan();
+        plan.engine_id = "ambertools".to_string();
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("ambertools package");
+        for name in ["heat.mdin", "equil.mdin", "prod.mdin"] {
+            let mdin = package
+                .files
+                .iter()
+                .find(|file| file.path.ends_with(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .contents
+                .as_str();
+            assert!(mdin.contains("ioutfm=1"), "{name} should set ioutfm=1");
+            assert!(mdin.contains("ntxo=2"), "{name} should set ntxo=2");
+        }
+    }
+
+    #[test]
+    fn openmm_runner_emits_barostat_and_solvation() {
+        let mut plan = test_plan();
+        plan.engine_id = "openmm".to_string();
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("openmm package");
+        let runner = package
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("run_openmm.py"))
+            .expect("runner")
+            .contents
+            .as_str();
+        assert!(runner.contains("MonteCarloBarostat"));
+        assert!(runner.contains("addSolvent"));
+        assert!(runner.contains("NVT equilibration"));
+        assert!(runner.contains("NPT equilibration"));
+        assert!(runner.contains("pick_platform"));
+    }
+
+    #[test]
+    fn namd_conf_includes_langevin_piston_for_npt() {
+        let mut plan = test_plan();
+        plan.engine_id = "namd".to_string();
+        let package = prepare_run_package(EngineRunRequest {
+            plan,
+            project_path: None,
+            write_to_disk: false,
+        })
+        .expect("namd package");
+        let conf = package
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("automd.conf"))
+            .expect("conf")
+            .contents
+            .as_str();
+        assert!(conf.contains("langevinPiston        on"));
+        assert!(conf.contains("langevinPistonTarget"));
+    }
+
+    #[test]
+    fn gromacs_commands_respect_disabled_stages_and_chain_coords() {
+        let mut plan = test_plan();
+        // Disable NVT and analysis; keep em, npt, production.
+        for stage in &mut plan.stages {
+            if stage.id == "nvt" || stage.id == "analysis" {
+                stage.enabled = false;
+            }
+        }
+        let commands = gromacs_commands(&plan, "runs/gromacs-test");
+        let ids: Vec<_> = commands.iter().map(|c| c.stage_id.as_str()).collect();
+        assert!(ids.contains(&"em"));
+        assert!(!ids.contains(&"nvt"));
+        assert!(ids.contains(&"npt"));
+        assert!(ids.contains(&"production"));
+        assert!(!ids.contains(&"analysis"));
+        // NPT should chain from EM coordinates when NVT is skipped.
+        let npt = commands.iter().find(|c| c.stage_id == "npt").expect("npt");
+        assert!(
+            npt.command.contains("-c runs/gromacs-test/em.gro"),
+            "NPT should use EM coordinates when NVT is disabled: {}",
+            npt.command
+        );
+        assert!(
+            !npt.command.contains("-t runs/gromacs-test/nvt.cpt"),
+            "NPT must not require missing NVT checkpoint"
+        );
+    }
+
+    #[test]
+    fn ambertools_commands_skip_disabled_production_and_analysis() {
+        let mut plan = test_plan();
+        plan.engine_id = "ambertools".to_string();
+        for stage in &mut plan.stages {
+            if stage.id == "production" || stage.id == "analysis" {
+                stage.enabled = false;
+            }
+        }
+        let commands = ambertools_commands(&plan, "runs/amber-test");
+        let ids: Vec<_> = commands.iter().map(|c| c.stage_id.as_str()).collect();
+        assert!(ids.iter().any(|id| id.contains("tleap") || id.contains("min")));
+        assert!(!ids.iter().any(|id| *id == "ambertools-prod"));
+        assert!(!ids.iter().any(|id| *id == "ambertools-analysis"));
     }
 
     #[test]

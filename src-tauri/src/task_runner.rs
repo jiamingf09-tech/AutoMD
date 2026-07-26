@@ -194,11 +194,15 @@ impl TaskManager {
         let mut task = task.lock().expect("task lock");
         task.cancel_requested = true;
         if let Some(child) = task.child.as_mut() {
-            let _ = child.kill();
+            kill_process_tree(child);
         }
         task.snapshot.status = TaskStatus::Cancelled;
         task.snapshot.finished_at = Some(Utc::now());
-        append_log(&mut task.snapshot, "Cancellation requested.".to_string());
+        append_log(
+            &mut task.snapshot,
+            "Cancellation requested (process group terminated when available)."
+                .to_string(),
+        );
         attach_resume_plan(&mut task);
         Ok(task.snapshot.clone())
     }
@@ -310,6 +314,25 @@ fn engine_run_script_name(engine_id: &str) -> &str {
     }
 }
 
+/// Terminate the child and, on Unix, its entire process group (shell + mdrun/sander/python).
+fn kill_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        if pid > 0 {
+            // Negative pid targets the process group created via setpgid(0,0).
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+            thread::sleep(Duration::from_millis(150));
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+}
+
 fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: String) {
     {
         let mut task = record.lock().expect("task lock");
@@ -323,6 +346,20 @@ fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: St
         .current_dir(&spec.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Put the child in its own process group so cancel can kill mdrun/sander descendants.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                // SAFETY: called in the child just before exec; setpgid(0,0) is async-signal-safe.
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -366,7 +403,7 @@ fn run_process(record: Arc<Mutex<ManagedTask>>, spec: ProcessSpec, engine_id: St
             let mut task = record.lock().expect("task lock");
             if task.cancel_requested {
                 if let Some(child) = task.child.as_mut() {
-                    let _ = child.kill();
+                    kill_process_tree(child);
                 }
                 task.snapshot.status = TaskStatus::Cancelled;
                 task.snapshot.finished_at = Some(Utc::now());

@@ -244,7 +244,7 @@ pub fn read_structure_file(
 fn summarize_contents(kind: &StructureSourceKind, contents: &str) -> StructureSummary {
     match kind {
         StructureSourceKind::Pdb => summarize_pdb_like(contents, "PDB atom records"),
-        StructureSourceKind::Mmcif => summarize_pdb_like(contents, "mmCIF atom_site-style records"),
+        StructureSourceKind::Mmcif => summarize_mmcif(contents),
         StructureSourceKind::Sdf => summarize_sdf(contents),
         StructureSourceKind::Mol2 => summarize_mol2(contents),
         StructureSourceKind::Smiles => StructureSummary {
@@ -276,11 +276,15 @@ fn summarize_pdb_like(contents: &str, format_note: &str) -> StructureSummary {
     let mut residues = BTreeSet::new();
     let mut chains = BTreeSet::new();
     let mut models = 0u32;
+    let mut has_cryst1 = false;
 
     for line in contents.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("MODEL") {
             models += 1;
+        }
+        if trimmed.starts_with("CRYST1") {
+            has_cryst1 = true;
         }
         if trimmed.starts_with("ATOM") || trimmed.starts_with("HETATM") {
             atoms += 1;
@@ -296,14 +300,118 @@ fn summarize_pdb_like(contents: &str, format_note: &str) -> StructureSummary {
         }
     }
 
+    let mut note = format_note.to_string();
+    if has_cryst1 {
+        note.push_str("; CRYST1 unit cell present");
+    }
+
     StructureSummary {
         atom_count: Some(atoms),
         residue_count: Some(residues.len() as u32).filter(|value| *value > 0),
         chain_count: Some(chains.len() as u32).filter(|value| *value > 0),
         molecule_count: Some(residues.len() as u32).filter(|value| *value > 0),
         model_count: Some(models.max(1)).filter(|_| atoms > 0),
-        format_note: format_note.to_string(),
+        format_note: note,
     }
+}
+
+/// Lightweight mmCIF tokenizer for atom_site counts (not a full CIF parser).
+fn summarize_mmcif(contents: &str) -> StructureSummary {
+    let mut atoms = 0u32;
+    let mut residues = BTreeSet::new();
+    let mut chains = BTreeSet::new();
+    let mut has_cell = false;
+    let mut in_atom_site = false;
+    let mut atom_site_headers: Vec<String> = Vec::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with("_cell.") || trimmed.starts_with("_cell_length_") {
+            has_cell = true;
+        }
+        if trimmed.starts_with("_atom_site.") {
+            in_atom_site = true;
+            atom_site_headers.push(trimmed.trim_start_matches("_atom_site.").to_string());
+            continue;
+        }
+        if in_atom_site && (trimmed.starts_with('_') || trimmed.starts_with("loop_")) {
+            // left atom_site loop
+            if !trimmed.starts_with("_atom_site.") {
+                in_atom_site = false;
+            } else {
+                atom_site_headers.push(trimmed.trim_start_matches("_atom_site.").to_string());
+            }
+            continue;
+        }
+        if in_atom_site && !trimmed.starts_with('#') && !trimmed.starts_with("loop_") {
+            // data row: whitespace-separated fields matching header order
+            let cols: Vec<&str> = trimmed.split_whitespace().collect();
+            if cols.is_empty() || cols[0].starts_with('_') {
+                continue;
+            }
+            // Heuristic: atom_site rows usually have many columns and a group_PDB of ATOM/HETATM
+            let group = header_value(&atom_site_headers, &cols, "group_PDB")
+                .or_else(|| cols.first().copied())
+                .unwrap_or("");
+            if group != "ATOM" && group != "HETATM" && atom_site_headers.len() > 3 {
+                // Still count if this looks like a multi-column atom row
+                if cols.len() < 5 {
+                    continue;
+                }
+            }
+            atoms += 1;
+            let chain = header_value(&atom_site_headers, &cols, "auth_asym_id")
+                .or_else(|| header_value(&atom_site_headers, &cols, "label_asym_id"))
+                .unwrap_or("")
+                .to_string();
+            let resname = header_value(&atom_site_headers, &cols, "auth_comp_id")
+                .or_else(|| header_value(&atom_site_headers, &cols, "label_comp_id"))
+                .unwrap_or("")
+                .to_string();
+            let resseq = header_value(&atom_site_headers, &cols, "auth_seq_id")
+                .or_else(|| header_value(&atom_site_headers, &cols, "label_seq_id"))
+                .unwrap_or("")
+                .to_string();
+            if !chain.is_empty() {
+                chains.insert(chain.clone());
+            }
+            if !resname.is_empty() || !resseq.is_empty() {
+                residues.insert(format!("{chain}:{resname}:{resseq}"));
+            }
+        }
+    }
+
+    // Fallback: PDB-style embedded in mmCIF-named file
+    if atoms == 0 {
+        let fallback = summarize_pdb_like(contents, "mmCIF (PDB-style fallback)");
+        if fallback.atom_count.unwrap_or(0) > 0 {
+            return fallback;
+        }
+    }
+
+    let mut note = "mmCIF atom_site records".to_string();
+    if has_cell {
+        note.push_str("; cell dimensions present");
+    }
+
+    StructureSummary {
+        atom_count: Some(atoms).filter(|value| *value > 0),
+        residue_count: Some(residues.len() as u32).filter(|value| *value > 0),
+        chain_count: Some(chains.len() as u32).filter(|value| *value > 0),
+        molecule_count: Some(residues.len() as u32).filter(|value| *value > 0),
+        model_count: Some(1).filter(|_| atoms > 0),
+        format_note: note,
+    }
+}
+
+fn header_value<'a>(headers: &[String], cols: &[&'a str], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .position(|header| header == name)
+        .and_then(|index| cols.get(index).copied())
 }
 
 fn summarize_sdf(contents: &str) -> StructureSummary {

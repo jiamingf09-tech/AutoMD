@@ -1031,10 +1031,25 @@ function App() {
     }
     const interval = window.setInterval(() => {
       void api.getLocalTask(localSnapshot.id).then((snapshot) => {
-        setLocalSnapshot(snapshot);
-        void refreshTaskRecords();
+        setLocalSnapshot((prev) => {
+          // Avoid thrashing React/Mol* when only log tail advances slightly.
+          if (
+            prev &&
+            prev.id === snapshot.id &&
+            prev.status === snapshot.status &&
+            prev.progressPercent === snapshot.progressPercent &&
+            prev.currentStep === snapshot.currentStep &&
+            prev.logTail.length === snapshot.logTail.length
+          ) {
+            return prev;
+          }
+          return snapshot;
+        });
+        if (["completed", "failed", "cancelled"].includes(snapshot.status)) {
+          void refreshTaskRecords();
+        }
       }).catch(reportError);
-    }, 500);
+    }, 1500);
     return () => window.clearInterval(interval);
   }, [localSnapshot?.id, localSnapshot?.status]);
 
@@ -6946,17 +6961,7 @@ function RemotePanel({
   useEffect(() => {
     setRemotePortText(String(remoteProfileDraft.port));
   }, [remoteProfileDraft.id, remoteProfileDraft.port]);
-  useEffect(() => {
-    if (draft.authMethod !== "password") return;
-    const syncPasswordField = () => {
-      const value = passwordInputRef.current?.value ?? "";
-      if (value !== remotePassword) {
-        setRemotePassword(value);
-      }
-    };
-    const interval = window.setInterval(syncPasswordField, 250);
-    return () => window.clearInterval(interval);
-  }, [draft.authMethod, remotePassword, setRemotePassword]);
+  // Password is bound via onChange on the input; avoid 250ms polling that forced re-renders.
   function updateRemotePortText(value: string) {
     const digits = value.replace(/[^\d]/g, "").slice(0, 5);
     setRemotePortText(digits);

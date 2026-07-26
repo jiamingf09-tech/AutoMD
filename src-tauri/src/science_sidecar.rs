@@ -442,15 +442,37 @@ def run_prepare(plan_path: Path, project: str | None) -> int:
         from openmm.app import PDBFile
 
         fixer = PDBFixer(filename=str(source))
+        # Do NOT call removeHeterogens: keep ligands/cofactors/water for user review.
+        # Only repair standard polymer missing atoms/residues.
         fixer.findMissingResidues()
+        # Limit missing-residue termini insertions to avoid inventing long loops.
+        chains = list(fixer.topology.chains())
+        for key, residues in list(fixer.missingResidues.items()):
+            chain_index, residue_index = key
+            if chain_index < len(chains):
+                n = len(list(chains[chain_index].residues()))
+                if residue_index not in (0, n):
+                    # Interior missing residues can be large; leave for user review.
+                    if len(residues) > 2:
+                        del fixer.missingResidues[key]
+                        report["warnings"].append(
+                            f"Skipped long interior missing-residue gap at chain {{chain_index}} position {{residue_index}}."
+                        )
         fixer.findNonstandardResidues()
+        # replaceNonstandardResidues can alter cofactors mistaken as residues; only apply to protein AA codes.
+        if fixer.nonstandardResidues:
+            report["warnings"].append(
+                f"Nonstandard residues detected ({{len(fixer.nonstandardResidues)}}); replacing standard-polymer mismatches only. Review ligands/cofactors carefully."
+            )
         fixer.replaceNonstandardResidues()
         report["actions"].append("replaceNonstandardResidues")
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
         report["actions"].append("addMissingAtoms")
+        # Keep heterogens; never call removeHeterogens so HETATM ligands/waters remain.
+        report["actions"].append("keepHeterogens")
         fixer.addMissingHydrogens(7.0)
-        report["actions"].append("addMissingHydrogens")
+        report["actions"].append("addMissingHydrogens(pH=7.0)")
         with output_pdb.open("w", encoding="utf-8") as handle:
             PDBFile.writeFile(fixer.topology, fixer.positions, handle)
     else:
@@ -458,7 +480,7 @@ def run_prepare(plan_path: Path, project: str | None) -> int:
         report["warnings"].append("PDBFixer/OpenMM missing; copied source structure without repair.")
 
     if plan.get("system", {{}}).get("hasLigand"):
-        report["warnings"].append("Ligand parameterization is documented in ligand_parameterization.md but not automatically merged.")
+        report["warnings"].append("Ligand parameterization is documented in ligand_parameterization.md but not automatically merged. Heterogens were retained if PDBFixer ran.")
 
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Prepared structure written to {{output_pdb}}")
@@ -545,40 +567,33 @@ def write_summary(path: Path, summary: dict) -> None:
 
 
 def contact_count(coords, np_module, cutoff_angstrom: float = 8.0) -> int | None:
-    if len(coords) < 2:
+    """Pair contacts with O(N) neighborhood when scipy is available; else capped dense."""
+    n = len(coords)
+    if n < 2:
         return 0
-    if len(coords) > 3000:
+    if n > 8000:
         return None
-    delta = coords[:, None, :] - coords[None, :, :]
-    distances = np_module.sqrt((delta * delta).sum(axis=2))
-    mask = np_module.triu(distances < cutoff_angstrom, k=1)
-    return int(mask.sum())
+    try:
+        from scipy.spatial import cKDTree
 
+        tree = cKDTree(coords)
+        pairs = tree.query_pairs(r=cutoff_angstrom)
+        return int(len(pairs))
+    except Exception:
+        pass
+    if n > 1500:
+        return None
+    try:
+        from MDAnalysis.lib.distances import self_distance_array
 
-def angle_degrees(a, b, c, np_module) -> float:
-    ba = a - b
-    bc = c - b
-    denom = np_module.linalg.norm(ba) * np_module.linalg.norm(bc)
-    if denom == 0:
-        return 0.0
-    cosine = float(np_module.dot(ba, bc) / denom)
-    cosine = max(-1.0, min(1.0, cosine))
-    return float(math.degrees(math.acos(cosine)))
-
-
-def dihedral_degrees(a, b, c, d, np_module) -> float:
-    b0 = -(b - a)
-    b1 = c - b
-    b2 = d - c
-    norm = np_module.linalg.norm(b1)
-    if norm == 0:
-        return 0.0
-    b1 = b1 / norm
-    v = b0 - np_module.dot(b0, b1) * b1
-    w = b2 - np_module.dot(b2, b1) * b1
-    x = np_module.dot(v, w)
-    y = np_module.dot(np_module.cross(b1, v), w)
-    return float(math.degrees(math.atan2(y, x)))
+        dists = self_distance_array(coords)
+        return int((dists < cutoff_angstrom).sum())
+    except Exception:
+        # Last resort: dense matrix only for small selections
+        delta = coords[:, None, :] - coords[None, :, :]
+        distances = np_module.sqrt((delta * delta).sum(axis=2))
+        mask = np_module.triu(distances < cutoff_angstrom, k=1)
+        return int(mask.sum())
 
 
 def run_hbond_analysis(universe, output_path: Path, frame_times: dict[int, float], warnings: list[str]) -> None:
@@ -610,7 +625,12 @@ def run_analysis(plan_path: Path, project_arg: str | None, topology_arg: str, tr
         "frames": 0,
         "selectedAtoms": 0,
         "outputs": [],
-        "warnings": []
+        "warnings": [],
+        "methods": {
+            "rmsd": "MDAnalysis.analysis.rms.RMSD with superposition",
+            "rmsf": "align to average then per-atom RMSF",
+            "pbc": "unwrap/make_whole when periodic dimensions are available",
+        },
     }
 
     topology = resolve_project_path(project_root, topology_arg)
@@ -626,6 +646,7 @@ def run_analysis(plan_path: Path, project_arg: str | None, topology_arg: str, tr
     try:
         import MDAnalysis as mda
         import numpy as np
+        from MDAnalysis.analysis import align, rms
     except Exception as exc:
         summary["warnings"].append(f"MDAnalysis/numpy import failed: {exc}")
         write_summary(summary_path, summary)
@@ -648,70 +669,94 @@ def run_analysis(plan_path: Path, project_arg: str | None, topology_arg: str, tr
         atoms = universe.atoms
     summary["selectedAtoms"] = int(len(atoms))
 
+    # Unwrap / make whole for PBC-aware analyses when dimensions exist.
+    try:
+        if getattr(universe, "dimensions", None) is not None:
+            try:
+                from MDAnalysis.transformations import unwrap
+
+                universe.trajectory.add_transformations(unwrap(atoms))
+                summary["warnings"].append("Applied PBC unwrap transformation to the selected atom group.")
+            except Exception:
+                for _ts in universe.trajectory:
+                    try:
+                        atoms.unwrap()
+                    except Exception:
+                        try:
+                            atoms.atoms.guess_bonds()
+                            atoms.unwrap()
+                        except Exception:
+                            break
+                universe.trajectory.rewind()
+    except Exception as exc:
+        summary["warnings"].append(f"PBC unwrap skipped: {exc}")
+
+    # Aligned RMSD via library implementation (superimposition / Kabsch).
     rmsd_rows = []
+    try:
+        rmsd_analysis = rms.RMSD(atoms, atoms, select=selection if selection else "all", ref_frame=0)
+        rmsd_analysis.run()
+        for row in rmsd_analysis.results.rmsd:
+            # columns: frame, time, RMSD
+            time_ps = float(row[1]) if len(row) > 1 else float(row[0])
+            value = float(row[2]) if len(row) > 2 else float(row[-1])
+            rmsd_rows.append([time_ps, value])
+    except Exception as exc:
+        summary["warnings"].append(f"Superimposed RMSD failed ({exc}); falling back to unaligned distances.")
+        ref = None
+        for ts in universe.trajectory:
+            coords = atoms.positions.astype(float)
+            if ref is None:
+                ref = coords.copy()
+            diff = coords - ref
+            value = math.sqrt(float((diff * diff).sum(axis=1).mean())) if len(coords) else 0.0
+            rmsd_rows.append([float(getattr(ts, "time", ts.frame)), value])
+
+    # Align trajectory to first frame for Rg / contacts / RMSF (reduces rigid-body contamination).
+    try:
+        align.AlignTraj(universe, universe, select=selection if selection else "all", in_memory=True).run()
+    except Exception as exc:
+        summary["warnings"].append(f"Trajectory alignment skipped: {exc}")
+
     rg_rows = []
     contact_rows = []
-    distance_rows = []
-    angle_rows = []
-    dihedral_rows = []
     frame_times: dict[int, float] = {}
-    reference = None
-    mean = None
-    m2 = None
+    coords_list = []
     observed = 0
+    contact_skip_warned = False
 
     for timestep in universe.trajectory:
         coords = atoms.positions.astype(float).copy()
         frame = int(getattr(timestep, "frame", observed))
         time_ps = float(getattr(timestep, "time", frame))
         frame_times[frame] = time_ps
-        if reference is None:
-            reference = coords.copy()
         observed += 1
-
-        diff = coords - reference
-        rmsd = math.sqrt(float((diff * diff).sum(axis=1).mean())) if len(coords) else 0.0
-        rmsd_rows.append([time_ps, rmsd])
-
+        coords_list.append(coords)
         try:
             rg_rows.append([time_ps, float(atoms.radius_of_gyration())])
         except Exception as exc:
             summary["warnings"].append(f"Radius of gyration skipped at frame {frame}: {exc}")
-
         contacts = contact_count(coords, np)
         if contacts is None:
-            summary["warnings"].append("Contact count skipped because selected atom group is too large for dense pair distances.")
+            if not contact_skip_warned:
+                summary["warnings"].append(
+                    "Contact count skipped for large selections; use a C-alpha selection or install scipy."
+                )
+                contact_skip_warned = True
         else:
             contact_rows.append([time_ps, contacts])
-
-        if len(coords) >= 2:
-            distance_rows.append([time_ps, float(np.linalg.norm(coords[1] - coords[0]))])
-        if len(coords) >= 3:
-            angle_rows.append([time_ps, angle_degrees(coords[0], coords[1], coords[2], np)])
-        if len(coords) >= 4:
-            dihedral_rows.append([time_ps, dihedral_degrees(coords[0], coords[1], coords[2], coords[3], np)])
-
-        if mean is None:
-            mean = np.zeros_like(coords)
-            m2 = np.zeros_like(coords)
-        delta = coords - mean
-        mean = mean + delta / observed
-        delta2 = coords - mean
-        m2 = m2 + delta * delta2
 
     summary["frames"] = observed
     write_csv(analysis_dir / "mdanalysis_rmsd.csv", ["time_ps", "rmsd_angstrom"], rmsd_rows)
     write_csv(analysis_dir / "mdanalysis_rg.csv", ["time_ps", "rg_angstrom"], rg_rows)
     write_csv(analysis_dir / "mdanalysis_contacts.csv", ["time_ps", "contact_count"], contact_rows)
-    write_csv(analysis_dir / "mdanalysis_distances.csv", ["time_ps", "distance_angstrom"], distance_rows)
-    write_csv(analysis_dir / "mdanalysis_angles.csv", ["time_ps", "angle_degrees"], angle_rows)
-    write_csv(analysis_dir / "mdanalysis_dihedrals.csv", ["time_ps", "dihedral_degrees"], dihedral_rows)
-    if not distance_rows:
-        summary["warnings"].append("Distance analysis requires at least two selected atoms.")
-    if not angle_rows:
-        summary["warnings"].append("Angle analysis requires at least three selected atoms.")
-    if not dihedral_rows:
-        summary["warnings"].append("Dihedral analysis requires at least four selected atoms.")
+    # Geometry series require explicit atom indices; do not invent chemically meaningless first-N-atom probes.
+    summary["warnings"].append(
+        "Distance/angle/dihedral CSVs omitted until user-defined atom indices are provided."
+    )
+    write_csv(analysis_dir / "mdanalysis_distances.csv", ["time_ps", "distance_angstrom"], [])
+    write_csv(analysis_dir / "mdanalysis_angles.csv", ["time_ps", "angle_degrees"], [])
+    write_csv(analysis_dir / "mdanalysis_dihedrals.csv", ["time_ps", "dihedral_degrees"], [])
     summary["outputs"].extend([
         "analysis/mdanalysis_rmsd.csv",
         "analysis/mdanalysis_rg.csv",
@@ -721,10 +766,13 @@ def run_analysis(plan_path: Path, project_arg: str | None, topology_arg: str, tr
         "analysis/mdanalysis_dihedrals.csv"
     ])
 
+    # RMSF after alignment: per-atom sqrt of variance around the mean structure.
     rmsf_rows = []
-    if observed > 1 and mean is not None and m2 is not None:
-        variance = m2 / (observed - 1)
-        rmsf = np.sqrt(variance.sum(axis=1))
+    if observed > 1 and coords_list:
+        stack = np.stack(coords_list, axis=0)
+        mean = stack.mean(axis=0)
+        variance = ((stack - mean) ** 2).sum(axis=2).mean(axis=0)
+        rmsf = np.sqrt(variance)
         for index, value in enumerate(rmsf, start=1):
             rmsf_rows.append([index, float(value)])
     else:

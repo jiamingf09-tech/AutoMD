@@ -108,7 +108,10 @@ The CSV files are intentionally simple numeric tables so the existing AutoMD ana
 
 ## Analysis Limits
 
-- RMSD, RMSF, radius of gyration, contact-count, distance, angle, and dihedral outputs require a compatible topology, trajectory, and atom selection.
+- RMSD uses `MDAnalysis.analysis.rms.RMSD` with superposition (not raw unaligned coordinates).
+- Trajectories are unwrapped / made whole when periodic dimensions are available before Rg/contacts/RMSF.
+- RMSF is computed after trajectory alignment to reduce rigid-body contamination.
 - Hydrogen-bond counts are best-effort because donor/acceptor inference depends on topology detail and MDAnalysis support for the source files.
-- Dense contact counts are skipped for very large selections to avoid quadratic memory pressure.
-- Distance, angle, and dihedral CSVs currently use the first 2/3/4 atoms from the selected atom group as representative series. A richer user-defined atom-picking UI is still needed before these become fully configurable analysis widgets.
+- Contact counts prefer `scipy.spatial.cKDTree` or MDAnalysis distance helpers; dense N² broadcasts are only a last resort for small selections.
+- Distance, angle, and dihedral CSVs are **not** invented from the first N atoms of the selection; they stay empty until user-defined atom indices are provided.
+- Structure prep keeps heterogens (does not call `removeHeterogens`); long interior missing-residue gaps are skipped with warnings.

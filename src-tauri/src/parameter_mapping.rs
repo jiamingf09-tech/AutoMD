@@ -216,12 +216,7 @@ fn map_gromacs_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage:
                             notes: vec!["C-rescale isotropic pressure target.".to_string()],
                         },
                     );
-                    if value.trim() != "1.0" && value.trim() != "1" {
-                        mapper.warn(
-                            "GROMACS production template currently keeps ref_p=1.0; edit generated/gromacs/md.mdp for non-1 bar production runs."
-                                .to_string(),
-                        );
-                    }
+                    // production mdp now reads npt.pressureBar for ref_p
                 }
             }
             if let Some(value) = parameter(stage, "velocitySeed") {
@@ -407,7 +402,7 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                         target_file,
                         status: ParameterMappingStatus::Approximated,
                         notes: vec![
-                            "Used only when NVT temperature is absent; current OpenMM runner has no explicit NPT phase."
+                            "Used as MonteCarloBarostat temperature when NVT temperature is absent."
                                 .to_string(),
                         ],
                     },
@@ -420,10 +415,13 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                         normalized_key: "pressureBar",
                         normalized_value: format!("{value} bar"),
                         engine_key: "MonteCarloBarostat",
-                        engine_value: "not emitted".to_string(),
+                        engine_value: format!("{value} bar"),
                         target_file,
-                        status: ParameterMappingStatus::Unsupported,
-                        notes: vec!["Current OpenMM runner does not add a barostat; edit the Python runner for NPT.".to_string()],
+                        status: ParameterMappingStatus::Mapped,
+                        notes: vec![
+                            "OpenMM runner adds MonteCarloBarostat when the NPT stage is enabled."
+                                .to_string(),
+                        ],
                     },
                 );
             }
@@ -433,12 +431,12 @@ fn map_openmm_stage(mapper: &mut ParameterMapper, plan: &SimulationPlan, stage: 
                     MappingSpec {
                         normalized_key: "durationPs",
                         normalized_value: format!("{value} ps"),
-                        engine_key: "equilibration loop",
-                        engine_value: "not emitted".to_string(),
+                        engine_key: "equilibration steps",
+                        engine_value: format!("{value} ps"),
                         target_file,
-                        status: ParameterMappingStatus::Unsupported,
+                        status: ParameterMappingStatus::Mapped,
                         notes: vec![
-                            "Current OpenMM runner performs minimization then production only."
+                            "OpenMM runner converts equilibration durationPs to steps using production timestepFs."
                                 .to_string(),
                         ],
                     },
