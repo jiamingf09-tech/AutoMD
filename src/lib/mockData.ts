@@ -32,6 +32,7 @@ import type {
   ProjectTextFileRequest,
   ProjectSummary,
   RemoteConnectionTest,
+  RemoteHardwareReport,
   RemoteExecutionPackage,
   RemoteExecutionRequest,
   RemoteJobSnapshot,
@@ -348,6 +349,39 @@ export function mockRemoteConnectionTest(profile: RemoteProfile): RemoteConnecti
     scheduler: profile.scheduler === "ssh" ? null : profile.scheduler,
     linux: true,
     message: `Web 预览模式：已模拟连接 ${user}@${profile.host || "1.2.3.4"} · Linux x86_64`,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+export function mockRemoteHardwareReport(profile: RemoteProfile): RemoteHardwareReport {
+  const user = profile.username.trim() || "root";
+  return {
+    ok: true,
+    host: profile.host || "1.2.3.4",
+    user,
+    os: "Linux",
+    hostname: "mock-node01",
+    cpu: {
+      summary: "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz · 64 逻辑核",
+      detail:
+        "Architecture:        x86_64\nModel name:          Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz\nCPU(s):              64\nSocket(s):           2\nCore(s) per socket:  16\nThread(s) per core:  2\nCPU max MHz:         3200.0000"
+    },
+    memory: {
+      summary: "总 251Gi · 已用 38Gi · 可用 210Gi",
+      detail:
+        "              total        used        free      shared  buff/cache   available\nMem:          251Gi        38Gi       180Gi       1.2Gi        33Gi       210Gi\nSwap:         8.0Gi          0B       8.0Gi"
+    },
+    gpu: {
+      summary: "2 项：NVIDIA A100-SXM4-40GB、NVIDIA A100-SXM4-40GB",
+      detail:
+        "0, NVIDIA A100-SXM4-40GB, 40960 MiB, 1024 MiB, 535.104.05\n1, NVIDIA A100-SXM4-40GB, 40960 MiB, 0 MiB, 535.104.05"
+    },
+    disk: {
+      summary: "根分区 1.8T · 已用 420G (24%)",
+      detail:
+        "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  1.8T  420G  1.3T  24% /\n/dev/nvme1n1    7.0T  2.1T  4.6T  32% /scratch"
+    },
+    message: `Web 预览模式：已模拟读取 ${user}@${profile.host || "1.2.3.4"} 的硬件信息。`,
     checkedAt: new Date().toISOString()
   };
 }

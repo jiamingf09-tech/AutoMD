@@ -799,6 +799,35 @@ pub struct RemoteConnectionTest {
     pub checked_at: DateTime<Utc>,
 }
 
+/// A single hardware category in a [`RemoteHardwareReport`]. `summary` is a
+/// short, best-effort one-liner; `detail` is the raw command output for that
+/// category, shown verbatim in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHardwareSection {
+    pub summary: String,
+    pub detail: String,
+}
+
+/// Result of `query_remote_hardware`: a one-shot, non-persisted snapshot of a
+/// remote host's CPU / memory / GPU / disk. Every call re-runs the probe over
+/// SSH; the result is never written to disk or cached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHardwareReport {
+    pub ok: bool,
+    pub host: String,
+    pub user: Option<String>,
+    pub os: Option<String>,
+    pub hostname: Option<String>,
+    pub cpu: RemoteHardwareSection,
+    pub memory: RemoteHardwareSection,
+    pub gpu: RemoteHardwareSection,
+    pub disk: RemoteHardwareSection,
+    pub message: String,
+    pub checked_at: DateTime<Utc>,
+}
+
 /// One line item in the remote-submit preflight checklist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

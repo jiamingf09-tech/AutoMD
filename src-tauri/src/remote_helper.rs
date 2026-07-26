@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::time::Duration;
 use thiserror::Error;
 
-pub const HELPER_VERSION: &str = "0.1.1";
+pub const HELPER_VERSION: &str = "0.1.5";
 
 #[derive(Debug, Error)]
 pub enum RemoteHelperError {
@@ -66,7 +66,7 @@ pub fn bash_helper_script() -> &'static str {
     r#"#!/usr/bin/env bash
 set -euo pipefail
 
-helper_version="0.1.1"
+helper_version="0.1.5"
 cmd="${1:-probe}"
 shift || true
 
@@ -78,9 +78,9 @@ probe_version() {
   executable="$1"
   candidate="$2"
   case "$candidate" in
-    lmp|lmp_*|lmp-*) raw="$("$executable" -h 2>&1 || true)" ;;
-    tleap|sander|cpptraj|antechamber|parmchk2) raw="$("$executable" -h 2>&1 || true)" ;;
-    *) raw="$("$executable" --version 2>&1 || true)" ;;
+    lmp|lmp_*|lmp-*) raw="$("$executable" -h </dev/null 2>&1 || true)" ;;
+    tleap|sander|cpptraj|antechamber|parmchk2) raw="$("$executable" -h </dev/null 2>&1 || true)" ;;
+    *) raw="$("$executable" --version </dev/null 2>&1 || true)" ;;
   esac
   printf '%s\n' "$raw" | awk -v candidate="$candidate" '
     {
@@ -90,6 +90,12 @@ probe_version() {
       if (candidate ~ /^lmp/ && (low ~ /lammps/ || low ~ /large-scale atomic/)) { print line; found=1; exit }
       if ((candidate == "tleap" || candidate == "sander" || candidate == "cpptraj" || candidate == "antechamber" || candidate == "parmchk2") &&
           (low ~ /amber/ || low ~ /leap/ || low ~ /tleap/ || low ~ /sander/ || low ~ /cpptraj/)) { print line; found=1; exit }
+      if (low ~ /version[[:space:]]+[0-9]/) {
+        gsub(/^[ #]+|[ #]+$/, "", line)
+        print line
+        found=1
+        exit
+      }
       if (first == "") first=line
     }
     END {
@@ -265,6 +271,17 @@ ${python_candidates}
 PYTHONS
         continue
       fi
+      expanded_candidate="$candidate"
+      case "$expanded_candidate" in
+        "~/"*) expanded_candidate="$HOME/${expanded_candidate#\~/}" ;;
+        '$HOME/'*) expanded_candidate="$HOME/${expanded_candidate#\$HOME/}" ;;
+      esac
+      if [[ "$expanded_candidate" == */* ]] && [ -x "$expanded_candidate" ]; then
+        candidate_name="$(basename "$expanded_candidate")"
+        version="$(probe_version "$expanded_candidate" "$candidate_name" | awk 'NR==1 { printf "%s", $0; exit }' | json_escape || true)"
+        printf '{"found":true,"path":"%s","version":"%s","platform":"%s","arch":"%s"}\n' "$expanded_candidate" "$version" "$platform" "$arch"
+        exit 0
+      fi
       if command -v "$candidate" >/dev/null 2>&1; then
         path="$(command -v "$candidate")"
         version="$(probe_version "$path" "$candidate" | awk 'NR==1 { printf "%s", $0; exit }' | json_escape || true)"
@@ -358,7 +375,7 @@ param(
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$Rest
 )
-$helperVersion = "0.1.1"
+$helperVersion = "0.1.5"
 if ($Command -eq "probe") {
   $cpu = [Environment]::ProcessorCount
   $memory = 0
@@ -716,6 +733,7 @@ mod tests {
         assert!(bash.contains("install_managed_micromamba"));
         assert!(bash.contains("micro.mamba.pm/api/micromamba"));
         assert!(bash.contains("python module:"));
+        assert!(bash.contains("expanded_candidate"));
         assert!(bash.contains("\"$HOME\"/.automd/engines/*/bin/python"));
         assert!(bash.contains("no declared engine entrypoint"));
         let ps = powershell_helper_script();

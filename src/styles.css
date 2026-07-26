@@ -1122,6 +1122,155 @@ ul {
   background: #c23b2f;
 }
 
+/* --- Remote hardware report modal (one-shot, non-persisted) --- */
+.hardware-modal {
+  width: min(720px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.hardware-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hardware-modal-head h3 {
+  margin: 0;
+}
+
+.hw-host {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.hw-close {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--text-3);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.hw-close:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.hw-body {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 12px;
+}
+
+.hw-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.hw-meta strong {
+  color: var(--text-2);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.hw-sections {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.hw-section {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.hw-section-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brand-strong);
+}
+
+.hw-summary {
+  color: var(--text);
+  font-weight: 700;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.hw-detail {
+  margin: 0;
+  max-height: 168px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  padding: 8px 10px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.hw-state {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  align-content: center;
+  min-height: 160px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.hw-state-error {
+  justify-items: start;
+  text-align: left;
+  color: var(--danger);
+}
+
+.hw-state-error strong {
+  font-size: 14px;
+}
+
+.hw-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--brand);
+  animation: hw-spin 0.8s linear infinite;
+}
+
+@keyframes hw-spin {
+  to { transform: rotate(360deg); }
+}
+
+.hw-actions {
+  justify-content: space-between;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

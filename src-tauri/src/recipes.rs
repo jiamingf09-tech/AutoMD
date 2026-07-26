@@ -944,7 +944,7 @@ source_dir="tinker-${{version}}"
 build_dir="build-tinker-${{version}}"
 
 jsonish_log() {{
-  printf '[AutoMD Tinker] %s\n' "$*"
+  printf '[AutoMD Tinker] %s\n' "$*" >&2
 }}
 
 detect_micromamba_subdir() {{

@@ -45,6 +45,7 @@ import type {
   ExportedReport,
   RemoteAuthMethod,
   RemoteConnectionTest,
+  RemoteHardwareReport,
   RemoteExecutionPackage,
   RemoteHelperStatus,
   RemoteJobSnapshot,
@@ -270,6 +271,79 @@ function DeleteStructureModal({ structure, deleting, onCancel, onConfirm }: { st
       onCancel={onCancel}
       onConfirm={onConfirm}
     />
+  );
+}
+
+/** One-shot remote hardware report. Read-only, never persists; each open/refresh
+ *  sends a fresh query. */
+function HardwareReportModal({ loading, report, error, hostLabel, onRefresh, onClose }: {
+  loading: boolean;
+  report: RemoteHardwareReport | null;
+  error: string | null;
+  hostLabel: string;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") { e.preventDefault(); onClose(); } }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const sections = report && report.ok ? [
+    { label: "CPU", section: report.cpu },
+    { label: "内存", section: report.memory },
+    { label: "显卡 GPU", section: report.gpu },
+    { label: "硬盘", section: report.disk }
+  ] : [];
+  const failMessage = error ?? (report && !report.ok ? report.message : null);
+  return (
+    <div className="modal-overlay" role="presentation" onMouseDown={onClose}>
+      <div className="modal-dialog hardware-modal" role="dialog" aria-modal="true" aria-labelledby="hw-title" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="hardware-modal-head">
+          <div>
+            <h3 id="hw-title">远程硬件性能</h3>
+            <p className="muted hw-host mono">{hostLabel}</p>
+          </div>
+          <button type="button" className="hw-close" onClick={onClose} aria-label="关闭">✕</button>
+        </div>
+
+        <div className="hw-body">
+          {loading ? (
+            <div className="hw-state">
+              <span className="hw-spinner" aria-hidden="true" />
+              <span>正在向远程主机发送查询指令…</span>
+            </div>
+          ) : failMessage ? (
+            <div className="hw-state hw-state-error">
+              <strong>查询失败</strong>
+              <span>{failMessage}</span>
+            </div>
+          ) : report ? (
+            <>
+              <div className="hw-meta">
+                {report.hostname ? <span><strong>主机名</strong> {report.hostname}</span> : null}
+                {report.os ? <span><strong>系统</strong> {report.os}</span> : null}
+                <span><strong>查询时间</strong> {new Date(report.checkedAt).toLocaleString()}</span>
+              </div>
+              <div className="hw-sections">
+                {sections.map(({ label, section }) => (
+                  <div key={label} className="hw-section">
+                    <div className="hw-section-label">{label}</div>
+                    <div className="hw-summary">{section.summary}</div>
+                    {section.detail.trim() ? <pre className="hw-detail mono">{section.detail.trim()}</pre> : null}
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        <div className="modal-actions hw-actions">
+          <button type="button" onClick={onRefresh} disabled={loading}>{loading ? "查询中…" : "重新查询"}</button>
+          <button type="button" className="modal-cancel" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -770,6 +844,9 @@ function App() {
   // In-app SSH connect → submit → monitor → fetch (session-only password).
   const [remotePassword, setRemotePassword] = useState("");
   const [remotePasswordReadyProfileIds, setRemotePasswordReadyProfileIds] = useState<string[]>([]);
+  // Remote profiles that completed a successful connection test this session.
+  // Only these (plus the local machine) are shown as engine target devices.
+  const [connectedRemoteProfileIds, setConnectedRemoteProfileIds] = useState<string[]>([]);
   const [remoteConnectionTest, setRemoteConnectionTest] = useState<RemoteConnectionTest | null>(null);
   const [remoteConnecting, setRemoteConnecting] = useState(false);
   const [remotePreflight, setRemotePreflight] = useState<RemoteSubmitPreflight | null>(null);
@@ -860,11 +937,24 @@ function App() {
     };
   }, [selectedEngineTargetId]);
 
+  // Engine target devices visible in the UI: the local machine plus only the
+  // remote profiles connected during this session. Unconnected saved profiles
+  // stay hidden until the user runs a successful "测试连接".
+  const visibleEngineTargets = useMemo(
+    () =>
+      engineTargets.filter(
+        (target) =>
+          target.kind === "local" ||
+          (target.profileId != null && connectedRemoteProfileIds.includes(target.profileId))
+      ),
+    [engineTargets, connectedRemoteProfileIds]
+  );
+
   useEffect(() => {
-    if (engineTargets.length > 0 && !engineTargets.some((target) => target.id === selectedEngineTargetId)) {
-      setSelectedEngineTargetId(engineTargets[0].id);
+    if (visibleEngineTargets.length > 0 && !visibleEngineTargets.some((target) => target.id === selectedEngineTargetId)) {
+      setSelectedEngineTargetId(visibleEngineTargets[0].id);
     }
-  }, [engineTargets, selectedEngineTargetId]);
+  }, [visibleEngineTargets, selectedEngineTargetId]);
 
   // Native macOS menu -> frontend actions (only inside Tauri).
   useEffect(() => {
@@ -953,8 +1043,8 @@ function App() {
     [engines, selectedEngineId]
   );
   const selectedEngineTarget = useMemo(
-    () => engineTargets.find((target) => target.id === selectedEngineTargetId) ?? engineTargets[0] ?? null,
-    [engineTargets, selectedEngineTargetId]
+    () => visibleEngineTargets.find((target) => target.id === selectedEngineTargetId) ?? visibleEngineTargets[0] ?? null,
+    [visibleEngineTargets, selectedEngineTargetId]
   );
   const selectedPlugin = pluginRegistry?.manifests.find((manifest) => manifest.id === selectedPluginId) ?? null;
   const enabledUserPlugins = pluginRegistry?.manifests.filter((manifest) => manifest.origin === "user" && manifest.enabled) ?? [];
@@ -2844,6 +2934,7 @@ function App() {
         setRemoteProfiles((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
         setSelectedRemoteProfileId(saved.id);
         setRemoteProfileDraft(saved);
+        setConnectedRemoteProfileIds((ids) => ids.includes(saved.id) ? ids : [...ids, saved.id]);
         if (saved.authMethod === "password" && remotePassword) {
           markRemotePasswordReady(saved.id);
         }
@@ -2882,6 +2973,12 @@ function App() {
     } finally {
       setRemoteConnecting(false);
     }
+  }
+
+  // One-shot remote hardware probe. Sends a fresh query every call and returns
+  // the report to the caller; nothing is persisted (the modal owns the result).
+  async function queryRemoteHardware(profile: RemoteProfile): Promise<RemoteHardwareReport> {
+    return api.queryRemoteHardware(profile, remotePasswordArg());
   }
 
   async function runRemotePreflight() {
@@ -3388,7 +3485,7 @@ function App() {
         {activeTab === "engines" && (
           <EnginesPanel
             engines={engines}
-            engineTargets={engineTargets}
+            engineTargets={visibleEngineTargets}
             selectedEngineTargetId={selectedEngineTargetId}
             setSelectedEngineTargetId={setSelectedEngineTargetId}
             selectedEngineId={selectedEngineId}
@@ -3498,6 +3595,7 @@ function App() {
             remoteConnectionTest={remoteConnectionTest}
             remoteConnecting={remoteConnecting}
             testRemoteConnection={testRemoteConnection}
+            queryRemoteHardware={queryRemoteHardware}
             saveRemoteProfile={saveRemoteProfile}
             deleteRemoteProfile={deleteRemoteProfile}
             engineTargets={engineTargets}
@@ -6705,6 +6803,7 @@ function RemotePanel({
   remoteConnectionTest,
   remoteConnecting,
   testRemoteConnection,
+  queryRemoteHardware,
   saveRemoteProfile,
   deleteRemoteProfile,
   engineTargets,
@@ -6761,6 +6860,7 @@ function RemotePanel({
   remoteConnectionTest: RemoteConnectionTest | null;
   remoteConnecting: boolean;
   testRemoteConnection: () => void;
+  queryRemoteHardware: (profile: RemoteProfile) => Promise<RemoteHardwareReport>;
   saveRemoteProfile: (profile: RemoteProfile) => void;
   deleteRemoteProfile: (id: string) => void;
   engineTargets: EngineTarget[];
@@ -6811,6 +6911,31 @@ function RemotePanel({
   const connected = remoteConnectionTest?.ok ?? false;
   const draftSaved = remoteProfiles.some((profile) => profile.id === draft.id);
   const isTemplate = draft.id.endsWith("-template");
+  // One-shot hardware query modal: opened by the button, never persisted. Each
+  // press re-runs the query and discards the previous result.
+  const [hwOpen, setHwOpen] = useState(false);
+  const [hwLoading, setHwLoading] = useState(false);
+  const [hwReport, setHwReport] = useState<RemoteHardwareReport | null>(null);
+  const [hwError, setHwError] = useState<string | null>(null);
+  async function runHardwareQuery() {
+    setHwOpen(true);
+    setHwLoading(true);
+    setHwReport(null);
+    setHwError(null);
+    try {
+      const report = await queryRemoteHardware(draft);
+      setHwReport(report);
+    } catch (caught) {
+      setHwError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setHwLoading(false);
+    }
+  }
+  function closeHardwareModal() {
+    setHwOpen(false);
+    setHwReport(null);
+    setHwError(null);
+  }
   const helperTarget = engineTargets.find((target) => target.id === `remote:${draft.id}`) ?? null;
   const helperState = helperTarget?.status ?? "missing";
   const helperReady = helperState === "ready" || helperState === "outdated";
@@ -7047,7 +7172,28 @@ function RemotePanel({
                 保存为 profile
               </button>
             )}
+            {connected ? (
+              <button
+                type="button"
+                onClick={runHardwareQuery}
+                disabled={hwLoading}
+                title="发送一次性查询指令，读取该远程主机的 CPU / 内存 / 显卡 / 硬盘，不保存结果"
+              >
+                {hwLoading ? "查询中…" : "查询硬件性能"}
+              </button>
+            ) : null}
           </div>
+
+          {hwOpen ? (
+            <HardwareReportModal
+              loading={hwLoading}
+              report={hwReport}
+              error={hwError}
+              hostLabel={`${draft.username ? `${draft.username}@` : ""}${draft.host || "远程主机"}`}
+              onRefresh={runHardwareQuery}
+              onClose={closeHardwareModal}
+            />
+          ) : null}
 
           {deleteProfileTarget ? (
             <DeleteModal

@@ -46,6 +46,7 @@ import type {
   ProjectTextFileWriteRequest,
   ProjectSummary,
   RemoteConnectionTest,
+  RemoteHardwareReport,
   RemoteExecutionPackage,
   RemoteExecutionRequest,
   RemoteFetchRequest,
@@ -98,6 +99,7 @@ import {
   mockRecipeExportResult,
   mockDiagnostics,
   mockRemoteConnectionTest,
+  mockRemoteHardwareReport,
   mockRemoteExecutionPackage,
   mockRemoteJobSnapshot,
   mockRemotePreflight,
@@ -386,6 +388,10 @@ export const api = {
   testRemoteConnection: (profile: RemoteProfile, password?: string | null) =>
     call<RemoteConnectionTest>("test_remote_connection", { profile, password: password ?? null }, () =>
       mockRemoteConnectionTest(profile)
+    ),
+  queryRemoteHardware: (profile: RemoteProfile, password?: string | null) =>
+    call<RemoteHardwareReport>("query_remote_hardware", { profile, password: password ?? null }, () =>
+      mockRemoteHardwareReport(profile)
     ),
   preflightRemoteSubmit: (request: RemotePreflightRequest) =>
     call<RemoteSubmitPreflight>("preflight_remote_submit", { request }, () => mockRemotePreflight(request)),

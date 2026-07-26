@@ -519,6 +519,25 @@ export interface RemoteConnectionTest {
   checkedAt: string;
 }
 
+export interface RemoteHardwareSection {
+  summary: string;
+  detail: string;
+}
+
+export interface RemoteHardwareReport {
+  ok: boolean;
+  host: string;
+  user?: string | null;
+  os?: string | null;
+  hostname?: string | null;
+  cpu: RemoteHardwareSection;
+  memory: RemoteHardwareSection;
+  gpu: RemoteHardwareSection;
+  disk: RemoteHardwareSection;
+  message: string;
+  checkedAt: string;
+}
+
 export interface PreflightCheck {
   id: string;
   label: string;

@@ -1342,6 +1342,34 @@ fn source_build_record(
     })
 }
 
+fn remote_source_build_scan_candidates(
+    engine_id: &str,
+    options: &BuildRecipeOptions,
+    executable_names: &[String],
+) -> Vec<String> {
+    let raw_prefix = options
+        .install_prefix
+        .clone()
+        .unwrap_or_else(|| format!("~/.local/automd/{engine_id}"));
+    let normalized_prefix = raw_prefix
+        .strip_prefix("$HOME/")
+        .map(|suffix| format!("~/{suffix}"))
+        .or_else(|| {
+            raw_prefix
+                .strip_prefix("${HOME}/")
+                .map(|suffix| format!("~/{suffix}"))
+        })
+        .unwrap_or(raw_prefix)
+        .trim_end_matches('/')
+        .to_string();
+    let mut candidates = executable_names
+        .iter()
+        .map(|name| format!("{normalized_prefix}/bin/{name}"))
+        .collect::<Vec<_>>();
+    candidates.extend(executable_names.iter().cloned());
+    candidates
+}
+
 fn run_local_build_for_deploy(
     request: &EngineDeployRequest,
 ) -> Result<BuildWorkflowResult, String> {
@@ -1572,10 +1600,15 @@ async fn install_or_build_engine(
             .map_err(|error| error.to_string())?;
             let capability = engine_registry::detect_engine_by_id(&request.engine_id)
                 .ok_or_else(|| format!("未知引擎：{}", request.engine_id))?;
+            let scan_candidates = remote_source_build_scan_candidates(
+                &request.engine_id,
+                &request.build_options,
+                &capability.executable_names,
+            );
             let record = remote_helper::scan_engine(
                 &profile,
                 install_path,
-                &capability.executable_names,
+                &scan_candidates,
                 helper.platform.as_ref(),
                 password.as_deref(),
             )
@@ -2511,6 +2544,262 @@ async fn test_remote_connection(
         persist_remote_connection_metadata(&state, &profile, &test)?;
     }
     Ok(test)
+}
+
+/// Portable best-effort probe that prints CPU / memory / GPU / disk facts in
+/// marker-delimited sections. Works on Linux (primary) and degrades on macOS.
+const HARDWARE_PROBE: &str = r#"echo automd-hw-ok
+echo '@@AUTOMD@@os'
+uname -srmn 2>/dev/null
+echo '@@AUTOMD@@cpu'
+if command -v lscpu >/dev/null 2>&1; then lscpu 2>/dev/null | grep -E 'Model name|Architecture|^CPU\(s\)|Socket\(s\)|Thread|Core\(s\) per socket|CPU max MHz'; elif [ -r /proc/cpuinfo ]; then echo "logical processors: $(grep -c ^processor /proc/cpuinfo)"; grep -m1 'model name' /proc/cpuinfo | sed 's/model name[[:space:]]*:[[:space:]]*/model: /'; else echo "model: $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"; echo "logical processors: $(sysctl -n hw.ncpu 2>/dev/null)"; fi
+echo '@@AUTOMD@@mem'
+if command -v free >/dev/null 2>&1; then free -h 2>/dev/null; elif [ -r /proc/meminfo ]; then grep -E 'MemTotal|MemAvailable|SwapTotal' /proc/meminfo; else echo "physical memory bytes: $(sysctl -n hw.memsize 2>/dev/null)"; fi
+echo '@@AUTOMD@@gpu'
+if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi --query-gpu=index,name,memory.total,memory.used,driver_version --format=csv,noheader 2>/dev/null || nvidia-smi -L 2>/dev/null; elif command -v rocm-smi >/dev/null 2>&1; then rocm-smi --showproductname 2>/dev/null; elif command -v lspci >/dev/null 2>&1; then lspci 2>/dev/null | grep -Ei 'vga|3d controller|display'; else echo '__none__'; fi
+echo '@@AUTOMD@@disk'
+{ df -h -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null || df -h 2>/dev/null; } | head -n 15
+echo '@@AUTOMD@@end'"#;
+
+fn split_hardware_sections(stdout: &str) -> std::collections::HashMap<String, String> {
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut current: Option<String> = None;
+    for line in stdout.lines() {
+        if let Some(rest) = line.trim_end().strip_prefix("@@AUTOMD@@") {
+            current = Some(rest.to_string());
+            continue;
+        }
+        if let Some(key) = &current {
+            let entry = map.entry(key.clone()).or_default();
+            entry.push_str(line);
+            entry.push('\n');
+        }
+    }
+    map
+}
+
+fn hardware_section(map: &std::collections::HashMap<String, String>, key: &str) -> String {
+    map.get(key).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+fn summarize_cpu(detail: &str) -> String {
+    let model = detail.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("model name") || lower.trim_start().starts_with("model:") {
+            line.split(':').nth(1).map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+    let cores = detail.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if trimmed.starts_with("CPU(s):") || lower.starts_with("logical processors") {
+            trimmed.split(':').nth(1).map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    });
+    match (model, cores) {
+        (Some(m), Some(c)) => format!("{m} · {c} 逻辑核"),
+        (Some(m), None) => m,
+        (None, Some(c)) => format!("{c} 逻辑核"),
+        (None, None) => detail
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("未获取到 CPU 信息")
+            .trim()
+            .to_string(),
+    }
+}
+
+fn summarize_memory(detail: &str) -> String {
+    // `free -h` => "Mem:  62Gi  10Gi  40Gi  ..." (total used free shared buff/cache available)
+    if let Some(line) = detail.lines().find(|l| l.trim_start().starts_with("Mem:")) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let total = cols.get(1).copied().unwrap_or("?");
+        let used = cols.get(2).copied().unwrap_or("?");
+        let avail = cols.get(6).or_else(|| cols.get(3)).copied().unwrap_or("?");
+        return format!("总 {total} · 已用 {used} · 可用 {avail}");
+    }
+    // `/proc/meminfo` => "MemTotal:  65802176 kB"
+    if let Some(line) = detail.lines().find(|l| l.trim_start().starts_with("MemTotal")) {
+        if let Some(kb) = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            return format!("总内存 {:.1} GiB", kb / 1024.0 / 1024.0);
+        }
+    }
+    if let Some(line) = detail
+        .lines()
+        .find(|l| l.trim_start().starts_with("physical memory bytes"))
+    {
+        if let Some(bytes) = line
+            .split(':')
+            .nth(1)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
+            return format!("物理内存 {:.1} GiB", bytes / 1024.0 / 1024.0 / 1024.0);
+        }
+    }
+    detail
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("未获取到内存信息")
+        .trim()
+        .to_string()
+}
+
+fn summarize_gpu(detail: &str) -> String {
+    let lines: Vec<&str> = detail
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "__none__")
+        .collect();
+    if lines.is_empty() {
+        return "未检测到 GPU（无 nvidia-smi / rocm-smi / lspci，或没有独立显卡）".to_string();
+    }
+    let names: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            if line.contains(", ") {
+                // nvidia-smi csv: "0, NVIDIA A100-SXM4-40GB, 40960 MiB, 0 MiB, 535.x"
+                line.split(',').nth(1).map(|s| s.trim().to_string()).unwrap_or_else(|| line.to_string())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    format!("{} 项：{}", names.len(), names.join("、"))
+}
+
+fn summarize_disk(detail: &str) -> String {
+    // Prefer the root mount; fall back to the first data row.
+    let root = detail.lines().skip(1).find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.last() == Some(&"/") && cols.len() >= 5 {
+            Some(format!("根分区 {} · 已用 {} ({})", cols[1], cols[2], cols[4]))
+        } else {
+            None
+        }
+    });
+    root.unwrap_or_else(|| {
+        detail
+            .lines()
+            .nth(1)
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| "未获取到磁盘信息".to_string())
+    })
+}
+
+fn empty_hardware_section() -> RemoteHardwareSection {
+    RemoteHardwareSection {
+        summary: "未获取到".to_string(),
+        detail: String::new(),
+    }
+}
+
+#[tauri::command]
+async fn query_remote_hardware(
+    profile: RemoteProfile,
+    password: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteHardwareReport, String> {
+    let host = profile.host.clone();
+    if host.trim().is_empty() {
+        return Err("请先填写主机/IP 并测试连接，再查询硬件。".to_string());
+    }
+    let password_for_probe = resolve_remote_password(&state, &profile, password.clone());
+    if profile.auth_method == RemoteAuthMethod::Password && password_for_probe.is_none() {
+        return Err("该 profile 使用密码认证，请先测试连接（缓存密码）后再查询硬件。".to_string());
+    }
+    let user = {
+        let trimmed = profile.username.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    let probe_profile = profile.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        ssh::run_remote_timeout(
+            &probe_profile,
+            password_for_probe.as_deref(),
+            HARDWARE_PROBE,
+            std::time::Duration::from_secs(25),
+        )
+    })
+    .await
+    .map_err(|error| format!("硬件查询任务执行失败：{error}"))?;
+
+    let where_at = match &user {
+        Some(u) => format!("{u}@{host}"),
+        None => host.clone(),
+    };
+    match outcome {
+        Ok(out) if out.success && out.stdout.contains("automd-hw-ok") => {
+            let sections = split_hardware_sections(&out.stdout);
+            let os_line = hardware_section(&sections, "os");
+            let os_tokens: Vec<&str> = os_line.split_whitespace().collect();
+            let os = os_tokens.first().map(|s| s.to_string());
+            let hostname = os_tokens.get(1).map(|s| s.to_string());
+            let cpu_detail = hardware_section(&sections, "cpu");
+            let mem_detail = hardware_section(&sections, "mem");
+            let gpu_detail = hardware_section(&sections, "gpu");
+            let disk_detail = hardware_section(&sections, "disk");
+            Ok(RemoteHardwareReport {
+                ok: true,
+                host,
+                user,
+                os,
+                hostname,
+                cpu: RemoteHardwareSection {
+                    summary: summarize_cpu(&cpu_detail),
+                    detail: cpu_detail,
+                },
+                memory: RemoteHardwareSection {
+                    summary: summarize_memory(&mem_detail),
+                    detail: mem_detail,
+                },
+                gpu: RemoteHardwareSection {
+                    summary: summarize_gpu(&gpu_detail),
+                    detail: if gpu_detail.trim() == "__none__" { String::new() } else { gpu_detail },
+                },
+                disk: RemoteHardwareSection {
+                    summary: summarize_disk(&disk_detail),
+                    detail: disk_detail,
+                },
+                message: format!("已读取 {where_at} 的硬件信息。"),
+                checked_at: chrono::Utc::now(),
+            })
+        }
+        Ok(out) => Ok(RemoteHardwareReport {
+            ok: false,
+            host,
+            user,
+            os: None,
+            hostname: None,
+            cpu: empty_hardware_section(),
+            memory: empty_hardware_section(),
+            gpu: empty_hardware_section(),
+            disk: empty_hardware_section(),
+            message: ssh::classify_connection_error(&out.combined()),
+            checked_at: chrono::Utc::now(),
+        }),
+        Err(error) => Ok(RemoteHardwareReport {
+            ok: false,
+            host,
+            user,
+            os: None,
+            hostname: None,
+            cpu: empty_hardware_section(),
+            memory: empty_hardware_section(),
+            gpu: empty_hardware_section(),
+            disk: empty_hardware_section(),
+            message: error,
+            checked_at: chrono::Utc::now(),
+        }),
+    }
 }
 
 fn remote_platform_from_os(os: Option<&str>) -> Option<Platform> {
@@ -3818,6 +4107,7 @@ pub fn run() {
             parse_remote_job_status,
             run_remote_workflow_step,
             test_remote_connection,
+            query_remote_hardware,
             preflight_remote_submit,
             submit_remote_job,
             poll_remote_job,
