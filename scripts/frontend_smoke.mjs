@@ -136,12 +136,13 @@ const requiredCiText = [
   "Desktop installers",
   "deb,appimage",
   "nsis,msi",
-  "dmg",
+  // macOS CI ships a zipped .app (headless DMG create is unreliable on runners)
+  "bundles: app",
   "bundle/deb/*.deb",
   "bundle/appimage/*.AppImage",
   "bundle/nsis/*-setup.exe",
   "bundle/msi/*.msi",
-  "bundle/dmg/*.dmg",
+  "AutoMD_*.app.zip",
   "codesign --verify",
   "actions/upload-artifact@v4",
 ];
